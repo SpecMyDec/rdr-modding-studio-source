@@ -1,0 +1,2632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RDR Modding Studio</title>
+<style>
+  /* ── WORKBENCH ────────────────────────────────────────────────────
+     Cool neutral greys with a cold blue accent, the way a DCC tool is
+     lit. The greys carry a slight blue bias rather than being pure —
+     a pure mid-grey reads as unconsidered.
+
+     Semantic colour (--grn / --red / --warn) is kept separate from the
+     accent so "this is selected" and "this is broken" never look alike.
+     Everything below is derived from these; there are no loose hexes in
+     the stylesheet, so a palette change is this block only.
+     ───────────────────────────────────────────────────────────────── */
+  :root{
+    --bg:#1e2124; --bg2:#252a2e; --bg3:#31373c; --line:#3d4449;
+    --ink:#ccd2d7; --dim:#7f888f; --gold:#5b9dd9; --rust:#e0955a;
+    --grn:#6fbf7a; --red:#d9645a; --blue:#5b9dd9; --warn:#d9a94f;
+
+    /* ── INK ──────────────────────────────────────────────────────
+       Three of the greys this stylesheet used for READING failed
+       WCAG AA against the surface they sit on: --faint at 2.47:1 was
+       carrying the nav's group labels, and --dim at 4.48:1 was
+       carrying every caption in the product. --dim keeps its value
+       and its job -- rules, dots, disabled marks -- and prose moves
+       to --dim-ink. --faint is now a HAIRLINE colour and must never
+       be used for text again.
+       ───────────────────────────────────────────────────────────── */
+    --dim-ink:#98a2a9;     /* 6.22:1 on --bg  — readable captions */
+    --nav-label:#9aa4ac;   /* 5.71:1 on --bg2 — nav group labels */
+    --nav-idle:#aab3ba;    /* 6.81:1 on --bg2 — inactive tabs */
+    --title:#e4eaef;       /* 13.34:1 on --bg — the top of the ramp */
+    /* --red on a --bg3 button face is under AA, so a destructive
+       control gets its own ink rather than borrowing the fill's. */
+    --danger-ink:#e8837a;  /* 6.13:1 on --bg, 4.57:1 on --bg3 */
+    /* "established" used to be the accent blue exactly, which broke
+       this file's own rule that semantic colour stays off the accent:
+       a badge looked like a selection. Violet is the fix. */
+    --conf-est:#a68fd6;    /* 5.19:1 */
+    --conf-dead:#9aa4ac;   /* 5.71:1 — drained of hue, not of legibility */
+
+    /* ── THE RAMP ─────────────────────────────────────────────────
+       DESIGN-REVIEW-2026-10-01: two heading levels and a floor.
+       panel-title 11px/600 caps (.panel h2) · section 13px/600 (h3) ·
+       body 13px · meta 11px · mono 12px. Nothing below 11px, nothing
+       above 13px except a dialog title (15px). No serif.
+       ───────────────────────────────────────────────────────────── */
+    --t-display:600 15px/1.3 "Segoe UI",system-ui,sans-serif;
+    --t-head:600 15px/1.3 "Segoe UI",system-ui,sans-serif;   /* dialog titles only */
+    --t-section:600 13px/1.35 "Segoe UI",system-ui,sans-serif;
+    --t-subhead:600 12px/1.3 "Segoe UI",system-ui,sans-serif;
+    --t-body:400 13px/1.45 "Segoe UI",system-ui,sans-serif;
+    --t-meta:400 11px/1.5 "Segoe UI",system-ui,sans-serif;
+    --t-badge:600 11px/1.4 "Segoe UI",system-ui,sans-serif;
+    --t-mono:12px/1.45 Consolas,"Cascadia Mono",monospace;
+
+    /* surfaces */
+    --void:#171a1c;        /* the 3D viewport well */
+    --well:#14171a;        /* inset meters, code wells */
+    --bg2b:#212528;
+    --bg2c:#2a2f33;
+    --hover:#394046;
+    --grouphd:#22262a;
+
+    /* selection + accent, derived from --gold */
+    --selbg:#2f4657;
+    --accent-bg:#2c4a63;
+    --accent-fg:#e4f0fa;
+
+    /* translucent overlays (legend, HUD, dialogs) */
+    --sheet-a:#252a2ed9;
+    --sheet-b:#252a2ecc;
+    --sheet-c:#252a2eee;
+    --sheet-d:#252a2e99;
+    --void-a:#171a1ccc;
+
+    /* semantic backgrounds */
+    --ok-bg:#2c4536;
+    --bad-bg:#4d2b28;
+    --bad-fg:#f6dcd8;
+    --alarm-bg:#5a2320;
+    --alarm-fg:#ffdcd4;
+    --faint:#5c666d;
+  }
+  /* Native controls -- scrollbars, <audio>, range sliders, date pickers --
+     follow the page's scheme. Without this every scrolling list had a white
+     track on a dark panel. Daylight sets --scheme:light. */
+  html{color-scheme:var(--scheme, dark)}
+  *{scrollbar-width:thin; scrollbar-color:var(--line) transparent}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--ink); overflow:hidden;
+    font:13px/1.45 "Segoe UI",system-ui,sans-serif;
+  }
+  button{
+    font:inherit; color:var(--ink); background:var(--bg3);
+    border:1px solid var(--line); border-radius:4px;
+    padding:5px 10px; cursor:pointer;
+  }
+  button:hover{background:var(--hover); border-color:var(--gold)}
+  button:disabled{opacity:.4; cursor:default}
+  button.primary{background:var(--accent-bg); border-color:var(--gold); color:var(--accent-fg)}
+  /* A destructive button used to be byte-identical to a safe one until the
+     pointer was already on it -- `Restore vanilla` and `Undo` painted the
+     same eight properties. Danger is now visible AT REST, before the click,
+     which is the only moment at which it is any use. */
+  button.danger{color:var(--danger-ink); border-color:var(--danger-ink)}
+  button.danger:hover{
+    background:var(--alarm-bg); border-color:var(--red); color:var(--alarm-fg);
+  }
+  /* 193 buttons fell back to the browser's own orange focus ring, which is
+     the one colour this palette does not contain. */
+  button:focus-visible,input:focus-visible,select:focus-visible,
+  textarea:focus-visible,[tabindex]:focus-visible{
+    outline:2px solid var(--gold); outline-offset:1px;
+  }
+  input,select,textarea{
+    font:inherit; color:var(--ink); background:var(--well);
+    border:1px solid var(--line); border-radius:4px; padding:4px 6px;
+  }
+  input:focus,select:focus,textarea:focus{outline:1px solid var(--gold)}
+
+  /* ---------------------------------------------------------- layout */
+  #app{display:flex; flex-direction:column; height:100%}
+  /* The bar now carries the two facts every panel below is scoped to -- which
+     level, and what is on the working disc -- so it buys the room back by
+     dropping the decoration. "Red Dead Revolver - SLUS-20500" told nobody
+     anything they did not already know; the level they are editing does. */
+  header{
+    display:flex; align-items:center; gap:8px; padding:4px 12px;
+    background:var(--bg2b);
+    border-bottom:1px solid var(--line); flex:none; flex-wrap:nowrap;
+    overflow:hidden;
+  }
+  header h1{
+    margin:0; font:600 13px/1 "Segoe UI",system-ui,sans-serif; letter-spacing:.6px;
+    color:var(--gold); white-space:nowrap; flex:none;
+  }
+  header button{padding:5px 9px; white-space:nowrap}
+  header .sub{display:none}
+  header .spacer{flex:1}
+  /* Narrow windows. At half a 1920 screen the disc pill wrapped to four
+     lines, the level button shrank to one letter and Reset to stock went off
+     the right edge. The facts shrink with an ellipsis, the brand and the
+     Ctrl+K label go first -- Ctrl+K is also in the status bar -- and every
+     button stays on screen. */
+  #hdrDisc{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    min-width:0; flex:0 1 auto}
+  #hdrLevel{flex:0 1 auto; min-width:60px}
+  #btnUndo{max-width:260px; overflow:hidden; text-overflow:ellipsis}
+  @media (max-width:1280px){
+    #btnUndo{max-width:150px}
+  }
+  @media (max-width:1100px){
+    header h1{display:none}
+    #btnPalette{display:none}
+    header .hsep{width:6px !important}
+  }
+  .pill{
+    font-size:11px; padding:2px 8px; border-radius:10px;
+    border:1px solid var(--line); color:var(--dim-ink);
+  }
+  .pill.ok{color:var(--grn); border-color:var(--ok-bg)}
+  .pill.bad{color:var(--red); border-color:var(--bad-bg)}
+  .pill.warn{color:var(--warn); border-color:var(--line)}
+  /* Status is a 6px dot, never a glyph: one marker for the whole product. */
+  .pill.ok::before,.pill.bad::before,.pill.warn::before,.sdot{
+    content:""; display:inline-block; width:6px; height:6px; border-radius:50%;
+    background:currentColor; margin-right:6px; vertical-align:1px; flex:none;
+  }
+
+  /* ── NAV: TWO ROWS, 28px EACH ─────────────────────────────────────
+     DESIGN-REVIEW-2026-10-01 A1. It was a permanently open seven-column
+     mega-menu, 103px tall and three-quarters empty. Row 1 is the seven
+     workspaces as tabs; row 2 is the active workspace's modes and then,
+     after a rule, the sub-views of a composite mode (#subnav lives inside
+     <nav> for that). The button markup is unchanged: each .ws is
+     display:contents, so its label and buttons become flex items of <nav>
+     and `order` sorts them onto their row. Ctrl+K still reaches everything
+     in one step. */
+  nav{
+    display:flex; flex-wrap:wrap; align-items:stretch; padding:0 6px;
+    background:var(--bg2); border-bottom:1px solid var(--line); flex:none;
+  }
+  nav .ws{display:contents}
+  nav .wslabel{
+    order:0; display:flex; align-items:center; height:28px; padding:0 12px;
+    font:var(--t-badge); letter-spacing:.8px; text-transform:uppercase;
+    color:var(--nav-label); cursor:pointer; user-select:none; white-space:nowrap;
+    border-bottom:2px solid transparent;
+  }
+  nav .wslabel:hover{color:var(--title)}
+  nav .ws.active .wslabel{color:var(--title); border-bottom-color:var(--gold)}
+  nav .navbreak{order:1; flex-basis:100%; height:0; margin:0 -6px;
+    border-top:1px solid var(--line)}
+  nav button{
+    order:2; align-items:center; height:28px;
+    border:none; border-bottom:2px solid transparent; border-radius:0;
+    background:none; color:var(--nav-idle); padding:0 10px;
+    font-size:13px; white-space:nowrap;
+  }
+  nav button[data-tab]{display:none}
+  nav .ws.active button[data-tab]{display:flex}
+  nav button.on{color:var(--title); font-weight:600; background:none;
+    border-bottom-color:var(--gold)}
+  nav button:hover{background:none; color:var(--title); border-color:transparent}
+  nav button.on:hover{border-bottom-color:var(--gold)}
+  /* Browse-only: dimmed, and the tooltip says so. */
+  nav button.ro{color:var(--dim-ink)}
+  #subnav{
+    order:3; display:none; align-items:stretch; margin-left:8px;
+    padding-left:8px; border-left:1px solid var(--line);
+  }
+  #subnav.on{display:flex}
+  #subnav .slab{display:none}
+  #subnav button{display:flex; font-size:12px}
+
+  /* ── status bar ─────────────────────────────────────────────────── */
+  #statusbar{
+    flex:none; display:flex; align-items:center; gap:12px;
+    padding:0 12px; height:24px;
+    background:var(--bg2); border-top:1px solid var(--line);
+    font:11px/1 Consolas,"Cascadia Mono",monospace; color:var(--dim-ink);
+  }
+  #statusbar .spacer{flex:1}
+  #statusbar .sb{white-space:nowrap; font-variant-numeric:tabular-nums}
+  #statusbar .sb.dim{color:var(--dim-ink)}
+  #statusbar .sb.ok{color:var(--grn)}
+  #statusbar .sb.bad{color:var(--red)}
+  #statusbar .sb.warn{color:var(--warn)}
+  #sbLevel{color:var(--gold)}
+  #statusbar .sbsep{
+    width:1px; height:12px; background:var(--line); flex:none;
+  }
+  #statusbar .sblink{
+    background:none; border:1px solid var(--line); border-radius:3px;
+    color:var(--dim-ink); font:inherit; padding:1px 6px; cursor:pointer;
+  }
+  #statusbar .sblink:hover{color:var(--gold); border-color:var(--gold)}
+
+  main{flex:1; min-height:0; position:relative}
+  .tab{display:none; position:absolute; inset:0}
+  .tab.on{display:flex}
+
+  .panel{
+    background:var(--bg2); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0;
+    /* A panel stacks several sections and any one of them can grow with the
+       level: on TRAIN the Layers list alone is 700px, which pushed "Game
+       lighting" past the bottom edge. Without this the overflow was simply
+       CLIPPED -- no scrollbar, no way to reach it, and nothing to suggest
+       anything was missing. Measured at 102px of content lost. Folding the
+       sections already worked; being able to scroll to them did not. */
+    overflow-y:auto;
+  }
+  .panel.right{border-right:none; border-left:1px solid var(--line)}
+  .panel h2{
+    margin:0; padding:7px 10px; font:var(--t-subhead);
+    letter-spacing:.8px; text-transform:uppercase; color:var(--dim-ink);
+    background:var(--bg3); border-bottom:1px solid var(--line);
+    /* Stuck to the top of the scrolling panel, so the fold toggles stay
+       reachable instead of scrolling away with their own sections. The
+       background is already opaque, which is what makes this safe. */
+    position:sticky; top:0; z-index:2;
+  }
+  .scroll{overflow:auto; flex:1; min-height:0}
+  .pad{padding:8px 10px}
+
+  .row{
+    display:flex; align-items:center; gap:6px;
+    padding:3px 10px; cursor:pointer; border-left:2px solid transparent;
+  }
+  .row:hover{background:var(--bg3)}
+  .row.sel{background:var(--selbg); border-left-color:var(--gold)}
+  .row .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .row .tag{font:var(--t-meta); color:var(--dim-ink); font-variant-numeric:tabular-nums}
+  /* A selected row differs by weight as well as by fill, so the selection
+     survives a colourblind eye and a greyscale screenshot. */
+  .row.sel .nm{font-weight:600; color:var(--title)}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  /* Hierarchy: objects grouped under the file they live in, which is also the
+     slot boundary an edit has to fit inside. */
+  .row.srchead{
+    background:var(--grouphd); color:var(--gold); font-size:11px;
+    position:sticky; top:0; z-index:1;
+  }
+  .row.srchead:hover{background:var(--bg3)}
+  .row.srchead .chev{width:10px; opacity:.7; flex:none}
+  .row.srchead .tag{color:var(--dim-ink)}
+  .row.child{padding-left:22px}
+  /* Per-row show/hide. Visibility used to be per-class only -- all 2,331 AI
+     rooms or none -- so isolating one thing in a busy level was impossible. */
+  .row .eye{
+    flex:none; width:16px; text-align:center; font-size:11px; opacity:0;
+    filter:grayscale(1); transition:opacity .1s;
+  }
+  .row:hover .eye{opacity:.55}
+  .row .eye:hover{opacity:1}
+  .row .eye.off{opacity:.9; filter:none}
+  /* What the game's own name token means, in its own words where possible. */
+  .gloss{
+    padding:4px 10px 6px 22px; font:var(--t-meta);
+    color:var(--dim-ink); background:var(--bg2); border-left:2px solid var(--line);
+  }
+
+  #view{flex:1; position:relative; min-width:0; background:var(--void)}
+  #vpBar{position:absolute; top:8px; left:8px; z-index:5; display:flex;
+         gap:5px; align-items:center}
+  #vpBar button{font-size:11px; padding:2px 9px; background:var(--bg2);
+         border:1px solid var(--line); border-radius:3px; opacity:.85}
+  #vpBar button.on{background:var(--bg2c); border-color:var(--gold);
+         opacity:1}
+  #vpPick{display:flex; gap:0; margin-left:6px}
+  #vpPick button{border-radius:0}
+  #vpPick button:first-child{border-radius:3px 0 0 3px}
+  #vpPick button:last-child{border-radius:0 3px 3px 0}
+  #modeBanner{position:absolute; top:8px; left:50%; transform:translateX(-50%);
+         z-index:6; display:none; font-size:12.5px; padding:4px 14px;
+         background:var(--gold); color:#1a1611; border-radius:4px;
+         font-weight:600; pointer-events:none}
+  #view canvas{display:block; width:100%; height:100%}
+  /* Collapsible panel heading. Every shortcut below already worked; only two
+     of them were written down anywhere. */
+  h2.fold{cursor:pointer; user-select:none}
+  h2.fold .chev{float:right; opacity:.6; transition:transform .12s}
+  h2.fold.open .chev{transform:rotate(90deg)}
+  table.keys{width:100%; border:0}
+  table.keys td{
+    border:0; padding:2px 4px; white-space:normal;
+    color:var(--dim-ink); font-size:11px;
+  }
+  table.keys td:first-child{width:74px; white-space:nowrap}
+  kbd{
+    background:var(--bg3); border:1px solid var(--line); border-radius:3px;
+    padding:1px 5px; font:11px Consolas,monospace; color:var(--ink);
+  }
+
+  #busy{
+    display:none; position:fixed; inset:0; z-index:200;
+    background:var(--void-a); align-items:center; justify-content:center;
+  }
+  #busy.on{display:flex}
+  #busy .box{
+    background:var(--bg2); border:1px solid var(--line); border-radius:6px;
+    padding:18px 22px; min-width:340px; text-align:center;
+    box-shadow:0 10px 40px #000a;
+  }
+  #busy .bar{
+    height:4px; background:var(--selbg); border-radius:2px; overflow:hidden;
+    margin-bottom:12px;
+  }
+  /* Indeterminate: the server does not report progress, and a fake
+     percentage that stalls at 90% is worse than an honest sweep. */
+  #busy .bar i{
+    display:block; height:100%; width:35%; background:var(--gold);
+    border-radius:2px; animation:sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sweep{
+    0%{margin-left:-35%} 100%{margin-left:100%}
+  }
+  #busyLabel{font-size:13px}
+  #busyTime{font-size:11px; margin-top:5px; font-family:Consolas,monospace}
+
+  /* On-screen control legend. Anchored inside #view so it stays put when the
+     viewport goes fullscreen and the side panels are no longer there. */
+  /* Below #vpBar, not on top of it: both were pinned top-left and the
+     legend covered the Collision toggle. */
+  #legend{
+    position:absolute; left:10px; top:40px; z-index:6;
+    background:var(--sheet-a); border:1px solid var(--line); border-radius:4px;
+    font-size:11px; color:var(--dim-ink); max-width:270px; user-select:none;
+    backdrop-filter:blur(2px);
+  }
+  #legend .lhead{
+    display:flex; align-items:center; gap:8px;
+    padding:4px 6px 4px 9px; border-bottom:1px solid var(--line);
+    color:var(--gold);
+  }
+  #legend .lhead b{flex:1; font-weight:600; font-size:11px}
+  #legend .lhead button{
+    padding:0 6px; font-size:13px; line-height:16px; background:none;
+    border:1px solid var(--line); color:var(--dim-ink);
+  }
+  #legend .lbody{padding:6px 9px 8px; line-height:1.75}
+  #legend.min .lbody{display:none}
+  #view:fullscreen #legend{font-size:12px}
+
+  #btnFull{
+    position:absolute; right:12px; bottom:12px; z-index:5;
+    padding:5px 10px; font-size:11px; line-height:1;
+    background:var(--sheet-b); border:1px solid var(--line); color:var(--dim-ink);
+  }
+  #btnFull:hover{color:var(--gold); border-color:var(--gold)}
+  #btnEvents{
+    position:absolute; right:108px; bottom:12px; z-index:5;
+    padding:5px 10px; font-size:11px; line-height:1;
+    background:var(--sheet-b); border:1px solid var(--line); color:var(--dim-ink);
+  }
+  #btnEvents:hover{color:var(--gold); border-color:var(--gold)}
+  /* The overlay sheet. Anchored inside the viewport so the level stays visible
+     behind it -- the alternative was a 15th tab for tables that are only ever
+     read while looking at the map they belong to. */
+  #sheet{
+    position:absolute; right:0; top:0; bottom:0; width:min(520px, 62%);
+    z-index:20; display:none; flex-direction:column;
+    background:var(--sheet-c); border-left:1px solid var(--line);
+    box-shadow:-12px 0 32px rgba(0,0,0,.5);
+  }
+  #sheet.open{display:flex}
+  #sheet .shead{
+    display:flex; align-items:center; gap:8px; padding:8px 12px;
+    border-bottom:1px solid var(--line); color:var(--gold); font-size:12px;
+    letter-spacing:.06em; text-transform:uppercase;
+  }
+  #sheet .shead b{flex:1}
+  #sheet .shead button{
+    background:none; border:none; color:var(--dim-ink); font-size:18px;
+    line-height:1; padding:0 4px; cursor:pointer;
+  }
+  #sheet .shead button:hover{color:var(--gold)}
+  #sheet #sheetTabs{margin:8px 12px 0}
+  #sheet .sbody{flex:1; overflow:auto; padding:10px 12px 16px}
+  /* In fullscreen the viewport is the whole screen, so the panels are gone
+     and the HUD is the only orientation left -- keep it readable. */
+  #view:fullscreen{background:var(--void)}
+  #view:fullscreen #hud{font-size:13px}
+  #hud{
+    position:absolute; left:10px; bottom:10px; pointer-events:none;
+    font-size:11px; color:var(--dim-ink); text-shadow:0 1px 2px #000;
+    font-variant-numeric:tabular-nums;
+  }
+  #hudMain{white-space:pre-wrap; color:var(--ink)}
+  #hudMore{white-space:pre-wrap; display:none; margin-top:2px}
+  #hud.more #hudMore{display:block}
+  #hudToggle{
+    pointer-events:auto; margin-top:3px; padding:1px 7px; font-size:11px;
+    background:var(--sheet-b); border:1px solid var(--line);
+    color:var(--dim-ink); line-height:1.5;
+  }
+  #hudToggle:hover{color:var(--gold); border-color:var(--gold)}
+  /* Fixed to the window, NOT absolute inside #view. It used to live in the
+     viewport, so every toast raised from the other 13 tabs -- including the
+     "nothing was written" refusals that are those tabs' only feedback -- was
+     painted into a display:none parent and never seen. */
+  #toast{
+    position:fixed; right:16px; top:96px; max-width:380px; z-index:60;
+    background:var(--sheet-c); border:1px solid var(--line); border-left:3px solid var(--gold);
+    border-radius:4px; padding:8px 12px; font-size:12px; display:none;
+    white-space:pre-wrap; box-shadow:0 6px 20px rgba(0,0,0,.45);
+  }
+  #toast.bad{border-left-color:var(--red)}
+  #toast.good{border-left-color:var(--grn)}
+  /* Not an error -- the write succeeded. A consequence worth reading, which
+     is why it also gets the longer dwell time in toast(). */
+  #toast.warn{border-left-color:var(--gold)}
+
+
+  /* Columns of digits that do not line up are the commonest way a data table
+     reads as sloppy, and the two densest tables here -- Campaign's 752 numeric
+     inputs and Game Rules' 114 cells -- are nothing but columns of digits. */
+  table{
+    border-collapse:collapse; width:100%; font-size:12px;
+    font-variant-numeric:tabular-nums;
+  }
+  th{
+    position:sticky; top:0; background:var(--bg3); text-align:left;
+    padding:5px 8px; border-bottom:1px solid var(--line);
+    font-weight:600; color:var(--dim-ink); font-size:11px;
+    font-variant-numeric:tabular-nums;
+  }
+  td{padding:3px 8px; border-bottom:1px solid var(--sheet-d); white-space:nowrap;
+     font-variant-numeric:tabular-nums}
+  tbody tr:hover{background:var(--bg3); cursor:pointer}
+  tbody tr.sel{background:var(--selbg)}
+  /* Changed-files list, grouped by extension. Hundreds of edited files as one
+     flat run is unreadable, and the question actually being asked is "what did
+     I do to the .tex files" -- so each type gets a foldable header with its
+     own count. */
+  tr.tgrouphd td{
+    background:var(--grouphd); color:var(--ink); font-size:12px;
+    font-weight:600; padding:4px 8px; cursor:pointer; user-select:none;
+    border-bottom:1px solid var(--line);
+  }
+  tr.tgrouphd:hover td{background:var(--bg3)}
+  tr.tgrouphd .chev{
+    display:inline-block; width:12px; opacity:.7; transition:transform .12s;
+  }
+  tr.tgrouphd.open .chev{transform:rotate(90deg)}
+  tr.tgrouphd .cnt{color:var(--dim-ink); font-weight:400; margin-left:8px}
+  .num{text-align:right; font-family:Consolas,monospace;
+       font-variant-numeric:tabular-nums}
+  .warn{color:var(--rust)}
+  .good{color:var(--grn)}
+
+  /* ── CONFIDENCE ───────────────────────────────────────────────────
+     Whether a claim was READ OFF the game or RECONSTRUCTED is the most
+     load-bearing distinction in this tool: an inference shown as a fact
+     is what sends someone editing bytes for an afternoon on a guess.
+     So it is a visual property with its own colour, never a footnote.
+     measured/established are cool (the game said so); inferred is warm
+     (we said so); dead is drained of colour entirely.
+     ───────────────────────────────────────────────────────────────── */
+  /* Five rungs, and every one of them says the same thing three ways: a hue,
+     a leading glyph, and the word itself. Blue-versus-violet is exactly the
+     pair that collapses for a protanope, and measured-versus-established is
+     the distinction this whole tool rests on, so colour is never the only
+     channel. The glyphs are plain characters -- they survive greyscale, a
+     colourblind reader and a screenshot. */
+  /* DESIGN-REVIEW A3: one marker, not a pill on every row. A 7px shape in
+     the rung's colour, with the word in the tooltip; the shape differs per
+     rung (dot, diamond, triangle, ring, dash) so it survives greyscale and
+     a colour-blind reader, as the glyphs did. `.conf.lbl` -- the legends --
+     also prints the word. */
+  .conf{
+    display:inline-flex; align-items:center; gap:5px; vertical-align:middle;
+    margin-left:6px; font-size:0; line-height:1; white-space:nowrap;
+    color:var(--dim-ink); cursor:help;
+  }
+  .conf.lbl{font:var(--t-meta); margin-left:10px}
+  .conf::before{content:""; width:7px; height:7px; flex:none; box-sizing:border-box}
+  .conf.measured::before{background:var(--grn); border-radius:50%}
+  .conf.established::before{background:var(--conf-est); transform:rotate(45deg) scale(.85)}
+  .conf.inferred::before{background:var(--warn); clip-path:polygon(50% 0,100% 100%,0 100%)}
+  .conf.untested::before{border:2px solid var(--rust); border-radius:50%}
+  .conf.dead::before{background:var(--conf-dead); height:2px; width:8px}
+  /* An inferred block must not be able to be mistaken for the measured
+     ones around it, so it gets a whole container, not just a badge. */
+  .infbox{
+    border-left:3px solid var(--warn); background:var(--bg2b);
+    padding:9px 13px; margin:8px 0; border-radius:0 4px 4px 0;
+    font-size:12px; max-width:820px;
+  }
+  .infbox .ev{
+    display:block; margin-top:6px; padding:6px 9px; background:var(--well);
+    border-radius:3px; font:11px/1.5 Consolas,monospace; color:var(--ink);
+    white-space:pre-wrap;
+  }
+  .deadrow{opacity:.45}
+  .deadrow td{text-decoration:line-through; text-decoration-color:var(--faint)}
+
+  #rulesBody{max-width:1180px}
+  /* A section title has to outrank the rows beneath it. This one was already
+     15px; everything else at this level in the product was 13px -- the same
+     size as its own content, which is why nothing had a hierarchy. */
+  #rulesBody h3{margin:0 0 4px; font:var(--t-section); color:var(--title)}
+  #rulesBody .sect{border-top:1px solid var(--line); margin-top:30px; padding-top:22px}
+  #rulesBody .sect:first-child{border-top:none; margin-top:0; padding-top:0}
+  #rulesBody .lede{color:var(--dim-ink); font-size:12px; max-width:820px; margin:0 0 12px}
+  #rulesBody .tw{overflow:auto; max-height:460px; border:1px solid var(--line);
+                 border-radius:4px}
+  #rulesBody input.cell{
+    width:62px; font:12px Consolas,monospace; background:var(--well);
+    color:var(--ink); border:1px solid var(--line); border-radius:3px;
+    padding:2px 5px;
+  }
+  #rulesBody input.cell:disabled{opacity:.3; cursor:not-allowed}
+  #rulesBody select.cell{font-size:11px; max-width:210px}
+  #rulesBody tbody tr{cursor:default}
+  .fitline{font-size:11px; font-family:Consolas,monospace; color:var(--dim-ink);
+           font-variant-numeric:tabular-nums}
+  .hilite{
+    background:var(--bg2b); border:1px solid var(--line); border-radius:5px;
+    padding:12px 15px; margin-bottom:14px; max-width:820px;
+  }
+  .hilite b{color:var(--gold); font-weight:600}
+  .chip{
+    display:inline-block; font-size:11px; padding:1px 7px; border-radius:9px;
+    background:var(--bg3); color:var(--dim-ink); margin:0 4px 4px 0;
+  }
+  .chip.on{background:var(--accent-bg); color:var(--accent-fg)}
+  /* Scoped to the Sound tab on purpose: nothing else in the app styles a
+     selected .bar button, and quietly changing that everywhere is not this
+     change's business. */
+  /* Changes and Archives switch views the same way and showed no selected
+     one at all, so extended by name rather than made global. */
+  #strBody .cue{margin:16px 0 5px; font-size:12px; color:var(--gold);
+                letter-spacing:.3px}
+  #strBody .cue:first-child{margin-top:0}
+  #strBody .stm{display:flex; align-items:baseline; gap:9px; padding:3px 0;
+                border-bottom:1px solid var(--sheet-d); font-size:12px}
+  #strBody .stm .say{flex:1; min-width:0}
+  #strBody .stm .fn{color:var(--dim-ink); font-size:11px;
+                    font-family:Consolas,monospace}
+  #strBody .stm .dur{color:var(--dim-ink); font-size:11px; width:52px;
+                     text-align:right; font-family:Consolas,monospace}
+  #strBody .stm i{color:var(--dim-ink)}
+
+  /* ── FILTERS ──────────────────────────────────────────────────────
+     A filter that is hiding 1,165 of 1,169 objects used to look
+     exactly like one that is hiding nothing, and there was no way to
+     clear it but to select the text. Twice this made the whole app
+     read as broken: a leftover "tower" turned a full level into
+     "0 in 0 groups · Nothing matches that filter".
+     ───────────────────────────────────────────────────────────────── */
+  input.filtering{border-color:var(--gold); background:var(--selbg)}
+  .fchip{
+    display:none; align-items:center; gap:6px; font:var(--t-meta);
+    color:var(--dim-ink); margin:4px 0 0; font-variant-numeric:tabular-nums;
+  }
+  .fchip.on{display:inline-flex}
+  .bar .fchip{margin:0}
+  .fchip button{
+    background:none; border:none; border-radius:3px; padding:1px 5px;
+    color:var(--gold); font:inherit; text-decoration:underline; cursor:pointer;
+  }
+  .fchip button:hover{background:var(--bg3); text-decoration:none}
+
+  .field{display:flex; align-items:center; gap:6px; margin-bottom:5px}
+  .field label{width:58px; color:var(--dim-ink); font-size:11px; flex:none}
+  .field input{flex:1; min-width:0; font-family:Consolas,monospace; font-size:12px}
+  .xyz{display:flex; gap:4px}
+  .xyz input{width:100%; min-width:0}
+
+  pre{
+    margin:0; font:12px/1.45 Consolas,monospace; white-space:pre-wrap;
+    word-break:break-all;
+  }
+  textarea{width:100%; height:100%; resize:none; font:12px/1.45 Consolas,monospace}
+  .bar{
+    display:flex; align-items:center; gap:8px; padding:6px 10px;
+    border-bottom:1px solid var(--line); background:var(--bg3); flex:none;
+  }
+  /* ── THE ACTION BAR ───────────────────────────────────────────────
+     Anything that WRITES lives at the bottom of the pane it writes
+     from, in the same place on every tab. It used to live top-right,
+     which meant that on six tabs the first thing the eye landed on
+     was `Apply` or `Reset to stock` -- above a region that is empty
+     until you have picked something. Top bars now hold only the
+     controls that FIND: searches, filters, pickers, counts.
+
+     Safe actions left, the primary right, and a flex:1 gap between
+     them so a misclick on `Apply` cannot land on `Reset to stock`.
+     ───────────────────────────────────────────────────────────────── */
+  .actionbar{
+    display:flex; align-items:center; gap:8px; flex:none;
+    padding:8px 12px; background:var(--bg2b);
+    border-top:1px solid var(--line);
+  }
+  .actionbar .sep{flex:1}
+  .actionbar .note{font:var(--t-meta); color:var(--dim-ink)}
+  /* A write that cannot be taken back by closing the tab. Still the
+     primary action of its pane, so it keeps the accent shape and
+     gains the consequence, rather than being demoted to a plain
+     button next to safer ones. */
+  button.primary.danger{
+    background:var(--bad-bg); border-color:var(--danger-ink);
+    color:var(--alarm-fg);
+  }
+  button.primary.danger:hover{
+    background:var(--alarm-bg); border-color:var(--red); color:var(--alarm-fg);
+  }
+
+  .meter{height:6px; background:var(--well); border-radius:3px; overflow:hidden; width:150px}
+  .meter i{display:block; height:100%; background:var(--grn)}
+  .meter i.over{background:var(--red)}
+  /* `.muted` is prose -- captions, empty states, the explanatory paragraphs
+     this tool depends on -- so it takes the readable grey, not the hairline
+     one. Same visual rank, 4.48:1 to 6.22:1. */
+  /* Content section titles -- the Inspector's "Shape", "Surface colour", a
+     weapon's stat groups. These are the key rank in the ramp: they used to be
+     the same size and weight as the rows they title, so a panel read as one
+     undifferentiated column of text. */
+  h3{font:var(--t-section); color:var(--title); margin:12px 0 4px}
+  h4{font:600 13px/1.3 "Segoe UI",system-ui,sans-serif; color:var(--ink);
+     margin:12px 0 4px}
+  .muted{color:var(--dim-ink)}
+  a{color:var(--gold)}
+  /* The App setup modal's markup says `dim` and `mono`, and neither class
+     existed in this stylesheet -- so every caption in the modal rendered at
+     full body ink and the three disc paths in the proportional UI font.
+     Scoped to the modal: nothing else uses these names, and the values are
+     the same ink and type the rest of the product already reads in. */
+  #appSetup .dim{color:var(--dim-ink)}
+  #appSetup .mono{font:var(--t-mono)}
+
+  /* A dockable 3D preview. Same box wherever a panel wants to show the
+     actual model rather than describe it. */
+  .miniview{
+    height:250px; position:relative; flex:none; background:var(--void);
+    border-bottom:1px solid var(--line); overflow:hidden;
+  }
+  .miniview canvas{width:100%; height:100%; display:block}
+  .miniview .vnote{
+    position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; text-align:center; padding:16px; font-size:11px;
+    color:var(--dim-ink); pointer-events:none;
+  }
+  /* Jump-to-anything. Sixteen tabs is more than anyone should have to scan,
+     and this makes the tab bar a convenience rather than the only route. */
+  #palette{
+    display:none; position:fixed; inset:0; z-index:500; background:#0009;
+    padding-top:12vh; justify-content:center;
+  }
+  #palette.on{display:flex}
+  #palette .pbox{
+    width:min(620px, 92vw); max-height:70vh; display:flex; flex-direction:column;
+    background:var(--bg2); border:1px solid var(--line); border-radius:6px;
+    box-shadow:0 18px 60px #000b; overflow:hidden;
+  }
+  #paletteInput{
+    border:none; border-bottom:1px solid var(--line); border-radius:0;
+    padding:12px 14px; font-size:14px; background:transparent;
+  }
+  #paletteInput:focus{outline:none}
+  #paletteList{overflow:auto}
+  #paletteList .prow{
+    display:flex; gap:12px; align-items:baseline; padding:0 14px; height:30px;
+    align-items:center; cursor:pointer; font-size:13px;
+  }
+  #paletteList .prow b{color:var(--ink); font-weight:400; flex:none;
+                       min-width:150px}
+  #paletteList .prow .muted{flex:1; min-width:0; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; font-size:12px}
+  #paletteList .prow .ppath{margin-left:auto; flex:none; font-size:11px;
+    color:var(--dim-ink)}
+  #paletteList .prow.sel{background:var(--bg3)}
+  /* A destructive entry must not wear the accent, because in this list the
+     accent means "selected" -- and the palette is the easiest place in the
+     product to fire something without looking at it. Hue plus a glyph plus a
+     rule, so it survives greyscale and colour blindness like the badges do. */
+  #paletteList .prow-danger b{color:var(--danger-ink, var(--red))}
+  #paletteList .prow-danger{border-left:2px solid var(--red)}
+  #paletteList .prow-danger.sel{background:var(--bad-bg)}
+  nav button.ghost{
+    opacity:.55; font-size:11px; letter-spacing:.5px; margin-right:8px;
+  }
+  nav button.ghost:hover{opacity:1}
+
+  #offline{
+    display:none; position:fixed; left:0; right:0; top:0; z-index:400;
+    background:var(--alarm-bg); color:var(--alarm-fg); padding:8px 14px; font-size:12px;
+    align-items:center; gap:12px; box-shadow:0 2px 10px #000a;
+  }
+  #offline.on{display:flex}
+  #offline b{color:#fff}
+  #offline span{flex:1}
+  #offline code{background:#0004; padding:1px 4px; border-radius:3px}
+
+  .miniview .vtex{
+    position:absolute; left:6px; bottom:5px; right:6px; font-size:11px;
+    color:var(--dim-ink); pointer-events:none; line-height:1.5;
+    text-shadow:0 1px 2px #000;
+  }
+
+  /* ── DESIGN SYSTEM (DESIGN-REVIEW-2026-10-01) ──────────────────────
+     Shared components, so every tab draws them the same way.
+     ───────────────────────────────────────────────────────────────── */
+  /* Empty state: one line, centred, 13px, dim. Controls stay disabled. */
+  .empty{
+    display:flex; align-items:center; justify-content:center; text-align:center;
+    min-height:120px; height:100%; width:100%; flex:1; padding:16px;
+    font-size:13px; color:var(--dim-ink);
+  }
+  /* label | value | type | offset, 24px rows, max 720px. */
+  .fgrid{
+    display:grid; grid-template-columns:minmax(120px,1fr) 120px 56px 64px;
+    align-items:center; column-gap:12px; max-width:720px; min-height:24px;
+    border-bottom:1px solid var(--sheet-d);
+  }
+  .fgrid label{font-size:13px; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; cursor:help}
+  .fgrid input{height:22px; padding:1px 6px; font:var(--t-mono);
+    text-align:right; width:120px}
+  .fgrid input.txt{text-align:left}
+  .fgrid span{font:var(--t-mono); font-size:11px}
+  /* Row actions are neutral and appear on hover or focus. */
+  table.vers td{padding:0 8px; height:28px}
+  table.vers td.acts button{font-size:12px; padding:2px 8px; margin-left:4px;
+    visibility:hidden}
+  table.vers tr:hover td.acts button,
+  table.vers tr:focus-within td.acts button{visibility:visible}
+  /* View switches: one tab-strip style. A filled accent button meant
+     "primary action" everywhere else. */
+  button.vtab{
+    background:none; border:none; border-bottom:2px solid transparent;
+    border-radius:0; color:var(--nav-idle); padding:4px 10px;
+  }
+  button.vtab:hover{background:none; color:var(--title)}
+  button.vtab.on{border-bottom-color:var(--gold); color:var(--title); font-weight:600}
+  #ctlRule{overflow:hidden; text-overflow:ellipsis; min-width:0}
+  #btnEdPanel{display:none; position:absolute; right:12px; top:8px; z-index:5;
+    padding:4px 9px; font-size:11px; background:var(--sheet-b)}
+  @media (max-width:1100px){
+    #btnEdPanel{display:block}
+    #edRight{display:none}
+    #tab-editor.edpanel #edRight{display:flex; position:absolute; right:0;
+      top:0; bottom:0; z-index:30; box-shadow:-12px 0 32px rgba(0,0,0,.5)}
+  }
+  /* Weapon and creature fields: label | value | note (A18). */
+  .wrow{display:grid; grid-template-columns:200px auto 1fr; column-gap:12px;
+    align-items:center; min-height:24px; max-width:900px;
+    border-bottom:1px solid var(--sheet-d)}
+  .wrow label{font-size:13px; overflow:hidden; text-overflow:ellipsis; cursor:help}
+  .wrow input{width:96px; height:22px; padding:1px 6px; font:var(--t-mono);
+    text-align:right}
+  .wrow select{height:22px; padding:0 4px; max-width:260px}
+  .wrow .muted{font-size:11px}
+  #gunFields.isempty{display:flex}
+  @media (max-width:1100px){
+    #gunList .row .tag{display:none}
+  }
+  /* Unlocks & shop at half width: two tables side by side cut off the
+     upgrade column and the Unlock all button, so they stack instead. */
+  @media (max-width:1100px){
+    #tab-unlocks{flex-direction:column}
+    #tab-unlocks > div{border-right:0 !important; min-height:0}
+    #tab-unlocks > div + div{border-top:1px solid var(--line)}
+    #tab-unlocks .bar button{white-space:nowrap; flex:none}
+  }
+  /* A count in a panel title sits on the right, in meta type. */
+  .panel h2 .tag{float:right; margin-right:16px; font:var(--t-meta);
+    text-transform:none; letter-spacing:0; color:var(--dim-ink)}
+  hr{border:0; border-top:1px solid var(--line); margin:10px 0}
+  /* One segmented control for filters and pane switches (DESIGN-REVIEW
+     A5). `.switch` was in the markup with no rule behind it, so these read
+     as loose buttons with no visible selection. */
+  .switch{display:inline-flex; border:1px solid var(--line); border-radius:4px;
+    overflow:hidden; background:var(--well)}
+  .switch button{border:none; border-radius:0; background:none; padding:3px 10px;
+    font-size:12px; color:var(--nav-idle)}
+  .switch button + button{border-left:1px solid var(--line)}
+  .switch button:hover{background:var(--bg3); color:var(--title)}
+  .switch button.on{background:var(--bg3); color:var(--title); font-weight:600}
+#busyBar{display:none;position:fixed;left:0;top:0;height:2px;width:100%;z-index:95;pointer-events:none;
+  background:linear-gradient(90deg,transparent 0,var(--gold,#5b9bd5) 50%,transparent 100%);background-size:40% 100%;
+  background-repeat:no-repeat;animation:busySlide 1.1s linear infinite}
+@keyframes busySlide{from{background-position:-40% 0}to{background-position:140% 0}}
+#startHint{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);z-index:3;max-width:430px;
+  padding:14px 18px;background:var(--bg2);border:1px solid var(--line);border-radius:6px;font-size:12px;
+  line-height:1.55;color:var(--dim,#9aa4ad);pointer-events:none;display:flex;flex-direction:column;gap:6px}
+#startHint>b{font-size:14px;color:var(--title,#dfe6ec)}
+</style>
+<script>
+/* The saved look, replayed before the first paint.
+   Deliberately DUMB: nav.js does every bit of the colour maths and stores the
+   RESOLVED custom properties, so this replays a list and can never disagree
+   with the picker. It runs here, unmodulised and undeferred, because a module
+   runs after the document is parsed -- which is one full repaint of the stock
+   palette before the chosen one appears, on every launch.
+   A saved blob from an older shape of this feature is ignored, not guessed at. */
+try {
+  var look = JSON.parse(localStorage.getItem('rdr.look') || 'null');
+  if (look && look.v === 1 && look.vars) {
+    for (var k in look.vars) document.documentElement.style.setProperty(k, look.vars[k]);
+  }
+} catch (e) { /* private mode, or nothing saved. The stylesheet stands. */ }
+</script>
+<script>
+/* FINAL PASS: one honest "working" signal for every screen.
+   On a cold start the first reads of the disc take a minute or more, and a
+   panel that is waiting looked exactly like a panel that is empty: no clips,
+   no archives, no code mods. Every /api/ request is counted here; when one
+   has been out for longer than a blink the top edge shows a moving bar and
+   the status bar says how long. No panel has to opt in. */
+(function () {
+  var real = window.fetch, pending = 0, since = 0, timer = null;
+  function paint() {
+    var bar = document.getElementById('busyBar'), sb = document.getElementById('sbBusy');
+    var late = pending > 0 && Date.now() - since > 700;
+    if (bar) bar.style.display = late ? 'block' : 'none';
+    if (sb) {
+      sb.style.display = late ? '' : 'none';
+      if (late) sb.textContent = 'reading the disc\u2026 ' + Math.round((Date.now() - since) / 1000) + ' s';
+    }
+    if (!pending && timer) { clearInterval(timer); timer = null; }
+  }
+  window.fetch = function (input, init) {
+    var url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') < 0) return real.apply(this, arguments);
+    if (!pending) since = Date.now();
+    pending++;
+    if (!timer) timer = setInterval(paint, 350);
+    var done = function () { pending = Math.max(0, pending - 1); paint(); };
+    var pr = real.apply(this, arguments);
+    pr.then(done, done);
+    return pr;
+  };
+})();
+</script>
+<script type="importmap">
+{"imports":{"three":"./three.module.js"}}
+</script>
+</head>
+<body>
+<div id="app">
+  <!-- Window-level, so a toast from any of the 14 tabs is actually visible. -->
+  <div id="toast"></div>
+  <header>
+    <h1>RDR MODDING STUDIO</h1>
+    <!-- The level you are editing belongs in the title bar -- but as a FACT,
+         not a second picker. This was a dropdown of all 61 levels sitting in
+         the same window as the editor's own Levels list, two controls for one
+         choice, and the first thing the owner asked about it was why there
+         were two. The list (filter, grouping, counts) is the picker; this
+         shows what it picked and jumps to it. -->
+    <button id="hdrLevel" class="ghost" style="font-size:12px;max-width:230px;
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="Current level. Click to change."
+            >no level loaded</button>
+    <!-- Computed every poll, never cached: the state the developer has lost work
+         from twice is the state that must never be stale. -->
+    <span id="hdrDisc" class="pill" title="What is on the working disc right now">…</span>
+    <span class="spacer"></span>
+    <button id="btnPalette" class="ghost" title="Jump to anything (Ctrl+K)">Search <kbd>Ctrl+K</kbd></button>
+    <button id="btnUndo" style="flex:none" title="Ctrl+Z" disabled>Undo</button>
+    <button id="btnRedo" style="flex:none" title="Ctrl+Y" disabled>Redo</button>
+    <!-- "What's changed?" was here and is gone. It scanned the whole 2.2 GB
+         working ISO against vanilla to answer a question the edit journal
+         already answers instantly. Measured: 72 seconds warm, 238 cold -- and
+         because every live test calls it first to take a baseline, it was slow
+         enough to blow their 120-second timeout and get nine working features
+         reported as broken. The Changes tab lists every edit as it happens,
+         with per-file revert. Same answer, without reading four gigabytes.
+         The route survives for checkpoints and the test baseline. -->
+    <!-- Outside the emulator sentinel on purpose: the gear also re-points
+         the DISCS, so it must survive any build that strips Play/Boot. -->
+    <button id="btnAppSetup" class="ghost" title="App setup — which discs you are editing, and where PCSX2 is">Settings</button>
+    <!-- There is no build step: every edit is on the working disc already.
+         This is the way OUT -- mod file, patch or ISO -- and it sits beside
+         Play because the two questions come together: does it work, and how
+         do I hand it over. -->
+    <button id="hdrExport" class="primary" title="Get your mod out: mod pack, mod file, patch, or playable ISO">Build &amp; share…</button>
+    <!-- @feature:emulator -->
+    <button id="btnPlay" title="Start the game in PCSX2.">Play</button>
+    <button id="btnBoot"
+            title="Three-minute boot check in PCSX2. Details: Guides > Modding guide.">Boot test</button>
+    <!-- @end:emulator -->
+    <!-- Held apart from its neighbour on purpose. Every other pair in this bar
+         sits 14px apart, and "Boot test" is a routine button, so the nuclear
+         one was one slipped click away from a thing you press all the time.
+         It is also the only header button distinguished by colour alone --
+         Undo, Redo and Play all carry a glyph -- so it gets one too, and the
+         separation carries the warning even in greyscale. -->
+    <span class="hsep" style="width:18px;flex:none"></span>
+    <span aria-hidden="true"
+          style="width:1px;align-self:stretch;background:var(--line);
+                 margin:4px 0;flex:none"></span>
+    <span class="hsep" style="width:18px;flex:none"></span>
+    <!-- ONE NAME, EVERYWHERE. This action carried five different names across
+         the header, the Archives panel, Ctrl+K, the Changes prose and its own
+         dialog. It is the only Tier-1 control in the product: red, and gated
+         behind typing the word. -->
+    <button id="btnRestore" class="danger"
+            title="Discard all changes. Cannot be undone.">Reset to stock</button>
+  </header>
+
+  <!-- Boot overlay. The server pays every expensive first-touch cost up
+       front (reading all 66 archives, the level catalogue, the vanilla
+       index) and this shows that work happening instead of an empty shell
+       that looks broken. Driven by the lock-free /api/warmup route. -->
+  <!-- Visible from the first paint on purpose -- the init code hides it the
+       moment the server reports the warm-up is not running. -->
+  <div id="bootOverlay" style="position:fixed;inset:0;z-index:200;
+       background:var(--bg,#14171c);display:flex;align-items:center;
+       justify-content:center;flex-direction:column;gap:14px">
+    <div style="font:var(--t-head);letter-spacing:.6px">
+      RDR MODDING STUDIO</div>
+    <div id="bootStage" class="muted" style="font-size:13px">reading the disc…</div>
+    <div style="width:340px;height:8px;border:1px solid var(--line,#333);
+         border-radius:5px;overflow:hidden">
+      <div id="bootBar" style="height:100%;width:2%;background:var(--gold,#c9a227);
+           transition:width .4s"></div>
+    </div>
+    <div id="bootDetail" class="muted" style="font-size:11px;min-height:14px"></div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button id="bootCancel" style="font-size:12px;display:none"
+              title="Stop the job the Studio is running">Cancel</button>
+      <button id="bootSkip" class="ghost" style="font-size:12px"
+              title="Ready to use. First clicks are slower during warm-up.">Skip</button>
+    </div>
+  </div>
+
+  <!-- When the backend is not answering, every panel just renders empty and
+       the app looks like it lost the disc. Say so instead. -->
+  <div id="offline">
+    <b>Not connected to the Studio.</b>
+    <span>Server restarting. Your edits are safe on disk.</span>
+    <button id="btnRetry">Retry now</button>
+  </div>
+
+  <!-- Long operations used to show only a toast that vanished after 4.5s
+       while the server held its lock, so a 2.2 GB copy looked like a hang. -->
+  <div id="busy">
+    <div class="box">
+      <div class="bar"><i></i></div>
+      <div id="busyLabel">Working…</div>
+      <div id="busyTime" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Seven workspaces. Row 1 names them; row 2 shows the active one's
+       modes, then a composite mode's sub-views (#subnav). Ctrl+K reaches
+       every destination by name. -->
+  <nav>
+    <!-- First column on purpose. The developer, 2026-09-30: the one-click mods
+         went, the Save Editor came up to the front. It is the only tab that
+         edits a file outside the project -- a PS2 memory card -- and its
+         panel leads with what is NOT decoded. -->
+    <span class="ws" data-ws="SAVE">
+      <span class="wslabel">Save</span>
+      <button data-tab="saves" data-ws="SAVE"
+              title="Edit a Red Dead Revolver save on a PS2 memory card. The card format is solved; most of what the numbers MEAN is not.">Save Editor</button>
+    </span>
+    <span class="ws" data-ws="LEVEL">
+      <span class="wslabel">Level</span>
+      <button data-tab="editor" data-ws="LEVEL"
+              title="The level in 3D: place, move and change what is in it">3D editor</button>
+      <button data-tab="env" data-ws="LEVEL"
+              title="This level's lighting, fog and weather">Lighting</button>
+      <button data-tab="textures" data-ws="LEVEL"
+              title="The pictures painted on this level's surfaces">Textures</button>
+    </span>
+    <!-- Its own top-level tab (11/5, the developer could not find it inside Media). -->
+    <span class="ws" data-ws="ANIMATION">
+      <span class="wslabel">Animations</span>
+      <button data-tab="anim" data-ws="ANIMATION"
+              title="Watch character animations play on their skeleton; export them to Blender">Animations</button>
+    </span>
+    <span class="ws" data-ws="LOGIC">
+      <span class="wslabel">Logic</span>
+      <button data-tab="cast" data-ws="LOGIC"
+              title="Characters and behaviours">Cast</button>
+      <button data-tab="campaign" data-ws="LOGIC"
+              title="What each mission gives you, and what the game unlocks">Missions</button>
+      <!-- Named for what the panel holds. It was "Behaviour", which put
+           three different things under one word: this read-only vocabulary,
+           the Behaviour tables EDITOR (a Cast sub-view), and Cast's own
+           "Behaviours" column -- two nav buttons could be lit at once,
+           pointing at different panels. -->
+      <button data-tab="behaviour" data-ws="LOGIC" class="ro"
+              title="AI condition vocabulary. Browse only in this panel — whether the vocabulary can be changed in the executable has not been tested.">AI conditions</button>
+      <!-- @feature:links_edit -->
+      <button data-tab="links" data-ws="LOGIC"
+              title="The doors that join one level to another">Links</button>
+      <!-- @end:links_edit -->
+      <!-- @feature:scripting_browser -->
+      <button data-tab="scripting" data-ws="LOGIC" class="ro"
+              title="Mission scripts. Browse only in this panel — the action opcodes 1001-1571 have no names anywhere on the disc, so there is nothing yet to edit them against.">Scripting</button>
+      <!-- @end:scripting_browser -->
+    </span>
+    <span class="ws" data-ws="BALANCE">
+      <span class="wslabel">Balance</span>
+      <button data-tab="weapons" data-ws="BALANCE"
+              title="Weapons, creatures, and settings search">Weapons &amp; stats</button>
+      <!-- @feature:strings_editor -->
+      <button data-tab="strings" data-ws="BALANCE"
+              title="Rewrite anything the game says">Text</button>
+      <!-- @end:strings_editor -->
+      <!-- @feature:csv_editor -->
+      <button data-tab="csv" data-ws="BALANCE"
+              title="Sound banks, shop stock, rosters, mission flow">Tables</button>
+      <!-- @end:csv_editor -->
+    </span>
+    <span class="ws" data-ws="MEDIA">
+      <span class="wslabel">Media</span>
+      <button data-tab="audio" data-ws="MEDIA"
+              title="Every spoken line and the sound-effect banks">Audio</button>
+      <button data-tab="movies" data-ws="MEDIA"
+              title="The cutscenes and the still screens">Cutscenes</button>
+      <!-- @feature:menu_edit -->
+      <button data-tab="menus" data-ws="MEDIA"
+              title="The main menu and the in-game HUD">Menus</button>
+      <!-- @end:menu_edit -->
+    </span>
+    <span class="ws" data-ws="DISC">
+      <span class="wslabel">Disc</span>
+      <button data-tab="text" data-ws="DISC"
+              title="Search the disc and edit any file">Files</button>
+      <button data-tab="archives" data-ws="DISC"
+              title="Browse archives and see where there is room">Archives</button>
+    </span>
+    <span class="ws" data-ws="PROJECT">
+      <!-- FINAL PASS 11/10: this column was "Project": Versions, Code Mods,
+           Changes. Changes carried its own "Saved mods" list and Checkpoint
+           box, the SAME files Versions lists, under two more names. Now:
+           Changes = what differs from stock; Versions = every saved copy. -->
+      <span class="wslabel">My mod</span>
+      <button data-tab="mods" data-ws="PROJECT"
+              title="What your mod changes: every changed file, your edit history, and the way out (Build &amp; share)">Changes</button>
+      <button data-tab="versions" data-ws="PROJECT"
+              title="Saved copies of your mod: save, restore, compare. Checkpoints live here too.">Versions</button>
+      <button data-tab="codemods" data-ws="PROJECT"
+              title="Noclip, Freeze World, Camera Lock, Slow-Mo and the Cheats menu unlock, built into the game">Code Mods</button>
+    </span>
+    <span class="navbreak"></span>
+    <!-- Sub-views of a composite mode, on row 2 after the modes. Filled in
+         by nav.js; empty and hidden for every mode that has none. -->
+    <div id="subnav"></div>
+  </nav>
+
+  <!-- Ctrl+K: the fast path to any screen. -->
+  <div id="palette">
+    <div class="pbox">
+      <input id="paletteInput" placeholder="Jump to… (type a tab, or what you want to do)"
+             autocomplete="off" spellcheck="false">
+      <div id="paletteList"></div>
+    </div>
+  </div>
+
+  <main>
+    <!-- ------------------------------------------------ 3D level editor -->
+    <section class="tab on" id="tab-editor">
+      <div class="panel" style="width:280px">
+        <h2>Levels</h2>
+        <div class="pad" style="padding-bottom:4px">
+          <input id="levelFilter" placeholder="filter levels..." style="width:100%">
+        </div>
+        <!-- A floor, because `.scroll` is flex:1 with min-height:0 and this
+             panel stacks five sections. Expanding Keys used to squeeze the
+             level list -- the most-used control in the tool -- to zero
+             pixels, and the collapse persisted across restarts.
+             The floor is 200px, not 170: this list is the entry point to the
+             whole product and 170px showed six of sixty-one levels. It grows
+             into whatever the panel has spare, so on a taller window it is
+             larger than its floor. 200 rather than 240 because at the developer's
+             730px window height a 240px floor pushed "Game lighting" back
+             below the fold, which is the very thing this change is for. -->
+        <div class="scroll" id="levelList"
+             style="flex:1 1 auto; min-height:200px"></div>
+        <!-- ABOVE the Areas fold on purpose: setFold hides every sibling
+             until the next H2, this row used to sit between #areaList and
+             that H2, and on a single-area level the H2 itself is hidden --
+             so a remembered collapsed state made the whole-level export
+             invisible with no header left to click to bring it back. -->
+        <!-- Take the map somewhere else. Different job from the per-surface
+             "Export .obj" button in the Inspector, which hands back one
+             surface to reshape and bring BACK; this is the whole level, in
+             world space, with its textures, for another toolchain. Asked for
+             by someone building maps for a different game. -->
+        <!-- DESIGN-REVIEW B9: the options and their two notes took as much
+             of the panel as the Levels list. One button; the options are in
+             #lvlExportDlg below. -->
+        <div class="pad" id="lvlExportRow" style="padding-top:2px">
+          <button id="btnLevelExport" style="width:100%"
+                  title="Every area, textures included, zipped">Export whole level&hellip;</button>
+        </div>
+        <h2 id="areaHead" style="display:none">Areas in this archive</h2>
+        <div class="pad" id="areaList" style="display:none;padding-top:5px"></div>
+        <!-- Layers means LAYERS. Everything else that used to live in this
+             section -- how the camera moves, the grid, collision and surface
+             display, character detail, the spawn-point button -- is about how
+             the VIEW is drawn, not about what the level contains, and it was
+             all stacked above the first actual layer row. It has its own
+             section below now, folded shut, because you set it once.
+             This list also gets its own scroller and a ceiling, so a level
+             with a long layer list can no longer push Game lighting to
+             y=1261 where nobody has ever seen it. -->
+        <h2>Layers</h2>
+        <div class="pad" id="layers"
+             style="flex:1 1 auto; min-height:130px; max-height:40%;
+                    overflow:auto"></div>
+        <h2>View settings</h2>
+        <div class="pad" id="viewSettings" style="padding-top:5px"></div>
+        <h2>Game lighting</h2>
+        <div class="pad" style="padding-top:5px">
+          <label style="display:block;font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="envTint" checked>
+            tint like the game does
+          </label>
+          <label style="display:block;font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="bakedLight" checked>
+            baked vertex lighting
+          </label>
+          <label style="display:block;font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="secondPass" checked>
+            second-pass overlays
+          </label>
+          <div class="muted" id="envTintInfo"
+               style="font-size:11px;margin-top:3px"></div>
+          <div class="muted" style="font-size:11px;margin-top:4px;line-height:1.5">
+            In game these are tinted by level lighting. Edit it in Lighting.
+          </div>
+        </div>
+        <!-- There is no "Keys" section here any more. It printed the same 13
+             bindings as #legend inside the viewport, which is both closer to
+             where you need them and the only copy that survives fullscreen.
+             Its real cost was space: this panel stacks five sections, so
+             opening Keys squeezed the level list to nothing. -->
+      </div>
+
+      <div id="view">
+        <!-- FINAL PASS: the first screen was an empty grid. Says where to
+             start; app.js hides it once a level is loaded. -->
+        <div id="startHint">
+          <b>Pick a level on the left to open it in 3D.</b>
+          <span>Click an object to edit it. Every edit goes straight onto your working
+          disc: <b>Play</b> runs it, <b>Undo</b> takes it back, <b>Build &amp; share</b>
+          gets it out as an ISO or a mod pack.</span>
+          <span>Not editing levels? The tabs above cover saves, animations,
+          weapons and stats, audio, any file on the disc, and code mods (My mod).</span>
+        </div>
+        <!-- Line one is orientation — where you are, how much is here, how
+             heavy it is. The per-kind breakdown and the decoder's chunk
+             counts are telemetry for whoever is debugging the reader, so
+             they fold away and stay folded. -->
+        <!-- The two halves of the level and what a click may pick. Always on
+             screen: the equivalent switches also exist in the View fold, but
+             the fold is where this pair went to die. -->
+        <!-- Art | Collision toggles and "Pick: all/art/collision" removed 11/5
+             (The developer: models and collision are one thing). The collision debug
+             view lives in View settings > "Show collision (debug)". -->
+        <div id="modeBanner"></div>
+        <div id="hud">
+          <div id="hudMain"></div>
+          <div id="hudMore"></div>
+          <button id="hudToggle" title="Show the decoder's own counts">details ▸</button>
+        </div>
+        <!-- Lives inside #view so it survives fullscreen, where the side
+             panels are gone and this is the only reference left. -->
+        <div id="legend">
+          <div class="lhead">
+            <b>Controls</b>
+            <button id="btnLegend" title="Hide (H)">–</button>
+          </div>
+          <div class="lbody">
+            <div><kbd>RMB</kbd> hold + <kbd>WASD</kbd> fly · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> fast</div>
+            <div class="muted">Fly mode (View settings): WASD, no button held</div>
+            <div><kbd>LMB</kbd> select · <kbd>Shift</kbd>+click add · <kbd>RMB</kbd> pan · wheel zoom</div>
+            <div><kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> frame</div>
+            <div><kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate · <kbd>Del</kbd> delete</div>
+            <div><kbd>←→↑↓</kbd> nudge 0.1 m · <kbd>Shift</kbd> 1 m</div>
+            <div><kbd>PgUp</kbd>/<kbd>PgDn</kbd> up / down</div>
+            <div><kbd>F11</kbd> fullscreen · <kbd>Esc</kbd> clear</div>
+            <div><kbd>Ctrl</kbd>+<kbd>A</kbd> all · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Y</kbd> redo</div>
+          </div>
+        </div>
+        <button id="btnFull" title="Fullscreen the viewport (F11, or Esc to leave)">Full screen</button>
+        <!-- Below 1100px the right panel folds away so the viewport gets
+             the width (DESIGN-REVIEW B10); this brings it back. -->
+        <button id="btnEdPanel" title="Show or hide the Objects / Inspector panel">Panel</button>
+        <button id="btnEvents"
+                title="Flags, cameras, doors — things with no position">
+          Level events</button>
+        <!-- An overlay inside the viewport, not a new tab: the level stays
+             visible behind whatever table you opened. Esc closes it. -->
+        <div id="sheet">
+          <div class="shead">
+            <b id="sheetTitle">Level events</b>
+            <button id="sheetClose" title="Close (Esc)">×</button>
+          </div>
+          <div class="switch" id="sheetTabs">
+            <button class="on" data-sheet="flags">Flags</button>
+            <button data-sheet="doors">Doors</button>
+            <button data-sheet="cams">Cameras</button>
+            <button data-sheet="track">Track</button>
+            <button data-sheet="undec">Not decoded</button>
+          </div>
+          <div class="sbody" id="sheetBody"></div>
+        </div>
+      </div>
+
+      <div class="panel right" id="edRight" style="width:320px">
+        <h2>Objects <span class="tag" id="outCount"></span></h2>
+        <div class="pad" style="padding-bottom:4px">
+          <div class="switch" id="outModes" style="margin-bottom:5px">
+            <button class="on" data-outmode="file">by file</button>
+            <button data-outmode="type">by type</button>
+            <button data-outmode="frame" id="outModeFrame">by frame</button>
+          </div>
+          <input id="objFilter" placeholder="filter objects..." style="width:100%">
+          <div class="muted" id="outLegend"
+               style="font-size:11px;margin-top:4px;line-height:1.6"></div>
+        </div>
+        <!-- basis 0, not auto. With `flex-basis:auto` this list's basis is its
+             CONTENT height -- 928 rows on Brimstone -- so it claimed the whole
+             column and left the Inspector 16px. Both panes now start from zero
+             and share what is free, with a cap here and a floor below. -->
+        <!-- The 46% ceiling is gone and the floor is 240px, not 150. On TRAIN
+             this list holds 1,085 rows -- 26,742px of content -- and a 150px
+             window showed six of them, inside a panel that was itself
+             scrolling: two stacked scrollbars over the same list. -->
+        <div class="scroll" id="objList"
+             style="flex:1 1 0;min-height:240px"></div>
+        <h2 id="assetDockHead">Place an asset</h2>
+        <div class="pad" id="assetDockBody" style="padding-bottom:4px;display:none">
+          <input id="assetDockFilter" placeholder="search assets on the disc..."
+                 style="width:100%">
+          <!-- Filled from ASSET_AXES so the dock and the Assets tab can never
+               offer different categories. -->
+          <select id="assetDockCat" style="width:100%;margin-top:5px"></select>
+          <label style="display:block;margin-top:5px;font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="assetDockHere" checked>
+            only ones this area can take
+          </label>
+          <div class="scroll" id="assetDock" style="max-height:180px"></div>
+        </div>
+        <h2>Inspector</h2>
+        <div id="inspView" class="miniview" style="height:190px;display:none"></div>
+        <div id="inspViewBar" class="bar"
+             style="border-top:none;padding:4px 8px;display:none">
+          <span class="muted" id="inspViewInfo" style="font-size:11px;flex:1"></span>
+          <label style="font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="inspSpin" > spin</label>
+        </div>
+        <!-- The one place editing actually happens, so it is the only elastic
+             child in this column: `flex:1 1 0; min-height:0` lets it take
+             whatever the outliner above does not want, instead of being the
+             pane that gets squeezed. A zone's Inspector is a ~720px stack. -->
+        <div class="scroll pad" id="inspector" style="flex:1 1 0;min-height:220px">
+          <p class="muted">Pick a level, then click an object in the viewport.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- assets -->
+    <section class="tab" id="tab-assets">
+      <!-- Four independent questions get four lists. Squeezing them into one
+           "category" tree is what put 57% of the disc under "prop": an
+           `alpha_01_` prefix says how a thing is drawn, not what it is. -->
+      <div class="panel" style="width:280px">
+        <div class="scroll" id="assetFacets" style="flex:1"></div>
+        <h2>Catalogue</h2>
+        <div class="pad" id="assetSummary"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <input id="assetSearch" placeholder="search 4,900 assets..."
+                 style="width:280px">
+          <label style="font-size:11px;color:var(--dim-ink);margin-left:10px">
+            <input type="checkbox" id="assetShared"> in more than one map only
+          </label>
+          <span style="flex:1"></span>
+          <span class="muted" id="assetCount"></span>
+        </div>
+        <div class="bar" id="assetChips"
+             style="border-top:none;flex-wrap:wrap;gap:5px;display:none"></div>
+        <div class="bar" style="border-top:none">
+          <span class="muted" style="font-size:11px">
+            Assets built into several maps can be placed here.
+          </span>
+        </div>
+        <div class="scroll" id="assetList" style="flex:1"></div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Preview</h2>
+        <div id="assetView" class="miniview"></div>
+        <div class="bar" style="border-top:none;padding:4px 8px">
+          <span class="muted" id="assetViewInfo" style="font-size:11px;flex:1">
+            Pick an asset.</span>
+          <label style="font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="assetSpin" > spin</label>
+        </div>
+        <h2>Where it lives</h2>
+        <div class="scroll pad" id="assetDetail">
+          <p class="muted">Pick an asset to see every map that has it.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- -------------------------------------------------- environment -->
+    <section class="tab" id="tab-env">
+      <div class="panel" style="width:280px">
+        <h2>One-click looks</h2>
+        <div class="pad" id="envPresets" style="padding-bottom:8px"></div>
+        <h2>Environment files</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <div class="muted" id="envLevel" style="font-size:11px">
+            Load a level in the 3D editor first.</div>
+          <label style="display:block;margin-top:6px;font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="envOwnOnly" checked>
+            only this area's files
+          </label>
+        </div>
+        <div class="scroll" id="envList"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="envTitle" class="muted">Pick a file</span>
+          <span style="flex:1"></span>
+          <span id="envSlot" class="muted" style="font-size:11px"></span>
+        </div>
+        <div class="bar" style="border-top:none">
+          <span class="muted" style="font-size:11px">
+            Lighting, fog, water, weather, particles. Undo with Ctrl+Z.
+          </span>
+        </div>
+        <div class="scroll pad" id="envFields"></div>
+        <div class="actionbar">
+          <button id="envRevert" disabled>Discard</button>
+          <span class="sep"></span>
+          <button id="envSave" class="primary" disabled>Save changes</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------ settings across disc -->
+    <section class="tab" id="tab-fields">
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span class="muted">Find a setting in</span>
+          <input id="fsExt" list="fsExtList" placeholder="fog" style="width:110px">
+          <datalist id="fsExtList"></datalist>
+          <span class="muted">named</span>
+          <input id="fsKey" placeholder="e.g. Color, Enable, Ambient"
+                 style="width:200px">
+          <button id="fsGo" class="primary">Search</button>
+          <span style="flex:1"></span>
+          <span id="fsInfo" class="muted"></span>
+        </div>
+        <div class="bar" style="border-top:none">
+          <span class="muted" style="font-size:11px">
+            Finds every copy of a field. Sets them together, one undo step.
+          </span>
+        </div>
+        <div class="scroll" id="fsResults" style="flex:1"></div>
+        <!-- Below the results, not above them: this writes to every ticked
+             file at once, and it used to sit between the search box and the
+             list it acts on. -->
+        <div class="actionbar" id="fsBulk" style="display:none">
+          <button id="fsAll">Tick all</button>
+          <button id="fsNone">Untick all</button>
+          <span class="sep"></span>
+          <span class="muted">Set the <b id="fsCount">0</b> ticked to</span>
+          <input id="fsValue" style="width:240px">
+          <button id="fsApply" class="primary">Apply to all</button>
+        </div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Values found</h2>
+        <div class="scroll pad" id="fsCommon">
+          <p class="muted" style="font-size:11px">
+            Shows how many files hold each value.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------- text the game shows -->
+    <!-- @feature:strings_editor -->
+    <section class="tab" id="tab-strings">
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <input id="stQ" placeholder="search 3,069 strings — name or text…"
+                 style="width:320px">
+          <select id="stSlot" style="width:150px"></select>
+          <button id="stGo" class="primary">Search</button>
+          <span style="flex:1"></span>
+          <span id="stInfo" class="muted"></span>
+        </div>
+        <div class="bar" style="border-top:none">
+          <span class="muted" style="font-size:11px">
+            Every line the game shows. Edits write all copies, one undo step.
+          </span>
+        </div>
+        <div class="scroll" id="stList" style="flex:1"></div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Edit</h2>
+        <div class="pad" id="stEdit">
+          <p class="muted" style="font-size:11px">Pick a string on the left.</p>
+        </div>
+      </div>
+    </section>
+    <!-- @end:strings_editor -->
+
+    <!-- BALANCE > Tables. 1,022 .csv files, 2,541 copies, all of them in
+         SWAT.DAT. Three views because they are three questions about the same
+         files: edit one, find a level's music, read the roster. None of them
+         is behind another click. -->
+    <!-- @feature:csv_editor -->
+    <section class="tab" id="tab-csv">
+      <div class="panel" style="width:280px">
+        <h2>Tables <span class="tag" id="csvCount"></span></h2>
+        <div class="pad" style="padding-bottom:6px">
+          <input id="csvSearch" placeholder="search by file name…" style="width:100%">
+          <select id="csvFamily" style="width:100%; margin-top:6px"></select>
+        </div>
+        <div class="scroll" id="csvList" style="flex:1; min-height:120px"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <button id="csvViewSheet" class="vtab on">Table</button>
+          <button id="csvViewSound" class="vtab">Music by level</button>
+          <button id="csvViewRoster" class="vtab">Multiplayer roster</button>
+          <span style="flex:1"></span>
+          <span id="csvWhere" class="muted"></span>
+        </div>
+        <div class="scroll" id="csvBody" style="flex:1; padding:10px 14px"><div class="empty">Pick a table</div></div>
+        <div class="actionbar">
+          <button id="csvSave" class="primary" disabled>Save</button>
+          <button id="csvRevert" disabled>Discard changes</button>
+          <span class="sep"></span>
+          <button id="csvExport" disabled
+                  title="Export the table as .csv.">Export CSV…</button>
+          <span class="sep"></span>
+          <span class="note" id="csvDirty"></span>
+        </div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>About</h2>
+        <div class="pad" id="csvAbout"></div>
+        <h2>On save</h2>
+        <div class="pad" id="csvPlan"></div>
+        <h2>Free space <span class="tag" id="csvCopies"></span></h2>
+        <div class="scroll pad" id="csvRoom" style="flex:1; min-height:80px"></div>
+      </div>
+    </section>
+    <!-- @end:csv_editor -->
+
+    <!-- ------------------------------------------------------- hidden -->
+
+    <!-- ----------------------------------------------------- campaign -->
+    <section class="tab" id="tab-campaign">
+      <div class="panel" style="width:280px">
+        <h2>Campaign missions (play order)</h2>
+        <div class="scroll" id="missionList"></div>
+        <h2>Showdown stages</h2>
+        <div class="scroll" id="stageList" style="max-height:38%"></div>
+      </div>
+      <!-- DESIGN-REVIEW A19: the mission form had a 240px window above two
+           tables that are not about the selected mission. It has the pane
+           now; Unlockables and the shop are Missions ▸ Unlocks & shop. -->
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="missionTitle"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btnOpenLevel" disabled>Open in 3D editor</button>
+        </div>
+        <div class="scroll pad" id="missionFields" style="flex:1">
+          <div class="empty" title="levelflow.csv: mission order and rewards">Pick a mission</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="tab-unlocks">
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0;
+                  border-right:1px solid var(--line)">
+        <div class="bar">
+          <span style="font:var(--t-section)" title="unlockables.csv: the unlock switches">Unlockables</span>
+          <select id="unlockType" style="width:140px"></select>
+          <input id="unlockFilter" placeholder="filter..." style="width:160px">
+          <span id="unlockInfo" class="muted" style="font-size:11px"></span>
+          <span class="spacer" style="flex:1"></span>
+          <!-- Posts unlock_all for the TYPE dropdown and never reads the
+               filter box beside it; the tooltip says so. -->
+          <button id="btnUnlockAll" title="Unlocks every one of the type picked on the left, whatever the filter shows.">Unlock all</button>
+        </div>
+        <div class="scroll" style="flex:1"><table id="unlockTable">
+          <thead><tr><th>name</th><th>type</th><th>default</th><th>MP criteria</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span style="font:var(--t-section)">Shop prices</span>
+          <input id="itemFilter" placeholder="filter items..." style="width:160px">
+          <span id="itemInfo" class="muted" style="font-size:11px"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btnFreeShop">Set all prices to 0</button>
+        </div>
+        <div class="scroll" style="flex:1"><table id="itemTable">
+          <thead><tr><th>item</th><th>type</th>
+            <th class="num">shop</th><th class="num">repair</th><th class="num">upgrade</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------- game rules -->
+    <!-- One scrolling column rather than sub-tabs. The unused difficulty
+         knobs go FIRST because they are the find; burying the strongest
+         thing behind a sub-tab is how it goes unnoticed. -->
+    <section class="tab" id="tab-rules">
+      <div class="panel" style="width:280px">
+        <h2>Game rules</h2>
+        <div class="scroll" id="rulesNav" style="flex:none"></div>
+        <div class="pad muted" id="rulesFacts"
+             style="font-size:11px; border-top:1px solid var(--line); flex:1;
+                    overflow:auto"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="rulesInfo" class="muted" style="font-size:11px"></span>
+          <span style="flex:1"></span>
+          <!-- The whole ladder, not the three rungs that happen to appear on
+               this page: `dead` was already used four times here and was
+               missing from its own legend, and `untested` was styled and used
+               nowhere in the product. -->
+          <span class="conf lbl measured"
+                title="Measured. Read straight off the disc.">measured</span>
+          <span class="conf lbl established"
+                title="Documented. From PS2 or format documentation.">established</span>
+          <span class="conf lbl inferred"
+                title="Inferred. Not confirmed in game.">inferred</span>
+          <span class="conf lbl untested"
+                title="Unverified in game.">untested</span>
+          <span class="conf lbl dead"
+                title="Inert. The game never reads it.">dead</span>
+          <button id="rulesReload">Reload</button>
+        </div>
+        <div class="scroll" id="rulesBody" style="flex:1; padding:18px 24px"></div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------- textures -->
+    <section class="tab" id="tab-textures">
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <select id="texLevel" style="width:220px"></select>
+          <span id="texAreas" style="display:none"></span>
+          <span id="texInfo" class="muted"></span>
+        </div>
+        <div class="scroll pad" id="texGrid"
+             style="display:flex; flex-wrap:wrap; gap:12px; align-content:flex-start"></div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>On the model</h2>
+        <div id="texView" class="miniview"></div>
+        <div class="bar" style="border-top:none;padding:4px 8px">
+          <span class="muted" id="texViewInfo" style="font-size:11px;flex:1;min-width:0;
+                overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button id="btnTexReplace" style="font-size:12px" disabled
+                  title="Click a texture first.">Replace…</button>
+          <label style="font-size:11px;color:var(--dim-ink)">
+            <input type="checkbox" id="texSpin" > spin</label>
+        </div>
+        <h2>Used by</h2>
+        <div class="scroll" id="texUsers">
+          <div class="empty" style="font-size:12px">Click a texture</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------ weapons -->
+    <section class="tab" id="tab-weapons">
+      <div class="panel" style="width:280px">
+        <h2>Weapons</h2>
+        <div class="pad" style="padding-bottom:4px">
+          <input id="gunFilter" placeholder="filter weapons..." style="width:100%">
+        </div>
+        <div class="scroll" id="gunList"></div>
+        <!-- DESIGN-REVIEW A12: the New weapon form sat open permanently on
+             the right. It opens from here. -->
+        <div class="actionbar">
+          <button id="btnNwOpen" style="width:100%">New weapon&hellip;</button>
+        </div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:300px">
+        <div class="bar">
+          <span id="gunTitle"></span>
+          <span class="spacer" style="flex:1"></span>
+        </div>
+        <div class="scroll pad isempty" id="gunFields">
+          <div class="empty">Pick a weapon</div>
+        </div>
+        <div class="actionbar">
+          <button id="btnGunReset" style="white-space:nowrap" title="Stage this weapon's stock values — nothing is written until you Apply">Load stock values</button>
+          <span class="sep"></span>
+          <label class="muted" style="display:flex;align-items:center;gap:5px;white-space:nowrap">
+            <input type="checkbox" id="gunEverywhere" checked>
+            patch all copies
+          </label>
+          <span id="gunCopies" class="muted" style="white-space:nowrap"></span>
+          <button id="btnGunSave" class="primary" disabled>Apply</button>
+        </div>
+      </div>
+
+      <div class="panel right" id="wmPanel" style="width:320px;flex:0 1 320px;min-width:220px">
+        <h2>Weapon model <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">&middot; experimental</span></h2>
+        <div class="scroll pad" id="wmBody" style="font-size:12px;line-height:1.5">
+          <div id="wmCur" class="muted">Pick a weapon on the left.</div>
+          <details open style="margin-top:8px">
+            <summary style="cursor:pointer;color:var(--gold)">How to use a custom weapon model</summary>
+            <ol style="margin:4px 0 4px 16px;padding:0">
+              <li>Press <b>New weapon&hellip;</b> (left) to make your own weapon with its own model. Or pick an existing weapon.</li>
+              <li>Pick the weapon on the left. Its model name shows above.</li>
+              <li>Make the gun in Blender (small and simple), File &gt; Export &gt; Wavefront (.obj).</li>
+              <li>Press <b>Choose .obj</b>. It is checked at once; then press <b>Import</b>.</li>
+              <li>Press <b>Boot test</b> (top bar).</li>
+            </ol>
+            <div class="muted">Limits: the model must fit the space of the one it
+              replaces (the Studio tells you). Many weapons share one model, so
+              importing over one of those changes them all (a warning shows who);
+              a <b>New weapon</b> has its own model, so it changes only itself.
+              Ctrl+Z undoes an import. <b>Tested in game:</b> a plain box (12 triangles) drew on Red&rsquo;s back;
+              meshes of 44 and 68 triangles froze the level load, so keep it to a
+              few triangles for now. A new weapon is not in Red&rsquo;s save, so it
+              cannot be picked in game yet.
+              <a href="#" data-guide="custom-models">Open the custom models guide</a></div>
+          </details>
+          <div id="wmWarn" style="display:none;margin-top:8px;padding:6px 8px;border:1px solid var(--warn);color:var(--warn);border-radius:4px"></div>
+          <div id="wmResult" style="margin-top:8px"></div>
+        </div>
+        <div class="actionbar">
+          <span id="wmStatus" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <input type="file" id="wmFile" accept=".obj" style="display:none">
+          <button id="btnWmPick" disabled>Choose .obj</button>
+          <button id="btnWmCheck" disabled>Check</button>
+          <button id="btnWmWrite" disabled>Import</button>
+        </div>
+      </div>
+
+      <div class="panel right" id="nwPanel" style="display:none;width:320px;flex:0 1 320px;min-width:240px">
+        <h2>New weapon</h2>
+        <div class="scroll pad" id="nwBody">
+          <p class="muted">Loading…</p>
+        </div>
+        <div class="actionbar">
+          <span id="nwStatus" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btnNwClose">Close</button>
+          <button id="btnNwCheck">Validate</button>
+          <button id="btnNwWrite" class="primary" disabled>Add weapon</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- creatures -->
+    <section class="tab" id="tab-creatures">
+      <div class="panel" style="width:280px">
+        <h2>Creatures (181)</h2>
+        <div class="pad" style="padding-bottom:4px">
+          <input id="crFilter" placeholder="filter creatures..." style="width:100%">
+        </div>
+        <div class="scroll" id="crList"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="crTitle" class="muted">Pick a creature</span>
+          <span class="spacer" style="flex:1"></span>
+          <span class="conf untested"
+                title="Unverified in game. See Guides > Modding guide.">untested</span>
+        </div>
+        <div class="pad" style="border-bottom:1px solid var(--line);font-size:12px;color:var(--dim-ink)"><span class="conf untested" title="Untested: unverified in game." style="margin:0 6px 0 0"></span>Unverified in game. Load a level in PCSX2 to check.
+        </div>
+        <div class="scroll pad" id="crFields"></div>
+        <div class="actionbar">
+          <button id="btnCrReset" title="Stage this creature's stock values — nothing is written until you Apply">Load stock values</button>
+          <span class="sep"></span>
+          <label class="muted" style="display:flex;align-items:center;gap:5px">
+            <input type="checkbox" id="crEverywhere" checked>
+            patch all copies
+          </label>
+          <span id="crCopies" class="muted"></span>
+          <button id="btnCrSave" class="primary" disabled>Apply</button>
+        </div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Model
+          <select id="crLod" style="float:right;width:96px;font-size:11px"></select>
+        </h2>
+        <div id="crView" style="height:320px;position:relative;background:#0d0b08;
+                                border-bottom:1px solid var(--line)">
+          <div id="crViewNote" class="muted"
+               style="position:absolute;inset:0;display:flex;align-items:center;
+                      justify-content:center;text-align:center;padding:16px;
+                      font-size:11px">
+            Pick a creature to see its model.
+          </div>
+        </div>
+        <div class="pad muted" id="crModelInfo" style="font-size:11px"></div>
+        <!-- @feature:swap_model -->
+        <h2>Use another character's model</h2>
+        <div class="pad" id="crSwap">
+          <div class="muted" style="font-size:11px">Pick a creature first.</div>
+        </div>
+        <!-- @end:swap_model -->
+        <h2>Edit the model</h2>
+        <div class="pad">
+          <div class="muted" style="font-size:11px; line-height:1.55;
+                                    margin-bottom:7px">
+            Export a part to OBJ, reshape it in Blender, import it back.
+            Move vertices only.
+          </div>
+          <div id="crParts"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- animation -->
+    <section class="tab" id="tab-anim">
+      <div class="panel" style="width:280px">
+        <h2>Animations</h2>
+        <div class="pad" style="padding-bottom:4px">
+          <select id="animArc" style="width:100%"></select>
+          <input id="animFilter" placeholder="filter clips…"
+                 style="width:100%;margin-top:5px">
+        </div>
+        <div class="scroll" id="animList" style="flex:1;min-height:120px"></div>
+        <h2>Skeleton</h2>
+        <div class="pad">
+          <!-- Filled per clip, in playAnim, with the rigs that fit THIS clip.
+               There is no refusal box under it any more because there is
+               nothing left to refuse: this list is built from the server's
+               own answer to "what can drive this", so every entry works.
+
+               The three things that used to live here -- a red refusal
+               panel, a " — wrong bone count" suffix on most options, and a
+               value that snapped back when you chose one of them -- were all
+               apologies for a dropdown pre-filled with all 236 skeletons in
+               the archive whether they fitted or not. -->
+          <select id="animSkel" style="width:100%" disabled></select>
+          <div class="muted" id="animSkelNote"
+               style="font-size:11px;margin-top:4px;line-height:1.5"></div>
+        </div>
+        <!-- The character, not just the stick figure. Only models rigged to
+             the same number of bones are offered: a model's per-vertex bone
+             is an index into ITS skeleton's file order, so a skeleton of a
+             different length is not a worse choice, it is a wrong one. -->
+        <h2>Character model</h2>
+        <div class="pad">
+          <select id="animModel" style="width:100%" disabled></select>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
+            <span class="muted" style="font-size:11px">Show</span>
+            <select id="animShow" style="flex:1;font-size:11px" disabled>
+              <option value="model">Model</option>
+              <option value="skeleton">Skeleton</option>
+              <option value="both">Model + skeleton</option>
+            </select>
+          </div>
+          <div class="muted" id="animModelNote"
+               style="font-size:11px;margin-top:6px;line-height:1.5"></div>
+        </div>
+        <!-- The round trip lives here, next to the clip you are watching and
+             the skeleton and Euler order you already picked, rather than in a
+             second bar with its own duplicate copies of both. -->
+        <h2>Blender round trip</h2>
+        <div class="pad">
+          <button id="animExportBtn" style="width:100%" disabled>Export BVH…</button>
+          <button id="animExportAllBtn" style="width:100%;margin-top:5px"
+                  title="Every clip on the disc as .bvh, by archive and skeleton, with an index.csv">
+            Export all animations…</button>
+          <button id="animImportBtn" style="width:100%;margin-top:5px">
+            Import .bvh…</button>
+          <input id="animImportFile" type="file" accept=".bvh"
+                 style="display:none">
+          <div class="muted" id="animIoNote"
+               style="font-size:11px;margin-top:6px">Import in Blender at scale 1.</div>
+          <div id="animIoReport" style="display:none;font-size:11px;
+               margin-top:6px;line-height:1.6;padding:6px 7px;
+               border:1px solid var(--line);border-radius:3px"></div>
+        </div>
+      </div>
+
+      <div id="animView" style="flex:1;position:relative;min-width:0;
+           background:var(--void);display:flex;flex-direction:column">
+        <div id="animStage" style="flex:1;min-height:0;position:relative"><div class="empty">Pick a clip</div></div>
+        <div id="animBar" style="display:flex;align-items:center;gap:8px;
+             padding:8px 12px;border-top:1px solid var(--line);
+             background:var(--sheet-b);flex-wrap:wrap">
+          <button id="animPlay" style="width:64px" disabled>Play</button>
+          <input id="animScrub" type="range" min="0" max="0" value="0"
+                 style="flex:1;min-width:160px" disabled>
+          <span id="animFrameLbl" class="muted"
+                style="font-size:11px;min-width:96px;text-align:right"></span>
+          <span class="muted" style="font-size:11px">Euler</span>
+          <select id="animEuler" style="font-size:11px" disabled></select>
+        </div>
+        <div id="animMsg" class="muted"
+             style="padding:8px 12px;font-size:11px;line-height:1.6;
+             border-top:1px solid var(--line)"></div>
+      </div>
+    </section>
+
+
+    <!-- ---------------------------------------------- movies + screens -->
+    <section class="tab" id="tab-movies">
+      <div class="panel" style="width:280px">
+        <h2>Cutscenes</h2>
+        <div class="scroll" id="movList" style="flex:1;min-height:120px"></div>
+        <h2 style="border-top:1px solid var(--line)">Screens (.ipu)</h2>
+        <div class="scroll" id="stillList" style="flex:1;min-height:120px"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="movInfo" class="muted" style="font-size:11px"></span>
+          <span style="flex:1"></span>
+          <a id="movSave" class="nm" style="font-size:11px;cursor:pointer;display:none">save .mpg</a>
+          <a id="stillSave" class="nm" style="font-size:11px;cursor:pointer;display:none">save .ipu</a>
+          <button id="stillReplaceBtn"
+                  style="font-size:11px;padding:2px 8px;display:none">Replace this screen…</button>
+          <input id="stillFile" type="file" accept="image/*" style="display:none">
+        </div>
+        <!-- Estimate, then commit. The estimate is not decoration: a picture
+             has to fit the slot the original occupies, and on 36 of the 63
+             screens the slot is SMALLER than the file that lives in it. -->
+        <div id="stillDrop" class="pad" style="display:none;font-size:11px;
+             border-top:1px solid var(--line)"></div>
+        <div style="flex:1;display:flex;align-items:center;justify-content:center;
+                    background:var(--void);min-height:0">
+          <video id="movPlayer" controls
+                 style="max-width:100%;max-height:100%;display:none"></video>
+          <img id="stillImg" alt=""
+               style="max-width:100%;max-height:100%;display:none;
+                      image-rendering:auto">
+          <span id="movHint" class="muted" style="font-size:12px">
+            Pick a cutscene.</span>
+        </div>
+        <div class="pad muted" id="movStreams" style="font-size:11px"></div>
+      </div>
+    </section>
+
+    <!-- Two halves of the game's audio, and they are genuinely different
+         things: the .bd banks are short SPU-ADPCM effects, the .stm streams
+         are 13.9 hours of voice, music and ambience. Same tab, one switch,
+         because "sound" is where anyone would look for either. -->
+    <section class="tab" id="tab-audio" style="flex-direction:column">
+      <div class="bar">
+        <button id="audViewBanks" class="vtab on">Sound effects (banks)</button>
+        <button id="audViewStreams" class="vtab">Voices &amp; music (streams)</button>
+        <span class="muted" style="font-size:11px" id="audViewNote">
+          155 effect banks, SPU-ADPCM</span>
+      </div>
+
+      <div id="audioBanks" style="flex:1; display:flex; min-height:0">
+        <div class="panel" style="width:280px">
+          <h2>Banks</h2>
+          <div class="pad" style="padding-bottom:4px">
+            <input id="sndFilter" placeholder="filter banks…" style="width:100%">
+          </div>
+          <div class="scroll" id="sndBanks" style="flex:1;min-height:120px"></div>
+        </div>
+        <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+          <div class="bar">
+            <span id="sndInfo" class="muted" style="font-size:11px"></span>
+            <span style="flex:1"></span>
+            <span class="muted" style="font-size:11px">rate</span>
+            <select id="sndRate" style="font-size:11px">
+              <option value="11025">11025</option>
+              <option value="22050" selected>22050</option>
+              <option value="24000">24000</option>
+              <option value="32000">32000</option>
+              <option value="44100">44100</option>
+            </select>
+            <audio id="sndPlayer" controls style="height:30px"></audio>
+          </div>
+          <div class="scroll" id="sndList" style="flex:1"><div class="empty">Pick a bank</div></div>
+        </div>
+      </div>
+
+      <div id="audioStreams" style="flex:1; display:none; min-height:0">
+        <div class="panel" style="width:280px">
+          <div class="pad" style="padding-bottom:6px">
+            <input id="strSearch" placeholder="search the spoken words…"
+                   style="width:100%">
+            <div class="muted" style="font-size:11px; margin-top:5px">
+              Searches the game's captions too.</div>
+          </div>
+          <div class="pad" style="padding-top:0; display:flex; gap:6px;
+                                  flex-wrap:wrap; align-items:center">
+            <select id="strKind" style="font-size:11px"></select>
+            <label class="muted" style="font-size:11px; display:flex;
+                                        align-items:center; gap:4px">
+              <input type="checkbox" id="strOrphan"> unused only</label>
+            <label class="muted" style="font-size:11px; display:flex;
+                                        align-items:center; gap:4px">
+              <input type="checkbox" id="strLoops"> loops only</label>
+          </div>
+          <div class="scroll" id="strGroups" style="flex:1; min-height:120px"></div>
+        </div>
+        <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+          <div class="bar">
+            <span id="strInfo" class="muted" style="font-size:11px"></span>
+            <span style="flex:1"></span>
+            <audio id="strPlayer" controls style="height:30px"></audio>
+          </div>
+          <div class="scroll" id="strBody" style="flex:1; padding:14px 20px"><div class="empty">Pick a group</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ NEW DESTINATIONS ============================
+         Five places for work that is already decoded and had nowhere to live,
+         plus the two that are queued and need a named home so the next piece
+         of work does not force another rework. Each renders itself from a new
+         route; when that route is not up yet the panel says so plainly rather
+         than sitting blank. -->
+
+    <!-- LOGIC > Cast: 181 characters x 2,705 behaviours, and they are
+         ORTHOGONAL -- 190 behaviours are used with more than one character.
+         Anything that presents "the character" as one field is wrong about
+         the data, so this browser has two columns, not one list. -->
+    <section class="tab" id="tab-cast">
+      <div class="panel" style="width:280px">
+        <h2>Archive</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <select id="castArc" style="width:100%"></select>
+          <div class="muted" id="castRoster" style="font-size:11px;margin-top:6px;line-height:1.5"></div>
+        </div>
+        <h2>Filter</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <input id="castFilter" placeholder="filter characters and behaviours..." style="width:100%">
+        </div>
+        <div class="scroll pad" id="castDetail" style="flex:1;min-height:0"></div>
+      </div>
+      <div style="flex:1;display:flex;min-width:0">
+        <div class="panel" style="flex:1;min-width:0">
+          <h2>Characters <span class="tag" id="castCharCount"></span></h2>
+          <div class="scroll" id="castChars" style="flex:1"></div>
+        </div>
+        <div class="panel" style="flex:1;min-width:0;border-left:1px solid var(--line)">
+          <h2>Behaviours <span class="tag" id="castBehCount"></span></h2>
+          <div class="scroll" id="castBehs" style="flex:1"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LOGIC > Cast > Behaviour tables. The Cast tab is the PALETTE: what an
+         enemy may be. This is the EDITOR for one entry in it -- which state
+         machines a table binds, and the numbers inside those state machines.
+         Two halves with two different confidences, side by side on purpose:
+         the bindings are a closed set read off the archive's own contents, and
+         the numbers sit between opcodes that have no names anywhere on this
+         disc.
+
+         The whole section is one sentinel because the three features it
+         carries are one destination: behaviour_numbers is only reachable from
+         a binding row's arrow and behaviour_clone only from a loaded table, so
+         there is no release build in which the section should exist without
+         them. nav.js only draws a sub-view button when `#tab-<id>` is in the
+         document, so stripping this is also what keeps "Behaviour tables" out
+         of the Cast strip in a release build -- without it the destination
+         ships and can only ever render a not_in_this_build refusal. -->
+    <!-- @feature:behaviour_tables -->
+    <section class="tab" id="tab-states">
+      <div class="panel" style="width:280px">
+        <h2>Archive</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <select id="btArc" style="width:100%"></select>
+          <input id="btFilter" placeholder="filter tables..."
+                 style="width:100%;margin-top:6px">
+        </div>
+        <h2>Tables <span class="tag" id="btCount"></span></h2>
+        <div class="scroll" id="btList" style="flex:1;min-height:0"></div>
+      </div>
+      <div class="panel" style="width:430px;border-left:1px solid var(--line)">
+        <div class="bar">
+          <span id="btTitle" class="muted" style="min-width:0;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap">Pick a behaviour table</span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btExportTbl" disabled
+                  title="Save a copy of this table as it is on the disc right now.">Export…</button>
+          <button id="btClone" disabled
+                  title="Copy to a new name in this archive.">Clone…</button>
+          <button id="btRename" disabled
+                  title="Rename it, and repoint the enemies that name it.">Rename…</button>
+        </div>
+        <div class="scroll pad" id="btBody" style="flex:1;min-height:0"></div>
+        <div class="actionbar">
+          <label class="muted" style="display:flex;align-items:center;gap:5px">
+            <input type="checkbox" id="btEverywhere" checked>
+            patch all copies
+          </label>
+          <span id="btCopies" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btApply" class="primary" disabled>Apply</button>
+        </div>
+      </div>
+      <div class="panel" style="flex:1;min-width:0;border-left:1px solid var(--line)">
+        <div class="bar">
+          <span id="btStateTitle" class="muted">Pick a state to see its numbers</span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btExportState" disabled
+                  title="Save a copy of this state file as it is on the disc right now.">Export…</button>
+          <button id="btRenameState" disabled
+                  title="Rename it, and repoint every table that binds it.">Rename…</button>
+        </div>
+        <div class="scroll pad" id="btState" style="flex:1;min-height:0"></div>
+        <div class="actionbar">
+          <label class="muted" style="display:flex;align-items:center;gap:5px">
+            <input type="checkbox" id="btStateEverywhere" checked>
+            patch all copies
+          </label>
+          <span id="btStateCopies" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btStateApply" class="primary" disabled>Apply</button>
+        </div>
+      </div>
+    </section>
+    <!-- @end:behaviour_tables -->
+
+    <!-- LOGIC > Behaviour: /api/aivocab has served the AI condition vocabulary
+         since it was written and no button has ever called it. -->
+    <section class="tab" id="tab-behaviour">
+      <div class="panel" style="width:280px">
+        <h2>Filter</h2>
+        <div class="pad"><input id="aivFilter" placeholder="filter conditions..." style="width:100%"></div>
+        <div class="pad" id="aivStats" style="font-size:11px;line-height:1.7"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="scroll" id="aivBody" style="flex:1;padding:14px 18px"></div>
+      </div>
+    </section>
+
+    <!-- BALANCE > Tuning > Body & Rig: the eight per-character files that are
+         not .cr and not .swt. 939 files, 426,648 addressable values. The
+         headroom warning is not decoration -- the median .sphs copy has ONE
+         spare byte in its slot, so a refusal is the normal outcome of a bad
+         edit here, not an edge case. -->
+    <!-- @feature:char_files -->
+    <section class="tab" id="tab-rig">
+      <div class="panel" style="width:280px">
+        <h2>Characters <span class="tag" id="rigCount"></span></h2>
+        <div class="pad" style="padding-bottom:4px">
+          <input id="rigFilter" placeholder="filter characters..." style="width:100%">
+        </div>
+        <div class="scroll" id="rigList" style="flex:1;min-height:120px"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar" id="rigKinds"></div>
+        <div class="pad" style="border-bottom:1px solid var(--line);font-size:12px;color:var(--dim-ink)"><span class="conf untested" title="Untested: unverified in game." style="margin:0 6px 0 0"></span>Unverified in game. Load a level in PCSX2 to check.
+        </div>
+        <div style="flex:1;display:flex;min-height:0">
+          <div class="scroll pad" id="rigBody" style="flex:1;min-width:0"></div>
+          <div class="panel" style="width:320px;border-left:1px solid var(--line);border-right:none">
+            <h2>What this will cost</h2>
+            <div class="scroll pad" id="rigPlan" style="flex:1"></div>
+          </div>
+        </div>
+        <div class="actionbar">
+          <span id="rigWhere" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <label class="muted" style="display:flex;align-items:center;gap:5px">
+            <input type="checkbox" id="rigEverywhere" checked>
+            patch all copies
+          </label>
+          <button id="btnRigCheck">Validate</button>
+          <button id="btnRigSave" class="primary" disabled>Apply</button>
+        </div>
+      </div>
+    </section>
+    <!-- @end:char_files -->
+
+    <!-- LOGIC > Links: the queued area-link graph. Nodes are levels, edges are
+         doors, and both read the same route the table does. Only 10 .sub files
+         exist across 61 level archives, so the empty state has to say that out
+         loud or 51 levels read as broken. -->
+    <!-- @feature:links_edit -->
+    <section class="tab" id="tab-links">
+      <div class="panel" style="width:280px">
+        <h2>Archive</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <select id="linkArc" style="width:100%"></select>
+        </div>
+        <h2>Doors <span class="tag" id="linkCount"></span></h2>
+        <div class="scroll" id="linkList" style="flex:1;min-height:120px"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar">
+          <button id="linkViewTable" class="vtab on">Door</button>
+          <button id="linkViewGraph" class="vtab">Graph of every link</button>
+        </div>
+        <div class="scroll" id="linkBody" style="flex:1;padding:14px 18px"></div>
+        <div class="scroll" id="linkGraph" style="flex:1;padding:14px 18px;display:none"></div>
+      </div>
+    </section>
+    <!-- @end:links_edit -->
+
+    <!-- MEDIA > Menus: FRONT.DAT's screens and the in-game HUD.
+         Values and layout are safe to edit. RENAMES are not: the engine
+         resolves widgets by name, 69 of 210 screen names are verbatim
+         strings in SLUS_205.00, and renaming a button in pause.swui froze
+         story-level loading. The panel warns with the evidence and requires
+         an explicit tick; it does not forbid. -->
+    <!-- @feature:menu_edit -->
+    <section class="tab" id="tab-menus">
+      <div class="panel" style="width:280px">
+        <h2>Screens <span class="tag" id="menuTally"></span></h2>
+        <div class="pad" style="padding-bottom:6px">
+          <select id="menuScope" style="width:100%">
+            <option value="FRONT.DAT">FRONT.DAT — the main menu</option>
+            <option value="all">Every UI file on the disc</option>
+            <option value="SWAT.DAT">SWAT.DAT — shared UI</option>
+          </select>
+          <input id="menuFilter" placeholder="filter by name..."
+                 style="width:100%;margin-top:6px">
+        </div>
+        <div class="scroll" id="menuList" style="flex:1;min-height:120px"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar">
+          <b id="menuTitle"></b>
+          <span id="menuMeta" class="muted"></span>
+        </div>
+        <div class="pad" style="padding:6px 18px;display:flex;gap:14px;
+                                align-items:center;flex-wrap:wrap">
+          <label><input type="checkbox" id="menuShowCommented">
+            Show commented-out tags</label>
+          <label><input type="checkbox" id="menuOneOnly">
+            Only this archive's copy</label>
+          <span id="menuDirty" class="tag"></span>
+        </div>
+        <div id="menuEvidence" class="infbox" style="display:none;margin:0 18px">
+        </div>
+        <div class="scroll" id="menuFields"
+             style="flex:1;padding:8px 18px;min-height:0"><div class="empty">Pick a screen</div></div>
+        <div class="scroll" id="menuPlan"
+             style="padding:8px 18px;max-height:240px"></div>
+        <div class="actionbar">
+          <button id="btnMenuCheck" disabled title="Check every copy fits">Validate</button>
+          <button id="btnMenuSave" class="primary" disabled>Save</button>
+        </div>
+      </div>
+    </section>
+    <!-- @end:menu_edit -->
+
+    <!-- LOGIC > Scripting: ships READ-ONLY at rung inferred. The action
+         opcodes 1001-1571 have no names anywhere on the disc. -->
+    <!-- @feature:scripting_browser -->
+    <section class="tab" id="tab-scripting">
+      <div class="panel" style="width:280px">
+        <h2>Archive</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <select id="scrArc" style="width:100%"></select>
+          <input id="scrFilter" placeholder="filter scripts..." style="width:100%;margin-top:6px">
+        </div>
+        <div class="scroll" id="scrList" style="flex:1;min-height:0"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="scroll" id="scrBody" style="flex:1;padding:14px 18px"></div>
+      </div>
+    </section>
+    <!-- @end:scripting_browser -->
+
+    <!-- PROJECT > Versions. A mod and a checkpoint are the same file format
+         wearing two coats; there is one thing now, and it is a Version. -->
+    <section class="tab" id="tab-versions">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div id="verBanner" style="padding:12px 18px;border-bottom:1px solid var(--line)"></div>
+        <div class="bar">
+          <button id="verSave" class="primary">Save as new version…</button>
+          <span style="flex:1"></span>
+          <button id="verRefresh">Refresh</button>
+        </div>
+        <div class="scroll" id="verList" style="flex:1;padding:10px 18px"></div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Compare</h2>
+        <div class="scroll pad" id="verDiff" style="flex:1"></div>
+      </div>
+    </section>
+
+    <!-- PROJECT > Code Mods. The executable hooks behind one checklist and one Build button. -->
+    <section class="tab" id="tab-codemods">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar"><b>Code Mods</b><span class="muted" style="margin-left:10px">noclip &middot; freeze world &middot; camera lock &middot; slow-mo &middot; cheats menu, built into a copy of the game</span><span style="flex:1"></span><span id="cmBarSlot"></span></div>
+        <div class="scroll" id="cmBody" style="flex:1;padding:10px 18px"></div>
+      </div>
+    </section>
+
+    <section class="tab" id="tab-mods">
+      <div class="panel" style="width:280px">
+        <h2>Save &amp; share</h2>
+        <div class="pad">
+          <!-- Measured against stock, not counted from the edit history: a
+               file edited and then reverted is in the history and not in
+               the mod. It said "181 file(s) changed and ready to save" over
+               a disc that matched stock byte for byte. -->
+          <div id="modTouched" class="muted" style="margin-bottom:8px"></div>
+          <button id="btnShareMod" class="primary" style="width:100%"
+                  title="Mod pack, mod file, patch or playable ISO">Build &amp; share&hellip;</button>
+          <button id="btnSaveMod" style="width:100%;margin-top:6px"
+                  title="Keep a named copy of your mod as it is now. Restore it any time from Versions.">Save a version&hellip;</button>
+          <hr>
+          <div class="muted" style="margin-bottom:6px">Add someone else&rsquo;s mod</div>
+          <button id="btnApplyPack" style="width:100%"
+                  title="Add a mod pack .zip someone sent you">Apply a mod pack&hellip;</button>
+          <button id="btnImportMod" style="width:100%;margin-top:6px"
+                  title="Add a .rdrmod.json someone sent you">Load a mod file&hellip;</button>
+          <hr>
+          <div class="muted" style="font-size:12px;line-height:1.5">Every edit is already on your
+            working disc: press <b>Play</b> to try it. Saved copies and restore
+            points are under <a href="#" id="lnkVersions">Versions</a>.</div>
+        </div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <button id="workViewFiles" class="vtab on">Changed files</button>
+          <button id="workViewHistory" class="vtab">Edit history</button>
+          <button id="workViewLog" class="vtab">Activity</button>
+          <span style="flex:1"></span>
+          <button id="btnRefreshMods">Refresh</button>
+        </div>
+        <div class="scroll" id="touchedList" style="flex:1"></div>
+        <div class="scroll" id="historyList" style="flex:1; display:none"></div>
+        <!-- Per-file: what this session wrote, what each file looks like
+             against stock, and a one-click revert for any one of them. Reads
+             the journal (instant), never the whole disc -- the 2.2 GB scan is
+             exactly what got the old "What's changed?" button removed. -->
+        
+        <div class="scroll pad" id="logView" style="flex:1; display:none">
+          <pre id="logPane"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------- archives -->
+    <section class="tab" id="tab-saves">
+      <div class="panel" style="width:280px">
+        <h2>Memory cards</h2>
+        <div class="scroll" id="saveCards" style="flex:1"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar">
+          <div id="saveBanner"></div>
+          <span style="flex:1"></span>
+          <div id="savePcsx2"></div>
+          <button id="saveRefresh">Refresh</button>
+        </div>
+        <div class="scroll pad" style="flex:1;padding:10px 16px">
+          <h3 style="margin-top:0">This save</h3>
+          <div id="saveFileFields"></div>
+          <h3>Verified</h3>
+          <div id="saveDecoded"></div>
+          <details id="saveUnverified" style="margin-top:14px">
+            <summary style="cursor:pointer;font-weight:600">Unverified fields
+              <span class="muted" style="font-weight:400;font-size:11px">&mdash; raw numbers whose meaning is not confirmed. For research; change at your own risk.</span></summary>
+            <div id="saveCandidates" style="margin-top:6px"></div>
+          </details>
+        </div>
+        <div class="actionbar">
+          <span id="saveStatus" class="note"></span>
+          <span class="sep"></span>
+          <button id="saveWrite" class="primary">Write to card…</button>
+        </div>
+      </div>
+      <div class="panel right" style="width:320px">
+        <h2>Profiles</h2>
+        <div id="saveSlots"></div>
+      </div>
+    </section>
+
+    <section class="tab" id="tab-archives">
+      <div class="panel" style="width:280px">
+        <h2>Disc</h2>
+        <div class="pad" id="discPanel"></div>
+        <h2>Archives (66)</h2>
+        <div class="pad" style="padding-bottom:4px">
+          <input id="arcFilter" placeholder="filter archives..." style="width:100%">
+          <div class="muted" style="font-size:11px;margin-top:4px"
+               title="Whether an archive can be repacked decides whether you can add content to it, not only edit what is there.">
+            <span class="conf measured"></span> repack verified in game; the rest untested</div>
+        </div>
+        <div class="scroll" id="arcList"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <button id="arcViewFiles" class="vtab on">Files in this archive</button>
+          <button id="arcViewRoom" class="vtab">Room to build</button>
+          <span style="flex:1"></span>
+          <input id="tocFilter" placeholder="filter files…" style="width:220px">
+          <span id="tocInfo" class="muted"></span>
+        </div>
+        <div class="scroll" id="arcFilesView"><table id="tocTable">
+          <thead><tr>
+            <th>name</th><th>ext</th><th class="num">size</th>
+            <th class="num">stored</th><th class="num">slot</th>
+            <th class="num">headroom</th><th>flags</th>
+          </tr></thead><tbody></tbody>
+        </table><div class="empty" id="tocEmpty">Pick an archive</div></div>
+        <!-- "Where can I build?" is a question about the same archives, so it
+             belongs here rather than in a tab of its own. -->
+        <div id="arcRoomView" style="display:none; flex:1; min-height:0;
+                                     flex-direction:column">
+          <div class="bar" style="border-top:none">
+            <span class="muted">Level</span>
+            <select id="capLevel" style="width:220px"></select>
+            <span id="capInfo" class="muted"></span>
+          </div>
+          <div class="scroll" style="flex:1"><table id="capTable">
+            <thead><tr>
+              <th>file</th><th>holds</th><th class="num">objects</th>
+              <th class="num">raw</th><th class="num">stored</th>
+              <th class="num">slot</th><th class="num">spare</th>
+              <th>room for new content</th>
+            </tr></thead><tbody></tbody>
+          </table></div>
+        </div>
+        <!-- @feature:file_add -->
+        <!-- The one write this tab offers, so it sits in the action bar at
+             the bottom like every other write in the product. Wired by
+             arcadd.js; the whole bar is stripped from a release build along
+             with the route it speaks to. -->
+        <div class="actionbar" id="arcAddBar">
+          <span class="note">
+            Checked before writing. Details: Guides > Modding guide.
+          </span>
+          <span class="sep"></span>
+          <button id="arcAddBtn" class="primary"
+                  title="Add a file to this archive. Adds cannot be undone.">Add a file…</button>
+        </div>
+        <!-- @end:file_add -->
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- search -->
+
+    <!-- -------------------------------------------------- text editor -->
+    <!-- No inline position:relative here: it beat .tab{position:absolute;
+         inset:0}, so this tab was only as tall as its contents and the
+         editor stopped a third of the way down the window. .tab is already
+         positioned, which is all #dropOverlay needs. -->
+    <section class="tab" id="tab-text">
+      <div id="dropOverlay"
+           style="display:none;position:absolute;inset:0;z-index:9;
+                  background:rgba(0,0,0,.55);border:3px dashed var(--gold);
+                  border-radius:6px;pointer-events:none;
+                  align-items:center;justify-content:center;
+                  font-size:26px;font-weight:700;color:var(--gold)"></div>
+      <!-- Search and viewer used to be two tabs, which meant finding a file
+           in one place and opening it in another. Find it, click it, edit it. -->
+      <div class="panel" style="width:280px">
+        <h2>Place files</h2>
+        <!-- Built for a showcase video: the target archive is stated in
+             large text at all times, the drop zone doubles as a browse
+             button, and nothing writes without a per-file plan first. -->
+        <div class="pad" style="padding-bottom:6px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="muted" style="font-size:11px;flex:none">Placing into</span>
+            <select id="dropArc" style="flex:1;min-width:0;font-weight:600"></select>
+          </div>
+          <div id="dropZone"
+               style="margin-top:6px;border:2px dashed var(--line);
+                      border-radius:6px;padding:14px 10px;text-align:center;
+                      cursor:pointer;font-size:12px">
+            Drop files here<br>
+            <span class="muted" style="font-size:11px">or click to browse</span>
+          </div>
+          <input id="dropBrowse" type="file" multiple style="display:none">
+          <div id="dropPlan" style="margin-top:6px"></div>
+        </div>
+        <h2>Find a file</h2>
+        <div class="pad" style="padding-bottom:6px">
+          <input id="searchBox" placeholder="search term…" style="width:100%">
+          <div style="display:flex; gap:5px; margin-top:5px">
+            <select id="searchMode" style="flex:1">
+              <option value="name">by file name</option>
+              <option value="content">inside file contents</option>
+            </select>
+            <input id="searchExt" placeholder="ext" style="width:70px">
+          </div>
+          <button id="btnSearch"
+                  style="width:100%; margin-top:5px">Search</button>
+          <div id="searchInfo" class="muted" style="font-size:11px; margin-top:5px"></div>
+        </div>
+        <div class="scroll" id="searchResults"></div>
+      </div>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0">
+        <div class="bar">
+          <span id="textTitle" class="muted"></span>
+          <span class="spacer" style="flex:1"></span>
+          <span id="fitInfo" class="muted"></span>
+          <div class="meter" id="fitMeter" style="display:none"><i id="fitBar"></i></div>
+          <select id="binView" style="width:110px; display:none">
+            <option value="strings">Strings</option>
+            <option value="hex">Hex</option>
+          </select>
+        </div>
+        <div style="flex:1; min-height:0; padding:6px; position:relative">
+          <textarea id="textArea" spellcheck="false"></textarea>
+          <!-- DESIGN-REVIEW B6: an empty dark rectangle with a live Apply. -->
+          <div class="empty" id="textEmpty"
+               style="position:absolute;inset:0;background:var(--bg)">Search for a file to open it</div>
+        </div>
+        <div class="actionbar">
+          <button id="btnExport" title="Save this file's decompressed bytes to disk" disabled>Export</button>
+          <button id="btnImport" title="Replace this file with bytes from disk" disabled>Import…</button>
+          <button id="btnCheck" disabled>Validate</button>
+          <span class="sep"></span>
+          <button id="btnSaveText" class="primary danger" disabled>Save into ISO</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Persistent global state, the way a DCC tool does it. These used to be
+       pills crowded into the header next to six buttons; down here they are
+       always visible without competing with the toolbar. -->
+  <!-- Outside the Levels panel on purpose: setFold shows and hides every
+       sibling up to the next H2, and that wiped this dialog's display:none. -->
+        <div id="lvlExportDlg" style="display:none;position:fixed;inset:0;z-index:90;
+             background:rgba(0,0,0,.55);align-items:flex-start;justify-content:center">
+          <div style="width:min(400px,92vw);margin-top:14vh;background:var(--bg2);
+               border:1px solid var(--line);border-radius:6px;padding:14px 16px">
+            <div style="font:var(--t-head);color:var(--title);margin-bottom:10px">Export whole level</div>
+            <label style="display:flex;align-items:center;gap:6px"
+                   title="Every area, textures included, zipped.">
+              <input type="checkbox" id="lvlExportCol" checked> Include collision</label>
+            <label style="display:flex;align-items:center;gap:6px;margin-top:4px"
+                   title="The .glb separates art from collision.">
+              <input type="checkbox" id="lvlExportGlb" checked> Also write glTF (.glb)</label>
+            <!-- Interiors sit INSIDE the exterior's box on the disc, so by
+                 default sibling areas are moved apart along X and every shift
+                 is written into the .obj header. This asks for the disc's own
+                 coordinates instead. -->
+            <label style="display:flex;align-items:center;gap:6px;margin-top:4px"
+                   title="Real disc coordinates. Interiors overlap their exterior. Off: areas are laid out side by side, and the shifts are recorded in the .obj header.">
+              <input type="checkbox" id="lvlExportNative"> True world positions</label>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+              <button id="btnLevelExportCancel">Cancel</button>
+              <button id="btnLevelExportGo" class="primary">Export</button>
+            </div>
+          </div>
+        </div>
+
+  <div id="busyBar" aria-hidden="true"></div>
+  <footer id="statusbar">
+    <span id="sbLevel" class="sb">no level loaded</span>
+    <span class="sbsep"></span>
+    <span id="sbScene" class="sb dim"></span>
+    <span class="spacer"></span>
+    <span id="sbBusy" class="sb dim" style="display:none"></span>
+    <span id="sbJob" class="sb warn" style="display:none"></span>
+    <button id="sbJobCancel" class="sblink" style="display:none"
+            title="Stop the job the Studio is running">Cancel</button>
+    <span id="sbEdits" class="sb dim"></span>
+    <span id="isopill" class="sb">disc ?</span>
+    <span id="pcsx2pill" class="sb">PCSX2 ?</span>
+    <span class="sbsep"></span>
+    <button id="sbGuides" class="sblink" title="User guide, modding guide, custom models">Guides</button>
+    <span class="sbsep"></span>
+    <button id="sbPalette" class="sblink" title="Jump to anything">Ctrl+K</button>
+  </footer>
+</div>
+
+<!-- Guides viewer: the long-form docs, read inside the app. -->
+<div id="guideView" style="display:none;position:fixed;inset:0;z-index:95;
+     background:rgba(0,0,0,.55)">
+  <div style="max-width:860px;height:82vh;margin:6vh auto 0;background:var(--bg2);
+       border:1px solid var(--line);border-radius:10px;padding:14px 18px;
+       display:flex;flex-direction:column">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <button data-guide="user-guide">User guide</button>
+      <button data-guide="modding">Modding guide</button>
+      <button data-guide="custom-models">Custom models</button>
+      <span style="flex:1"></span>
+      <button id="guideClose">Close</button>
+    </div>
+    <pre id="guideText" style="flex:1;overflow:auto;white-space:pre-wrap;margin:0;
+         font:var(--t-mono);font-size:12px"></pre>
+  </div>
+</div>
+
+<!-- App setup: which files on THIS machine the Studio reads and writes.
+     Served by the desktop shell (pywebview), not by an HTTP route -- the
+     Studio can face a LAN, and "change which file you write to" is not a
+     request a network peer may make. In a plain browser the modal opens,
+     says why it is inert, and offers nothing. -->
+<div id="appSetup" style="display:none;position:fixed;inset:0;z-index:90;
+     background:rgba(0,0,0,.55)">
+  <!-- `var(--panel,#1d2229)` was a loose hardcoded hex: --panel is defined
+       nowhere in this file, so the fallback always won and this was the one
+       surface in the product no palette could move. It stayed dark under a
+       light theme while its text went dark with everything else, which is
+       the modal disappearing into itself. --bg2 is the panel colour and the
+       stylesheet's own header already says a palette change is one block. -->
+  <div style="max-width:640px;margin:8vh auto 0;background:var(--bg2);
+       border:1px solid var(--line);border-radius:10px;padding:22px 26px">
+    <h2 style="margin:0 0 4px;font-size:17px">App setup</h2>
+    <p class="dim" style="margin:0 0 16px;font-size:12px">
+      The discs this Studio uses. Changing one restarts the app.</p>
+
+    <div id="asBrowserNote" style="display:none" class="dim">
+      Browser tab: disc switching needs the desktop app.
+    </div>
+
+    <div id="asBody">
+      <h3 style="font-size:13px;margin:12px 0 4px">Original disc (never written)</h3>
+      <div class="mono dim" id="asVanilla" style="word-break:break-all">&mdash;</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asPickVanilla">Change&hellip;</button>
+        <span class="dim" style="font-size:11px;align-self:center">
+          The pristine copy: restore source and the baseline every diff is
+          measured against.</span>
+      </div>
+
+      <h3 style="font-size:13px;margin:16px 0 4px">Working disc (your edits)</h3>
+      <div class="mono dim" id="asWorking" style="word-break:break-all">&mdash;</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asPickWorking">Switch&hellip;</button>
+        <span class="dim" style="font-size:11px;align-self:center">
+          Any copy works. Foreign edits show up as changes.</span>
+      </div>
+      <div id="asKnown" style="margin:6px 0 0"></div>
+
+      <h3 style="font-size:13px;margin:16px 0 4px">PCSX2 (Play and Boot test)</h3>
+      <div class="mono dim" id="asPcsx2" style="word-break:break-all">&mdash;</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asPickPcsx2">Choose&hellip;</button>
+        <button id="asFindPcsx2">Auto-detect</button>
+        <button id="asClearPcsx2" class="ghost">Forget</button>
+      </div>
+      <div id="asPcsx2Note" class="dim" style="font-size:11px;margin-top:4px"></div>
+    </div>
+
+    <!-- Appearance is app setup too, and unlike the disc paths it works in a
+         plain browser tab: it is localStorage, not a file picker. So it lives
+         OUTSIDE #asBody, which the browser path hides. Wired by nav.js, which
+         already owns the shell -- the workspace strip, the header pickers and
+         Ctrl+K. The look of the shell belongs with it. -->
+    <div id="asLook" style="border-top:1px solid var(--line);margin-top:18px;
+         padding-top:14px">
+      <h3 style="font-size:13px;margin:0 0 4px">Appearance</h3>
+      <p class="dim" style="margin:0 0 10px;font-size:12px">
+        Appearance only. Never touches the disc.</p>
+      <div class="field" style="display:flex;align-items:center;gap:8px;
+           margin-bottom:8px">
+        <label style="width:74px;flex:none">Surfaces</label>
+        <select id="asTheme" style="flex:1"></select>
+      </div>
+      <div class="field" style="display:flex;align-items:center;gap:8px">
+        <label style="width:74px;flex:none">Accent</label>
+        <span id="asAccents" style="display:flex;gap:5px;flex-wrap:wrap;
+              flex:1"></span>
+        <input id="asAccentCustom" type="color" value="#5b9dd9"
+               title="Any colour. Adjusted automatically to stay readable."
+               style="width:40px;height:27px;padding:1px;flex:none">
+      </div>
+      <div id="asLookNote" class="dim"
+           style="font-size:11px;margin-top:8px;line-height:1.5"></div>
+      <div class="bar" style="display:flex;gap:8px;margin-top:8px">
+        <button id="asLookReset" class="ghost">Back to the stock look</button>
+      </div>
+    </div>
+
+    <div class="bar" style="display:flex;margin-top:18px">
+      <span style="flex:1"></span>
+      <button id="asClose" class="primary">Close</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./app.js"></script>
+<script type="module" src="./saveeditor.js"></script>
+</body>
+</html>

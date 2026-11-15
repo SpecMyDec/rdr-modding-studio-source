@@ -1,0 +1,381 @@
+<style>
+  :root{
+    --bg:#1e2124; --bg2:#252a2e; --bg3:#31373c; --line:#3d4449;
+    --ink:#ccd2d7; --dim-ink:#98a2a9; --title:#e4eaef;
+    --gold:#5b9dd9; --rust:#e0955a; --danger-ink:#e8837a;
+    --accent-bg:#2c4a63; --accent-fg:#e4f0fa; --ok:#7fbf7f;
+    --well:#191c1f;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:13px/1.55 "Segoe UI",system-ui,sans-serif;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .card{
+    width:min(760px,92vw); max-height:92vh; overflow:auto;
+    background:var(--bg2); border:1px solid var(--line); border-radius:8px;
+    padding:26px 30px 24px;
+  }
+  h1{font-size:19px; margin:0 0 2px; color:var(--title); font-weight:600}
+  .sub{color:var(--dim-ink); font-size:12px; margin:0 0 20px}
+  h2{font-size:13px; margin:0 0 8px; color:var(--title); font-weight:600}
+  p{margin:0 0 10px}
+  .steps{display:flex; gap:6px; margin:0 0 20px; font-size:11px}
+  .steps div{
+    flex:1; padding:5px 8px; border-radius:3px; text-align:center;
+    background:var(--bg3); color:var(--dim-ink); border:1px solid var(--line);
+  }
+  .steps div.on{background:var(--accent-bg); color:var(--accent-fg); border-color:var(--gold)}
+  .steps div.done{color:var(--ok)}
+  .panel{display:none}
+  .panel.on{display:block}
+  button{
+    font:inherit; color:var(--ink); background:var(--bg3);
+    border:1px solid var(--line); border-radius:4px;
+    padding:6px 14px; cursor:pointer;
+  }
+  button:hover:not(:disabled){background:#3a4147}
+  button:disabled{opacity:.45; cursor:default}
+  button.primary{background:var(--accent-bg); border-color:var(--gold); color:var(--accent-fg)}
+  .bar{display:flex; gap:8px; margin-top:18px; align-items:center}
+  .bar .spacer{flex:1}
+  .legal{
+    background:var(--well); border:1px solid var(--line); border-radius:4px;
+    padding:14px 16px; font-size:12px; max-height:280px; overflow:auto;
+  }
+  .legal p{margin:0 0 9px}
+  .legal strong{color:var(--title)}
+  label.chk{display:flex; gap:8px; align-items:flex-start; margin-top:14px; cursor:pointer}
+  label.chk input{margin-top:3px}
+  .path{
+    font:12px Consolas,monospace; background:var(--well);
+    border:1px solid var(--line); border-radius:4px; padding:7px 9px;
+    word-break:break-all; color:var(--dim-ink); min-height:32px;
+  }
+  .path.set{color:var(--ink)}
+  .verdict{margin-top:12px; padding:10px 12px; border-radius:4px; font-size:12px;
+    border:1px solid var(--line); background:var(--well)}
+  .verdict.likely,.verdict.match{border-left:3px solid var(--ok)}
+  .verdict.unsure{border-left:3px solid var(--rust)}
+  .verdict.reject{border-left:3px solid var(--danger-ink)}
+  .verdict .hint{color:var(--dim-ink); margin-top:5px}
+  .glyph{font-family:Consolas,monospace; margin-right:6px}
+  .facts{display:grid; grid-template-columns:auto 1fr; gap:3px 14px;
+    font:12px Consolas,monospace; margin-top:9px; color:var(--dim-ink)}
+  .facts b{color:var(--ink); font-weight:400}
+  .progress{height:6px; background:var(--well); border:1px solid var(--line);
+    border-radius:3px; overflow:hidden; margin:12px 0 6px}
+  .progress i{display:block; height:100%; width:0; background:var(--gold); transition:width .2s}
+  .mono{font:12px Consolas,monospace; color:var(--dim-ink)}
+  .note{color:var(--dim-ink); font-size:12px}
+  a{color:var(--gold)}
+</style>
+
+<div class="card">
+  <h1>RDR Modding Studio</h1>
+  <p class="sub">First run &mdash; a few things to set up, then you never see this again.</p>
+
+  <div class="steps">
+    <div id="s1" class="on">1 &nbsp;Before you start</div>
+    <div id="s2">2 &nbsp;Your disc</div>
+    <div id="s3">3 &nbsp;Working copy</div>
+    <div id="s4">4 &nbsp;Play it</div>
+  </div>
+
+  <!-- ------------------------------------------------------ 1 disclaimer -->
+  <div id="p1" class="panel on">
+    <div class="legal">
+      <p><strong>This tool ships with no game data whatsoever.</strong> It contains
+      no code, art, audio, text or level data from Red Dead Revolver. Everything
+      it shows you is read live out of a disc image that you supply.</p>
+
+      <p><strong>You need your own copy of the game.</strong> Red Dead Revolver
+      (PlayStation 2, USA, SLUS-20500) is owned by Take-Two Interactive. You must
+      dump the disc image yourself from a disc you own. This tool will not help
+      you obtain one and no download link will ever be provided.</p>
+
+      <p><strong>Your original is never modified.</strong> The file you point at
+      is opened read-only and copied once. All editing happens on that copy. If
+      the copy breaks, you make a new one in one click.</p>
+
+      <p><strong>It can still break your copy.</strong> Every write is previewed
+      before it happens and recorded so it can be undone, but this is a tool for
+      poking at a twenty-year-old game's internals. Save often, keep checkpoints,
+      and do not point it at the only disc image you have.</p>
+
+      <p><strong>No warranty, and no affiliation.</strong> Not endorsed by or
+      connected with Take-Two Interactive, Rockstar Games or Angel Studios. All
+      trademarks belong to their owners. Provided as-is; nobody is liable for
+      anything it does to your files or your emulator.</p>
+
+      <p><strong>Some of what it tells you is a guess.</strong> Findings are
+      labelled: <span class="glyph">=</span>measured,
+      <span class="glyph">+</span>established, <span class="glyph">?</span>inferred,
+      <span class="glyph">!</span>untested, <span class="glyph">x</span>dead end.
+      Anything not marked <span class="glyph">=</span>measured could be wrong.</p>
+    </div>
+
+    <label class="chk">
+      <input type="checkbox" id="agree">
+      <span>I own a copy of Red Dead Revolver, I dumped the image myself, and I
+      understand this tool comes with no warranty.</span>
+    </label>
+
+    <div class="bar">
+      <span class="spacer"></span>
+      <button class="primary" id="go1" disabled>Continue</button>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------ 2 disc -->
+  <div id="p2" class="panel">
+    <h2>Point at your Red Dead Revolver disc image</h2>
+    <p class="note">A <code>.iso</code> dumped from your own PS2 disc. About 2.2&nbsp;GB.
+    It is opened read-only and never written to.</p>
+
+    <div class="bar" style="margin:12px 0 0">
+      <button id="pick">Choose ISO&hellip;</button>
+      <span class="spacer"></span>
+    </div>
+
+    <div class="path" id="isoPath">no file chosen</div>
+    <div id="verdict"></div>
+
+    <div class="bar">
+      <button id="back2">Back</button>
+      <span class="spacer"></span>
+      <button class="primary" id="go2" disabled>Continue</button>
+    </div>
+  </div>
+
+  <!-- --------------------------------------------------------- 3 working -->
+  <div id="p3" class="panel">
+    <h2>Where should the working copy live?</h2>
+    <p class="note">Editing happens on a copy so your original stays pristine.
+    It needs 2.2&nbsp;GB.</p>
+
+    <div class="path set" id="workPath">&mdash;</div>
+    <div class="mono" id="freeSpace"></div>
+
+    <!-- Shown only when a working copy is already sitting in the chosen
+         folder at exactly the size of the disc image. Setup re-runs whenever
+         the ORIGINAL .iso goes missing, so this is the ordinary "external
+         drive was unplugged" path, and it used to overwrite a perfectly good
+         2.2 GB copy without mentioning it. -->
+    <p id="reuseNote" style="display:none"></p>
+    <div class="bar" id="reuseRow" style="display:none">
+      <label><input type="checkbox" id="reuseKeep" checked>
+             Keep the working copy that is already there</label>
+    </div>
+
+    <div class="bar" style="margin:10px 0 0">
+      <button id="pickWork">Choose folder&hellip;</button>
+    </div>
+
+    <div id="copyBox" style="display:none">
+      <div class="progress"><i id="copyBar"></i></div>
+      <div class="mono" id="copyText">starting&hellip;</div>
+    </div>
+
+    <div class="bar">
+      <button id="back3">Back</button>
+      <span class="spacer"></span>
+      <button class="primary" id="go3">Make the copy</button>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------- 4 pcsx2 -->
+  <div id="p4" class="panel">
+    <h2>Play your edits (optional)</h2>
+    <p class="note">Point at your PCSX2 and the Studio gets a <b>Play</b> button
+    that launches the game on your modded disc, and a <b>Boot test</b> that
+    checks an edit didn't break startup. No PCSX2? Skip this &mdash; everything
+    else works, and you can set it up later from <b>App setup</b>, the gear
+    button in the Studio's top bar.</p>
+
+    <div class="bar" style="margin:12px 0 0">
+      <button id="pickEmu">Choose PCSX2&hellip;</button>
+      <span class="spacer"></span>
+    </div>
+
+    <div class="path" id="emuPath">looking for PCSX2&hellip;</div>
+    <div id="emuVerdict"></div>
+
+    <div class="bar">
+      <button id="skipEmu">Skip for now</button>
+      <span class="spacer"></span>
+      <button class="primary" id="go4">Finish setup</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  // A first-run page that throws is a blank window with no way past it, so
+  // nothing here may depend on an element still existing. This is not
+  // hypothetical: removing the emulator step left two handlers behind, the
+  // first threw on load, and every line after it -- including the one that
+  // enables Continue -- never ran.
+  const on = (id, ev, fn) => { const e = $(id); if (e) e[ev] = fn; };
+  let iso = null, workDir = null, verified = null;
+
+  function step(n) {
+    for (const i of [1, 2, 3, 4]) {
+      $('p' + i).classList.toggle('on', i === n);
+      $('s' + i).classList.toggle('on', i === n);
+      $('s' + i).classList.toggle('done', i < n);
+    }
+  }
+
+
+  const GLYPH = {measured: '=', established: '+', inferred: '?', untested: '!'};
+
+  function showVerdict(v) {
+    verified = v;
+    const g = GLYPH[v.confidence] || '?';
+    let facts = '';
+    if (v.volume_id) {
+      facts = '<div class="facts">'
+        + (v.volume_id   ? '<span>volume</span><b>' + v.volume_id + '</b>' : '')
+        + (v.boot        ? '<span>boots</span><b>' + v.boot + '</b>' : '')
+        + (v.archives    ? '<span>archives</span><b>' + v.archives + '</b>' : '')
+        + (v.swat_entries? '<span>files in SWAT.DAT</span><b>' + v.swat_entries + '</b>' : '')
+        + (v.sha256      ? '<span>sha-256</span><b>' + v.sha256.slice(0,16) + '&hellip;</b>' : '')
+        + '</div>';
+    }
+    $('verdict').className = 'verdict ' + v.verdict;
+    $('verdict').innerHTML =
+      '<span class="glyph">' + g + '</span>' + v.message
+      + (v.hint ? '<div class="hint">' + v.hint + '</div>' : '')
+      + facts;
+    $('go2').disabled = (v.verdict === 'reject');
+  }
+
+  $('agree').onchange = e => { $('go1').disabled = !e.target.checked; };
+  $('go1').onclick = () => { pywebview.api.accept_disclaimer(); step(2); };
+  $('back2').onclick = () => step(1);
+  $('back3').onclick = () => step(2);
+
+  $('pick').onclick = async () => {
+    const p = await pywebview.api.pick_iso();
+    if (!p) return;
+    iso = p;
+    $('isoPath').textContent = p;
+    $('isoPath').classList.add('set');
+    $('verdict').className = 'verdict';
+    $('verdict').textContent = 'checking…';
+    showVerdict(await pywebview.api.verify(p));
+  };
+
+  $('go2').onclick = async () => {
+    const d = await pywebview.api.suggest_work_dir(iso);
+    showWork(d);
+    step(3);
+  };
+
+  $('pickWork').onclick = async () => {
+    const d = await pywebview.api.pick_work_dir(iso);
+    if (!d) return;
+    showWork(d);
+  };
+
+  // Setup runs again whenever the ORIGINAL .iso goes missing, and the README
+  // suggests keeping it on another drive -- so "external drive unplugged"
+  // lands here with a good 2.2 GB working copy already on disk. Offer to keep
+  // it rather than silently spending another 2.2 GB overwriting it.
+  let reuse = false;
+
+  function showWork(d) {
+    workDir = d.dir;
+    reuse = !!d.reusable;
+    $('workPath').textContent = d.path;
+    $('freeSpace').textContent = d.free;
+    if ($('reuseNote')) {
+      $('reuseNote').textContent = reuse ? (d.reuse_note || '') : '';
+      $('reuseNote').style.display = reuse ? 'block' : 'none';
+    }
+    if ($('reuseRow')) $('reuseRow').style.display = reuse ? 'flex' : 'none';
+    if ($('reuseKeep')) $('reuseKeep').checked = reuse;
+    $('go3').textContent = reuse ? 'Keep that copy' : 'Make the copy';
+  }
+
+  on('reuseKeep', 'onchange', () => {
+    reuse = $('reuseKeep').checked;
+    $('go3').textContent = reuse ? 'Keep that copy' : 'Copy again anyway';
+  });
+
+  $('go3').onclick = async () => {
+    $('go3').disabled = true; $('back3').disabled = true;
+    $('pickWork').disabled = true;
+    $('copyBox').style.display = 'block';
+    pywebview.api.begin_copy(iso, workDir, reuse);
+  };
+
+  // Python pushes progress in rather than the page polling for it.
+  //
+  // pct === -1 means the copy failed. That case used to write a raw Python
+  // traceback into this label while Back, Choose folder and Make the copy all
+  // stayed disabled -- no way on, no way back, nothing to click but the X. A
+  // failed copy is recoverable (pick another folder, go again), so hand the
+  // controls back and say so.
+  window.copyProgress = (pct, text) => {
+    const failed = pct < 0;
+    $('copyBar').style.width = (failed ? 0 : pct) + '%';
+    $('copyText').textContent = text;
+    $('copyText').style.color = failed ? '#e8836f' : '';
+    if (failed) {
+      $('go3').disabled = false;
+      $('back3').disabled = false;
+      $('pickWork').disabled = false;
+      $('go3').textContent = 'Try again';
+    }
+  };
+
+  // ---- step 4: the emulator (optional, restored 2026-08-02)
+  //
+  // Every handler goes through on() -- this step was removed once and its
+  // orphaned handlers blanked the whole page, so nothing here may assume an
+  // element exists. Skip must ALWAYS work: a user without PCSX2 is a normal
+  // user, not an error case.
+
+  let emuPath = '';
+
+  function showEmu(d) {
+    if (!$('emuPath')) return;
+    emuPath = (d && d.ok) ? d.path : '';
+    $('emuPath').textContent = emuPath || 'no PCSX2 chosen';
+    $('emuPath').classList.toggle('set', !!emuPath);
+    if ($('emuVerdict')) {
+      // 'match' is a class the stylesheet above actually defines (green edge);
+      // this used to say 'accept', which no rule styles, so a good PCSX2
+      // looked no different from none at all.
+      $('emuVerdict').className = 'verdict ' + (d && d.ok ? 'match' : '');
+      $('emuVerdict').textContent = d ? d.message : '';
+    }
+  }
+
+  on('pickEmu', 'onclick', async () => {
+    const d = await pywebview.api.pick_pcsx2();
+    if (d) showEmu(d);
+  });
+  on('skipEmu', 'onclick', async () => {
+    await pywebview.api.set_pcsx2('');
+    pywebview.api.finish();
+  });
+  on('go4', 'onclick', async () => {
+    await pywebview.api.set_pcsx2(emuPath);
+    pywebview.api.finish();
+  });
+
+  // The copy ends -> the emulator step begins, seeded by auto-detect.
+  // If the page somehow has no step 4 (a stripped build), finish directly --
+  // never leave the user on a dead progress bar.
+  window.copyDone = async () => {
+    if (!$('p4')) { pywebview.api.finish(); return; }
+    step(4);
+    try { showEmu(await pywebview.api.find_pcsx2()); }
+    catch (e) { showEmu(null); }
+  };
+</script>

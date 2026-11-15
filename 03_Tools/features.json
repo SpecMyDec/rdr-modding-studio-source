@@ -1,0 +1,244 @@
+{
+  "features": [
+    {
+      "id": "swap_character",
+      "label": "Swap which character an enemy is",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "336/336 .cr resolve their own model and skeleton in their own archive"
+    },
+    {
+      "id": "swap_behaviour",
+      "label": "Swap what an enemy does",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "454/454 Table values resolve to a .tbl in their own archive"
+    },
+    {
+      "id": "swap_model",
+      "label": "Give a character another character's model",
+      "workspace": "BALANCE",
+      "rung": "untested",
+      "build": "both",
+      "why": "The bundle is the atomic unit: of the 122 *_lods.rsc a .cr can name, 84 carry BOTH an MPH0 chunk and a <stem>_face MOD0, 38 carry neither, and 0 carry one without the other -- so repointing FileNameRender moves body, hat, face and morph targets together. Both fields are written because FileNameRender == FileNameSkel in 181/181 .cr. Only equal-bone-count targets are offered (MOD0 byte 1 == the paired .skel NumBones for 122/122; FileNameAnim does not move and a clip is 3+3*bones channels). Written only into archives that already hold the target bundle AND its .skel, because 517/517 .cr copies on the disc have both beside them and only SWAT.DAT holds all 122. Hit boxes are checked, not moved: .hot/.sphs parents resolve in the skeleton the .cr points at (2,136/2,136 and 885/885 over the 181 creatures), 696 of the 21,716 conceivable pairs DO lose a parent so the check is live, and zero of the 12,826 equal-bone-count pairs the picker offers do. NOT SHOWN: that an arbitrary cross-character swap works in game. All 59 .cr that already borrow a model borrow a variant of the same character, and no boot test has loaded a level with a swapped creature"
+    },
+    {
+      "id": "new_weapon",
+      "label": "Add a new weapon, cloned from another",
+      "workspace": "BALANCE",
+      "rung": "measured",
+      "build": "both",
+      "why": "the engine resolves a weapon by NAME, not by index -- SLUS_205.00 0x003813A8 walks the rack calling strcmp against each record's TypeName, the .ars arsenal loader calls exactly that function (0x0039E4DC), and the rack is malloc(Num_GenericWeapon * 1040 + 16) from the file's own count (0x003825E8), so there is no compiled-in ceiling of 55. Appended clone of Old_Pistol: swat.guns 148,463 -> 151,097 bytes, 6,432 of a 6,848 slot with 416 spare in all 62 copies; all 55 original weapons stay byte-identical and at the same index; written and read back off a real disc as weapon 56, and it then resolves by name through the shipped weapon editor. NOT YET SHOWN: a 185s boot -- three attempts were lost to eight agents sharing one throwaway ISO and one PCSX2, never to the edit"
+    },
+    {
+      "id": "enemy_fields",
+      "label": "Edit all 21 enemy fields",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "every field is a plain-text line with a known span"
+    },
+    {
+      "id": "place_enemy",
+      "label": "Place a new enemy anywhere",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "358-byte block, .enm 7,640 -> 8,002 bytes, 1,098 of a 1,728 slot with 630 spare, reads back off the booted disc, and the game plays: 6 distinct late frames over a 185s run. NOT shown: that the enemy appears where you put it -- the run reaches the menu, it does not enter mission 3"
+    },
+    {
+      "id": "attr_edit",
+      "label": "Edit typed object attributes",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "57,645 attributes now carry the byte span of their value"
+    },
+    {
+      "id": "rotate",
+      "label": "Rotate a box, zone, bound or line",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "the nine matrix numbers have had spans all along"
+    },
+    {
+      "id": "vertex_edit",
+      "label": "Reshape a spline",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "11,413 splines carry per-vertex spans"
+    },
+    {
+      "id": "links_edit",
+      "label": "Edit area doors",
+      "workspace": "LOGIC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "17-35 bytes of headroom measured; a destination change can overflow. TOMB's six doors all report 35."
+    },
+    {
+      "id": "scripting_browser",
+      "label": "Browse mission scripting",
+      "workspace": "LOGIC",
+      "rung": "inferred",
+      "build": "internal",
+      "why": "the action opcode NAMES are not on the disc (proven), so this browses numbers -- not useful to a stranger yet"
+    },
+    {
+      "id": "versions",
+      "label": "Named versions of the working disc",
+      "workspace": "PROJECT",
+      "rung": "measured",
+      "build": "both",
+      "why": "checkpoints and mods are already one format"
+    },
+    {
+      "id": "transfer",
+      "label": "One import/export shape",
+      "workspace": "ALL",
+      "rung": "measured",
+      "build": "both",
+      "why": "a facade over importers that already work"
+    },
+    {
+      "id": "repack",
+      "label": "Repack an archive for more room",
+      "workspace": "DISC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "no level archive has ever been repacked; SWAT froze once"
+    },
+    {
+      "id": "actb_edit",
+      "label": "Edit mission script parameters",
+      "workspace": "LOGIC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "the numbers are located and writable; their meaning is not known"
+    },
+    {
+      "id": "behaviour_tables",
+      "label": "Change which states a behaviour table binds",
+      "workspace": "LOGIC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "27,263 of the 27,544 shipped bindings resolve to a .stateb in their own archive and all 281 that do not are in SWAT.DAT, so the dropdown is exact -- but no boot test has run yet"
+    },
+    {
+      "id": "behaviour_numbers",
+      "label": "Retune numbers inside a state file",
+      "workspace": "LOGIC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "four bytes for four, so a write can never overflow a slot -- but which four bytes are a float is actb.py's range heuristic, and what any of them MEANS is not on the disc. Editable, unnamed, and the panel says so"
+    },
+    {
+      "id": "behaviour_clone",
+      "label": "Give an enemy its own behaviour table",
+      "workspace": "LOGIC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "dave.add into a level archive, verified by re-parse and read-back -- but it is the one edit Ctrl+Z cannot take back, and SLUS_205.00 is packed so 'nothing looks a file up by index' is still an assumption. No boot test has run yet"
+    },
+    {
+      "id": "file_add",
+      "label": "Add a new file to an archive",
+      "workspace": "DISC",
+      "rung": "untested",
+      "build": "internal",
+      "why": "dave.add with any legal name, verified by re-parse and read-back; the entry lands at its correct sorted position under the packed alphabet's own collation. But it is the one edit Ctrl+Z cannot take back, and SLUS_205.00 is packed so 'nothing looks a file up by index' is still an assumption. Boot-test after every use"
+    },
+    {
+      "id": "lan",
+      "label": "Serve on the local network",
+      "workspace": "PROJECT",
+      "rung": "measured",
+      "build": "internal",
+      "why": "the server has no authentication of any kind"
+    },
+    {
+      "id": "emulator",
+      "label": "Play and Boot test buttons",
+      "workspace": "PROJECT",
+      "rung": "measured",
+      "build": "both",
+      "why": "promoted to release 2026-08-02 at the owner's direction: testers all have PCSX2 anyway. The dead-button worry is answered in the UI instead of by hiding -- the buttons stay visible and explain themselves when no PCSX2 is configured, and setup offers an optional PCSX2 step"
+    },
+    {
+      "id": "menu_edit",
+      "label": "Edit menus and HUD screens",
+      "workspace": "MEDIA",
+      "rung": "untested",
+      "build": "internal",
+      "why": "the reader is measured -- 215 UI files, 212 readable, byte-exact identity round-trip on all 212, 98.13% of content lines covered once the three dialects are routed. What is NOT measured is the game: no edited .swui has been booted. Renames are known-dangerous (a renamed button in pause.swui froze story-level loading) and 69 of 210 screen names are verbatim strings in SLUS_205.00, so the panel warns and requires confirm_renames"
+    },
+    {
+      "id": "strings_editor",
+      "label": "Rewrite the game's text",
+      "workspace": "BALANCE",
+      "rung": "measured",
+      "build": "internal",
+      "why": "works, but shows nothing until you search -- 3,069 strings with no categories to browse. Hidden until it can be browsed rather than only queried"
+    },
+    {
+      "id": "csv_editor",
+      "label": "Edit the disc's tables",
+      "workspace": "BALANCE",
+      "rung": "untested",
+      "build": "internal",
+      "why": "the reader and the writer are measured: 1,022 files / 752,366 cells parse, apply({}) is byte-identical on all 1,022, rewriting every cell to its own value is byte-identical on all 1,022, and a fuzz of one real edit per file changed exactly the addressed cell and nothing else in 1,021 of 1,021 (the 1,022nd, bosstriggertable.csv, is two bytes of CRLF with no cell to edit). Header placement is found by shape, which reproduces the known 253/2/1 split of the snd_<num> family. A write was exercised end to end: 63 copies of snd_00.csv changed as ONE journal group, read back off the disc in all 63, and one Ctrl+Z put every copy back byte-identical to vanilla. What is NOT measured is the game: no edited .csv has been booted, so whether the engine honours a changed bounty or music cue is unknown"
+    },
+    {
+      "id": "char_files",
+      "label": "Edit a character's body files",
+      "workspace": "BALANCE",
+      "rung": "untested",
+      "build": "internal",
+      "why": "the reader and the writer are measured on all 939 files: .dam .sphs .ars .hot .tail .acc .armr .rep parse into 426,648 addressable values, an empty splice is byte-identical on all 939, and rewriting EVERY value back to its own value is byte-identical on all 939. Cross-references check out: 3,111/3,111 .sphs and .hot parent bones resolve to a real bone in the same-stem .skel, and all 546 .ars weapon names are a real swat.guns TypeName. What is NOT measured is the game -- no edited file of these eight has been booted, so whether the engine honours a moved collision sphere or a swapped animation slot is unknown. Headroom is the live risk, not the parser: the median .sphs copy has ONE spare byte in its slot"
+    },
+    {
+      "id": "linked_move",
+      "label": "Move a building and its collision as one thing",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "boot-tested: one apply across lvl_sher70_clocktower.znes + .bnds, both read back off the disc, 6/6 distinct late frames out of PCSX2 at 185s (scripts/test_linked_move_boot.py). 55.1% of bounds pair to a building by name; the rest are merged shells with no single owner and say so."
+    },
+    {
+      "id": "level_export",
+      "label": "Export a whole level as a model",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "imported into Blender 5.2 headless: TOMB4 = 586 meshes / 145,759 verts / 87,104 tris / 290 materials / 259 embedded images, 0 orphan meshes, everything parented under SURFACES (547) and COLLISION (39) so either branch hides in one click. Every image-less material is either 'collision' or 'untextured' -- no texture reference failed to resolve."
+    },
+    {
+      "id": "grow_files",
+      "label": "Let an edit grow its file",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "both",
+      "why": "boot-tested: lvl_sher70_blacksmith.znes grown 576->936 compressed bytes and relocated 2650112->5423168 inside SHER70.DAT; byte-identical read-back, all 945 nodes parse, and PCSX2 plays the disc 185s with 4/6 distinct late frames. Every level archive holds one ~2,030-byte free gap (measured, all 61), so growth headroom is real but modest. Off by default; logo01.pck keeps its hard 2048 alignment."
+    },
+    {
+      "id": "surface_move",
+      "label": "Move a baked world surface",
+      "workspace": "LEVEL",
+      "rung": "measured",
+      "build": "internal",
+      "why": "the freeze was the per-part cull sphere: every level MOD0 part uploads one quadword to VU addr 0x29 (part_offset+12, 778/778 parts surveyed, 12 archives) and the VU consumes it at runtime while the loader recomputes its own bounds and ignores it (ELF 0x003B8968). A/B boot-tested on SHER70 chunk 150: verts only = frozen; verts + spheres = plays (3-5/6 distinct late frames, 185 s runs). geom_edit now moves the spheres through the same affine for translate, scale and rotate."
+    },
+    {
+      "id": "file_drop",
+      "label": "Drag files into an archive",
+      "workspace": "DISC",
+      "rung": "measured",
+      "build": "both",
+      "why": "both halves boot-verified. Replacing rides the journalled patch path every shipped edit uses (undoable, grow honoured). Adding: a brand-new file written into SWAT.DAT at sorted index 47,082 -- shifting 34 TOC entries -- read back exact and PLAYED 185s in PCSX2, 3/6 distinct late frames (2026-08-24). dave.add re-verifies the whole TOC after insertion; adds are marked not-undoable in the plan before any write."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+# Game data: never commit anything from the disc
+*.iso
+*.ISO
+*.bin
+*.img
+*.cue
+*.mdf
+*.nrg
+*.dat
+*.DAT
+*.rsc
+*.xrsc
+*.mod
+*.tex
+*.ps2
+*.p2s
+*.pss
+*.PSS
+*.elf
+*.ELF
+SLUS_*
+01_Vanilla/*
+!01_Vanilla/.keep
+02_Modded/*
+!02_Modded/.keep
+04_Extracted/
+06_Backups/
+07_Research/
+08_ForkLab/
+
+# Build outputs, caches, environments
+03_Tools/packaging/.venv/
+03_Tools/packaging/build/
+03_Tools/packaging/dist/
+__pycache__/
+*.pyc
+.mypy_cache/
+*.log
+
+# Local settings
+settings.json
+*.local.*

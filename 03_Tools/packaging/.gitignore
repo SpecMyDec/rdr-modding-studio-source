@@ -1,0 +1,12 @@
+# Build machinery, not source.
+.venv/
+build/
+dist/
+__pycache__/
+
+# The 2.2 GB working copy the self-check runs against. Rebuilt by
+# `python packaging/test_shell.py`; never committed.
+testdata/
+
+# Window captures taken during a build check.
+shot_*.png
