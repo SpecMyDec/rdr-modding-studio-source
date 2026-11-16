@@ -26,7 +26,7 @@
 ;     no game data and you need your own disc" is said.
 
 #define AppName    "RDR Modding Studio"
-#define AppVersion "1.4.0"
+#define AppVersion "2.0.0"
 #define AppExe     "RDR Modding Studio.exe"
 ; build.py --build release writes here. The release build is the one that gets
 ; an installer; the internal edition is a zip and stays a zip.

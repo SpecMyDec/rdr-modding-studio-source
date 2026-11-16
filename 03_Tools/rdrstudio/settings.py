@@ -75,6 +75,11 @@ DEFAULTS = {
     "envTint": True,
     "bakedLight": True,
     "secondPass": True,
+
+    # --- Animations --------------------------------------------------------
+    # The preferred skeleton / model, tried first on every clip (empty: none).
+    "animPrefSkel": "",
+    "animPrefModel": "",
 }
 
 # The settings whose values are a fixed set. The front end switches on these
@@ -213,6 +218,98 @@ def reset():
     doc.pop(_SECTION, None)
     _write_document(doc)
     return {"settings": load(), "written": [], "ignored": []}
+
+
+# ------------------------------------------------------------------ profiles
+#
+# A profile is a named copy of every preference: the `ui` section (theme, view settings, game lighting) and the
+# front end's own local keys (`local`: the localStorage mirror -- the resolved theme colours the first paint uses --
+# and the per-panel conveniences kept only there). Stored in settings.json under "profiles"; loading one writes its
+# `ui` back through save(), so it is checked like any other change.
+
+_PROFILES = "profiles"
+_MAX_PROFILES = 64
+
+
+def _profile_name(name):
+    name = str(name or "").strip()
+    if not name or len(name) > _MAX_STR:
+        raise ValueError("a profile needs a name of 1 to %d characters" % _MAX_STR)
+    return name
+
+
+def profiles():
+    """{name: {saved, keys}} -- what each profile holds, without its values."""
+    doc = _read_document()
+    out = {}
+    for name, p in (doc.get(_PROFILES) or {}).items():
+        if isinstance(p, dict):
+            out[name] = {"saved": p.get("saved", ""), "ui": len(p.get("ui") or {}),
+                         "local": len(p.get("local") or {})}
+    return out
+
+
+def save_profile(name, local=None):
+    """The current preferences (and the front end's local keys) kept as profile `name`."""
+    import time as _time
+    name = _profile_name(name)
+    doc = _read_document()
+    profs = doc.get(_PROFILES) or {}
+    if name not in profs and len(profs) >= _MAX_PROFILES:
+        raise ValueError("there are already %d profiles: delete one first" % _MAX_PROFILES)
+    local = {str(k)[:_MAX_STR]: str(v)[:20000] for k, v in (local or {}).items()
+             if str(k).startswith("rdr.")}
+    profs[name] = {"saved": _time.strftime("%Y-%m-%d %H:%M"), "ui": load(), "local": local}
+    doc[_PROFILES] = profs
+    _write_document(doc)
+    return profiles()
+
+
+def get_profile(name):
+    doc = _read_document()
+    p = (doc.get(_PROFILES) or {}).get(_profile_name(name))
+    if not isinstance(p, dict):
+        raise ValueError("no profile named %s" % name)
+    return p
+
+
+def load_profile(name):
+    """Profile `name`'s preferences made the current ones. -> its local keys, for the front end to put back."""
+    p = get_profile(name)
+    save({k: v for k, v in (p.get("ui") or {}).items() if k in DEFAULTS})
+    return p.get("local") or {}
+
+
+def delete_profile(name):
+    doc = _read_document()
+    profs = doc.get(_PROFILES) or {}
+    profs.pop(_profile_name(name), None)
+    doc[_PROFILES] = profs
+    _write_document(doc)
+    return profiles()
+
+
+def import_profile(name, data):
+    """A profile from an exported file ({ui, local}) kept under `name` (it is not loaded)."""
+    import time as _time
+    name = _profile_name(name)
+    if not isinstance(data, dict):
+        raise ValueError("not a profile file")
+    # only values that pass the same checks as any change (an unknown key or a bad value is dropped, not stored)
+    ui = {}
+    for k, v in (data.get("ui") or {}).items():
+        if k in DEFAULTS:
+            c = _clean(k, v)
+            if c is not None:
+                ui[k] = c
+    local = {str(k)[:_MAX_STR]: str(v)[:20000] for k, v in (data.get("local") or {}).items()
+             if str(k).startswith("rdr.")}
+    doc = _read_document()
+    profs = doc.get(_PROFILES) or {}
+    profs[name] = {"saved": _time.strftime("%Y-%m-%d %H:%M"), "ui": ui, "local": local}
+    doc[_PROFILES] = profs
+    _write_document(doc)
+    return profiles()
 
 
 def _write_document(doc):

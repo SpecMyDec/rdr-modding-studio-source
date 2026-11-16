@@ -6,19 +6,23 @@ Stdlib only. Binds to 127.0.0.1 so nothing is exposed off the machine.
     python RDR_Studio.py
 """
 
+import base64
 import json
 import mimetypes
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import zipfile
 from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .dave import SlotOverflow
 from . import iso9660
 from . import frontmenu
 # `api` is imported at module level for DiscLocked, which Session.write
@@ -614,6 +618,7 @@ class Studio:
         self._assets = None
         self.log = []
         self.journal = None
+        self._pending = None
         # Warm-up progress, read by the lock-free /api/warmup route so the
         # boot overlay can draw a real bar while the caches fill. "idle"
         # means nobody started it (tests, CLI); the overlay treats that the
@@ -685,6 +690,43 @@ class Studio:
 
     # ------------------------------------------------------------------ discs
 
+    def _overflow_batch(self, pending):
+        """Game.patch_everywhere's copies that had no room: queued for their
+        archive's rebuild (on the next Play). [(archive, used, "rebuild")]."""
+        done = []
+        for arc, filename, data in pending:
+            self.pending.queue(arc, filename, data)
+            done.append((arc, len(data), "rebuild"))
+        self._mirror([(arc, filename, data) for arc, filename, data in pending])
+        return done
+
+    @property
+    def pending(self):
+        """Edits with no room in their slot, waiting for their archive to be
+        rebuilt: all at once, on the next Play ("Rebuild and play")."""
+        if self._pending is None:
+            from .pendingrebuild import PendingRebuilds, data_editor_home
+            self._pending = PendingRebuilds(os.path.join(data_editor_home(self.modded_path), "pending"))
+        return self._pending
+
+    def rebuild_pending(self, progress=None):
+        """Rebuild every archive with queued edits, each once with all of them.
+        [archive] done."""
+        done = []
+        with self.lock:
+            arcs = self.pending.archives()
+            for n, arc in enumerate(arcs):
+                if progress:
+                    progress(n, len(arcs), arc)
+                self.rebuild_with(arc)
+                done.append(arc)
+                self.note("%s rebuilt with its queued edits" % arc)
+            if done:
+                if progress:
+                    progress(len(arcs), len(arcs), "putting the disc back in order")
+                _data_editor(self)._order_quietly()
+        return done
+
     def open(self):
         """Open both discs. Tolerates the working ISO being busy.
 
@@ -699,6 +741,9 @@ class Studio:
             self.close()
             try:
                 self.game = Game(self.modded_path, writable=True)
+                self.game.overflow_hook = (self._overflow_batch
+                                           if self.rebuild_on_overflow else None)
+                self.game.pending = self.pending
             except PermissionError:
                 self.game = None
                 self.note(self._locked_reason())
@@ -820,11 +865,59 @@ class Studio:
             self.ensure_open(force=True)
             if self.game is None:
                 raise api.DiscLocked(*self.locked_problem())
-            used, slot = self.game.archive(archive).patch(filename, data,
-                                                          grow=grow)
+            try:
+                used, slot = self.game.archive(archive).patch(filename, data,
+                                                              grow=grow)
+            except SlotOverflow as ex:
+                # No room in its slot (nor, with grow, in a free gap): queued
+                # for the archive's rebuild (laid out as the game's own, every
+                # other edit kept), which happens once, with every queued file,
+                # on the next Play. The Studio reads the new bytes back
+                # meanwhile. Still one journalled edit: Ctrl+Z takes it out of
+                # the queue again.
+                if not self.rebuild_on_overflow:
+                    raise
+                self.pending.queue(archive, filename, data)
+                used, slot = ex.need, ex.have   # numbers callers report; the archive grows on rebuild
             self.journal.record(archive, filename, data, label, group)
             self._drop_level(archive)
+            self._mirror([(archive, filename, data)])
+            if filename.lower().endswith(("_lods.rsc", ".skel")):
+                # the Animation tab's lists (rigs, skeletons) describe these
+                for attr in ("_rig_index", "_skel_index", "_skel_names", "_skel_parents"):
+                    if getattr(self, attr, None):
+                        setattr(self, attr, {})
             return used, slot
+
+    # Edits that do not fit their slot rebuild the archive to make room (set
+    # False to get the old refusal back).
+    rebuild_on_overflow = True
+
+    def rebuild_with(self, archive, replace=None, add=None):
+        """The archive rebuilt with these files (replace / add), and every edit
+        queued for it: (stored, slot) of the first one in the new archive.
+        Holds the lock; the disc handles are closed and reopened around the
+        write."""
+        from . import dataeditor
+        with self.lock:
+            de = _data_editor(self)
+            q_rep, q_add = self.pending.take(archive)
+            all_rep = dict(q_rep, **(replace or {}))
+            all_add = dict(q_add, **(add or {}))
+            try:
+                data = de.rebuild_archive(archive, all_rep, all_add)
+            except Exception:
+                for n, d in q_rep.items():         # nothing lost: back in the queue
+                    self.pending.queue(archive, n, d)
+                for n, d in q_add.items():
+                    self.pending.queue(archive, n, d, add=True)
+                raise
+            replace, add = all_rep, all_add
+            self._mirror([(archive, n, d) for n, d in list(all_rep.items()) + list(all_add.items())])
+            self._levels = {}
+            self._assets = None
+            name = next(iter((replace or add or {})), None)
+            return dataeditor.DataEditor.slot_of(data, name) if name else (len(data), len(data))
 
     def writer_for(self, archive, label="", group=None, grow=False):
         """A writer callable Level.apply() can use, so its writes are logged.
@@ -856,8 +949,23 @@ class Studio:
 
     def _raw_write(self, archive, filename, data):
         """Undo/redo path -- must NOT append to the journal."""
-        self.game.archive(archive).patch(filename, data)
+        try:
+            self.game.archive(archive).patch(filename, data)
+        except SlotOverflow:
+            if not self.rebuild_on_overflow:
+                raise
+            self.pending.queue(archive, filename, data)
         self._drop_level(archive)
+        self._mirror([(archive, filename, data)])
+
+    def _mirror(self, items):
+        """Studio edits shown in the Data Editor's .dat folders (DataEditor.mirror)."""
+        if not getattr(self, "mirror_to_data_editor", True):
+            return
+        try:
+            _data_editor(self).mirror(items)
+        except Exception:                                  # noqa: BLE001
+            pass
 
     def close(self):
         with self.lock:
@@ -991,7 +1099,7 @@ class Studio:
         reopens the disc, so caching on (disc path, archive) is safe.
         """
         from . import skeleton as SK
-        key = (self.disc.path, archive)
+        key = self._arc_key(archive)
         cache: "dict[Any, Any] | None" = getattr(self, "_skel_index", None)
         if cache is None:
             cache = self._skel_index = {}
@@ -1029,16 +1137,26 @@ class Studio:
         self._skel_parents.setdefault(key, parents)
         return out
 
+    def _arc_key(self, archive):
+        """A cache key for what an archive holds: the disc, the archive, and its table's size and file count -- so a
+        new character (Add Character, a Data Editor build, a rebuild) shows in the lists without a restart. These
+        caches used to be keyed by disc and archive alone, and kept a list made before the character existed."""
+        try:
+            d = self.disc.archive(archive)
+            return (self.disc.path, archive, d.count, d.size)
+        except Exception:                                  # noqa: BLE001
+            return (self.disc.path, archive)
+
     def skeleton_names(self, archive="SWAT.DAT"):
         """`.skel` name -> tuple of bone names, in file order."""
-        key = (self.disc.path, archive)
+        key = self._arc_key(archive)
         if key not in getattr(self, "_skel_names", {}):
             self.skeleton_index(archive)          # fills both
         return self._skel_names.get(key, {})
 
     def skeleton_parents(self, archive="SWAT.DAT"):
         """`.skel` name -> tuple of each bone's PARENT name, in file order."""
-        key = (self.disc.path, archive)
+        key = self._arc_key(archive)
         if key not in getattr(self, "_skel_parents", {}):
             self.skeleton_index(archive)          # fills all three
         return self._skel_parents.get(key, {})
@@ -1361,7 +1479,7 @@ class Studio:
         cold -- so it is cached per (disc, archive) rather than per request.
         """
         from .rsc import Rsc
-        key = (self.disc.path, archive)
+        key = self._arc_key(archive)
         cache: "dict[Any, Any] | None" = getattr(self, "_rig_index", None)
         if cache is None:
             cache = self._rig_index = {}
@@ -1428,6 +1546,7 @@ class Studio:
                 # only writing is unavailable.
                 src = self.game or self.vanilla
                 lv = Level(src, archive, manifest, area=area)
+                lv.grow_by_rebuild = bool(src is self.game and self.rebuild_on_overflow)
                 # A level whose parse hit a READ error is short some objects,
                 # and caching it means editing a half-level for the rest of the
                 # session. A decode error is different -- that file will fail
@@ -1463,17 +1582,32 @@ class Studio:
             for key in [k for k in self._levels if k[0] == archive]:
                 self._levels.pop(key, None)
 
-    def restore(self):
-        """Copy the pristine disc over the working one."""
+    def restore(self, clear_mods=False):
+        """Copy the pristine disc over the working one. With clear_mods the Data Editor's own mod files go too
+        (kept as a Saved Mod first): else they count as waiting and the next Build puts them back on the disc.
+        -> (saved Mod name or None, files cleared)."""
+        out = (None, 0)
         with self.lock:
             self.close()
             shutil.copyfile(self.vanilla_path, self.modded_path)
+            self.pending.clear()              # queued edits of the disc just replaced
+            try:
+                _data_editor(self).mirror_reset()
+            except Exception:                              # noqa: BLE001
+                pass
             # The history describes edits that no longer exist on disc; keeping
             # it would offer undos of a world that was just wiped away.
             if self.journal:
                 self._clear_session()
+            if clear_mods:
+                try:
+                    from . import dataeditor_more as _more
+                    out = _more.more(_data_editor(self)).clear_for_reset()
+                except Exception as ex:                         # noqa: BLE001
+                    self.note("reset: the Data Editor's mod files stayed (%s)" % ex)
             self.open()
             self.note("restored modded ISO from vanilla")
+        return out
 
     def diff(self):
         """Every file whose CONTENT differs from vanilla.
@@ -2051,6 +2185,43 @@ def _feature_allows(route):
 
 # ---------------------------------------------------------------- HTTP layer
 
+def names_swat_get(studio, skel_name):
+    """A skeleton's bone names from SWAT.DAT (where every character's .skel is), or None."""
+    if not skel_name:
+        return None
+    try:
+        return studio.skeleton_names("SWAT.DAT").get(skel_name)
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _build_waiting(studio):
+    """What the top bar's Build button would do: queued rebuilds and Data Editor files waiting for a Build."""
+    de = _data_editor(studio)
+    if studio.game is None:
+        # PCSX2 has the disc: counting reads it, and must not race a booting emulator -- the last count stands
+        c = getattr(de, "_wait_cache", None)
+        n, folders = c[1] if c else (0, [])
+    else:
+        try:
+            n, folders = de.waiting()
+        except Exception:                                  # noqa: BLE001
+            n, folders = 0, []
+    q = studio.pending.summary()
+    return dict(queued=q, data_editor=n, folders=folders,
+                running=de.job.get("state") == "running",
+                any=bool(q) or n > 0)
+
+
+def _data_editor(studio):
+    """DISC > Data Editor (rdrstudio/dataeditor.py), made on first use."""
+    de = getattr(studio, "_data_editor", None)
+    if de is None:
+        from . import dataeditor
+        de = studio._data_editor = dataeditor.DataEditor(studio)
+    return de
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "RDRStudio/0.1"
     # `serve()` injects the real Studio before the first request (see
@@ -2073,6 +2244,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # An edit this request queued for a rebuild (no room in its slot):
+        # the page says so, and Play becomes "Rebuild and play".
+        try:
+            st = self.studio
+            q = st.pending.take_new() if st is not None and st._pending is not None else []
+            if q:
+                self.send_header("X-RDR-Rebuild-Queued", ",".join(q))
+        except Exception:                                  # noqa: BLE001
+            pass
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:
@@ -2139,8 +2319,8 @@ class Handler(BaseHTTPRequestHandler):
             # seconds and must never acquire the disc as a side effect. That
             # poll alone was enough to steal the ISO back from a booting PCSX2.
             if path[5:] not in ("config", "log", "disc_state", "warmup",
-                                "settings", "job", "anims_export_status",
-                                "codemods", "codemods_status"):
+                                "settings", "profiles", "profile_get", "job", "anims_export_status",
+                                "codemods", "codemods_status") and not path[5:].startswith("de_"):
                 self.studio.ensure_open()
             return self._api_get(path[5:], q)
         except Exception as ex:
@@ -2160,6 +2340,9 @@ class Handler(BaseHTTPRequestHandler):
         if not _feature_allows(route):
             return self._send(404, {"error": "no such route: %s" % route})
 
+        if route.startswith("de_"):
+            return self._de_get(route, q)
+
         if route == "config":
             return self._send(200, dict(
                 vanilla=s.vanilla_path, modded=s.modded_path,
@@ -2178,10 +2361,21 @@ class Handler(BaseHTTPRequestHandler):
                                         defaults=settings_mod.DEFAULTS,
                                         path=settings_mod.path()))
 
+        if route == "profiles":
+            from . import settings as settings_mod
+            return self._send(200, dict(profiles=settings_mod.profiles()))
+        if route == "profile_get":
+            from . import settings as settings_mod
+            try:
+                return self._send(200, dict(profile=settings_mod.get_profile(one("name", ""))))
+            except ValueError as ex:
+                return self._send(400, dict(error=str(ex)))
+
         if route == "characters":
             # Every *_lods.rsc on the disc: the cast, plus rigged props.
             out, seen = [], {}
-            for arc in list_levels(s.disc):
+            # SWAT.DAT last: a character added in the Studio lives only there.
+            for arc in list_levels(s.disc) + ["SWAT.DAT"]:
                 try:
                     d = s.disc.archive(arc)
                 except Exception:
@@ -2249,6 +2443,10 @@ class Handler(BaseHTTPRequestHandler):
                 skinned=bool(model.get("skinned")),
                 bone_count=model.get("bone_count", 0),
                 parts=model.get("parts", []),
+                # [texture index, first triangle, triangle count]: which part of
+                # the mesh each of the bundle's textures covers (a custom model
+                # often has one texture per piece of clothing)
+                groups=[[g[0], g[1], g[2]] for g in model.get("groups", [])],
                 bones=bones, textures=len(table)))
 
         if route == "character_rigs":
@@ -2317,6 +2515,54 @@ class Handler(BaseHTTPRequestHandler):
                                     % (want_bones - c))
                         near.append((abs(c - want_bones), r))
                 out = exact + [r for _, r in sorted(near, key=lambda t: t[0])]
+                if one("all"):
+                    # Every other character too, retargeted by BONE NAME onto
+                    # the clip: its own skeleton, each bone driven by the clip's
+                    # bone of the same name (exact, then ignoring _ and case),
+                    # the rest left at rest. Best first.
+                    def _norm(x):
+                        return re.sub(r"[^a-z0-9]", "", x.lower())
+                    clip = list(names.get(one("skel") or "", ()) or names_swat_get(s, one("skel")) or ())
+                    cx = {n.lower() for n in clip}
+                    cn = {_norm(n) for n in clip}
+                    have_ids = {id(r) for r in out}
+                    extra = []
+                    # a bundle with no .skel of its own: the skeleton its character's .cr names (FileNameSkel)
+                    render_skel = {}
+                    try:
+                        from . import modelswap as _msw
+                        for _cr, _v in _msw.facts_for(s.disc, s.vanilla).stock.items():
+                            render_skel.setdefault(_v["render"], _v["skel"])
+                    except Exception:                      # noqa: BLE001
+                        pass
+                    for r in rows:
+                        if id(r) in have_ids:
+                            continue
+                        stem = (r.get("stem") or "").split("_lods")[0]
+                        skel_file = stem + ".skel"
+                        own = names.get(skel_file) or names_swat_get(s, skel_file)
+                        if not own and render_skel.get(stem):
+                            skel_file = render_skel[stem] + ".skel"
+                            own = names.get(skel_file) or names_swat_get(s, skel_file)
+                        r["skel"] = skel_file
+                        if not own and clip and 0 < (r.get("bone_count") or 0) <= len(clip):
+                            # no skeleton of its own anywhere: rigged in the standard order, so posed on the
+                            # clip's own skeleton by index (its bones are the clip's first ones)
+                            r["fit"] = "no skeleton of its own: posed on this clip's"
+                            r["matched"] = r["bone_count"]
+                            extra.append(r)
+                            continue
+                        if not own or not clip:
+                            continue
+                        m = sum(1 for n in own if n.lower() in cx or _norm(n) in cn)
+                        if not m:
+                            continue
+                        r["fit"] = "%d of %d bones matched by name" % (m, len(own))
+                        r["by_name"] = True
+                        r["matched"] = m
+                        extra.append(r)
+                    extra.sort(key=lambda r: (-r["matched"] / max(1, r["bone_count"] or 1), r["stem"]))
+                    out = out + extra
             return self._send(200, dict(archive=arc, bones=want_bones,
                                         models=out, total=len(rows),
                                         exact=sum(1 for r in out
@@ -2367,7 +2613,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
                 world = skel.world_positions(parsed)
-                bones = [dict(name=b.name, pos=world[b.name]) for b in parsed]
+                at = {b.name: i for i, b in enumerate(parsed)}
+
+                def _pi(b):
+                    pn = b.parent if isinstance(b.parent, str) or b.parent is None else getattr(b.parent, "name", None)
+                    return at.get(pn, -1)
+                bones = [dict(name=b.name, pos=world[b.name], parent=_pi(b)) for b in parsed]
                 bworld = [world[b.name] for b in parsed]
                 head = head_bone(parsed, world)
                 hidx = head_bone_index(parsed, world)
@@ -2378,7 +2629,22 @@ class Handler(BaseHTTPRequestHandler):
                     error="no %s on the disc, so there is no rig to animate "
                           "this model on" % want))
             rig = max((bundle.bone_count(i) for i, _ in picks), default=0)
-            if rig and len(bones) != rig:
+            near = False
+            if rig and rig < len(bones):
+                # A model rigged to FEWER bones than the clip's skeleton, whose own
+                # skeleton names the same joints in the same order over the bones
+                # it has (52 of a 53-bone rig, or a custom character's own .skel):
+                # the same rule the model list offers it by. Its vertices name
+                # bones 0..rig-1, which are those same joints here; the clip's
+                # surplus bones simply move nothing.
+                own = None
+                for src in (arc, "SWAT.DAT"):
+                    own = s.skeleton_names(src).get(stem + ".skel")
+                    if own:
+                        break
+                names = [b["name"] for b in bones]
+                near = (bool(own) and len(own) == rig and tuple(own) == tuple(names[:rig])) or not own
+            if rig and len(bones) != rig and not near:
                 return self._send(400, dict(
                     error="%s is rigged to %d bones and %s has %d. A vertex "
                           "names its bone by index into the skeleton's file "
@@ -2545,6 +2811,7 @@ class Handler(BaseHTTPRequestHandler):
                     parts=[p["name"] for p in model.get("parts", [])],
                     model=dict(positions=flat, indices=idx,
                                uvs=uvs if len(uvs) * 3 == len(flat) * 2 else [],
+                               groups=[[g[0], g[1], g[2]] for g in model.get("groups", [])],
                                verts=len(verts), tris=len(model["tris"]))))
             return self._send(200, dict(archive=arc, characters=out,
                                         player=player))
@@ -2585,7 +2852,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, dict(
                 studio_holds=held, free_for_emulator=(not held) and free,
                 locked_by_other=(not held) and not free,
-                handed_over=bool(getattr(s, "_handed_over", False))))
+                handed_over=bool(getattr(s, "_handed_over", False)),
+                pending_rebuild=s.pending.summary(),
+                rebuild_job=getattr(s, "_rebuild_job", None),
+                build_waiting=_build_waiting(s)))
 
         if route in ("codemods", "codemods_status"):
             # Code Mods (the original research's noclip/freeze/camera-lock hooks). READ-ONLY: looks at the stock ISO,
@@ -2603,7 +2873,7 @@ class Handler(BaseHTTPRequestHandler):
             # mission list. On disc the three sit intermixed.
             from . import modes
             try:
-                return self._send(200, modes.catalog(s.disc))
+                return self._send(200, modes.catalog(s.disc, stock=s.vanilla))
             except Exception:
                 out = []
                 for a in list_levels(s.disc):
@@ -2800,7 +3070,12 @@ class Handler(BaseHTTPRequestHandler):
             from . import creature, swt as swtmod
             name = one("name")
             data = s.disc.read("SWAT.DAT", name)
-            stock = creature.read_fields(s.vanilla.read("SWAT.DAT", name))
+            try:
+                stock = creature.read_fields(s.vanilla.read("SWAT.DAT", name))
+            except Exception:                              # noqa: BLE001
+                # A character added in the Studio (Add Character) is not on
+                # the unedited disc: its own values are its stock.
+                stock = creature.read_fields(data)
 
             # The combat sheet lives in a SECOND file. `.cr` holds health and
             # movement; every damage number is in `<stem>.swt`, and neither
@@ -2813,8 +3088,11 @@ class Handler(BaseHTTPRequestHandler):
             if s.disc.locate(stem):
                 try:
                     combat = swtmod.read(s.disc.read("SWAT.DAT", stem))
-                    combat_stock = swtmod.summary(
-                        s.vanilla.read("SWAT.DAT", stem))
+                    try:
+                        combat_stock = swtmod.summary(
+                            s.vanilla.read("SWAT.DAT", stem))
+                    except Exception:                      # noqa: BLE001
+                        combat_stock = swtmod.summary(s.disc.read("SWAT.DAT", stem))
                 except Exception:                          # noqa: BLE001
                     # A character whose .swt will not parse still has a
                     # perfectly good .cr, and the panel is more useful with
@@ -3760,7 +4038,11 @@ class Handler(BaseHTTPRequestHandler):
             arc, name = one("archive"), one("name")
             chunk = int(one("chunk", "-1"))
             try:
-                bundle = Rsc(s.vanilla.archive(arc).read(name), name)
+                try:
+                    bundle = Rsc(s.vanilla.archive(arc).read(name), name)
+                except Exception:                          # noqa: BLE001
+                    # an added character (not on the unedited disc)
+                    bundle = Rsc(s.disc.archive(arc).read(name), name)
             except Exception as ex:
                 return self._send(404, dict(error=str(ex)))
             if not (0 <= chunk < len(bundle.chunks)) \
@@ -3795,6 +4077,36 @@ class Handler(BaseHTTPRequestHandler):
                                   meta)
             return self._send(200, obj.encode("latin-1"),
                               "text/plain; charset=latin-1")
+
+        if route == "character_rsc":
+            # The whole character as the game's compiled bundle, for the RDR
+            # Blender add-on (File > Import > Red Dead Revolver bundle): a zip
+            # of <stem>_lods.rsc and .rnt from the WORKING disc (your edits
+            # in it), with the .skel and .cr it uses when SWAT.DAT has them.
+            import io as _io
+            import re as _re
+            import zipfile as _zf
+            arc, name = one("archive"), one("name")
+            d = s.disc.archive(arc)
+            stem = name.rsplit(".", 1)[0]
+            code = stem[:-5] if stem.endswith("_lods") else stem
+            buf = _io.BytesIO()
+            with _zf.ZipFile(buf, "w", _zf.ZIP_DEFLATED) as z:
+                z.writestr(name, d.read(name))
+                try:
+                    z.writestr(stem + ".rnt", d.read(stem + ".rnt"))
+                except Exception:                          # noqa: BLE001
+                    pass
+                sw = s.disc.archive("SWAT.DAT")
+                try:
+                    cr = sw.read(code + ".cr")
+                    z.writestr(code + ".cr", cr)
+                    m = _re.search(rb"(?m)^\s*FileNameSkel\s+(\S+)", cr)
+                    sk = (m.group(1).decode("latin-1") if m else code) + ".skel"
+                    z.writestr(sk, sw.read(sk))
+                except Exception:                          # noqa: BLE001
+                    pass
+            return self._send(200, buf.getvalue(), "application/zip")
 
         if route == "character_parts":
             # The editable pieces of a character bundle, for a UI to list.
@@ -4441,6 +4753,104 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ POST
 
+    # ------------------------------------------------------------ DISC > Data Editor
+
+    def _de_get(self, route, q):
+        from . import dataeditor as _dem
+        de = _data_editor(self.studio)
+        one = lambda k, d=None: (q.get(k) or [d])[0]  # noqa: E731
+        if route == "de_job":
+            return self._send(200, de.job_status())
+        if route == "de_overview":
+            return self._send(200, de.overview())
+        if route == "de_file":
+            base = de.workbench if one("in") == "workbench" else None
+            data = de.read_file(one("key", ""), base)
+            text = None
+            if de.is_text(de._safe(one("key", ""), base)) and len(data) < 4 << 20:
+                text = data.decode("latin-1")
+            return self._send(200, dict(key=one("key"), size=len(data), text=text,
+                                        hex=None if text is not None else data[:4096].hex()))
+        if route == "de_archive_names":
+            return self._send(200, dict(names=de.archive_names(one("archive", ""))))
+        if route == "de_levels":
+            arcs = de.archives()
+            mp = sorted({a.split("/")[1][:-5] for a in arcs if a.startswith("lvls_m2/")})
+            sng = sorted({a.split("/")[1][:-4] for a in arcs if a.startswith("lvls_sng/")})
+            return self._send(200, dict(showdown=mp, story=sng))
+        if route.startswith("de_x_"):
+            # the rest of the RDR Data Editor app: Workbench, Saved Mods, HUD text ... (dataeditor_more.py)
+            from . import dataeditor_more as _more
+            try:
+                r = _more.handle_get(self, route, q)
+            except (ValueError, OSError, KeyError) as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            if r is not None:
+                code, body, ctype = r
+                return self._send(code, body, ctype) if ctype else self._send(code, body)
+        return self._send(404, {"error": "no such route: %s" % route})
+
+    def _de_post(self, route, body):
+        from . import dataeditor as _dem
+        de = _data_editor(self.studio)
+        if route.startswith("de_manual") and self.client_address[0] not in ("127.0.0.1", "::1", "localhost"):
+            # These name paths on this machine to read and write. The Studio
+            # can be served on a LAN (--lan); a network peer may not ask it to
+            # write anywhere on the disk. Only this machine's own window may.
+            return self._send(200, dict(ok=False, error_text="Manual extracting/building works only in the Studio on "
+                                        "this computer, not over the network."))
+        try:
+            if route == "de_add":
+                return self._send(200, dict(added=de.add_files(body.get("folder", ""), body.get("files") or [])))
+            if route == "de_import":
+                notes = [de.import_archive(f["name"], base64.b64decode(f["data"]), body.get("into", ""))
+                         for f in body.get("files") or []]
+                return self._send(200, dict(results=notes))
+            if route == "de_delete":
+                return self._send(200, dict(deleted=de.delete_files(body.get("keys") or [])))
+            if route == "de_save":
+                base = de.workbench if body.get("in") == "workbench" else None
+                de.save_text(body.get("key", ""), body.get("text", ""), base)
+                return self._send(200, dict(ok=True))
+            if route == "de_mode":
+                de.set_master_mode(body.get("names") or [], "add" if body.get("mode") == "add" else "replace")
+                return self._send(200, dict(ok=True))
+            if route == "de_from_game":
+                return self._send(200, dict(copied=de.from_game(body.get("archive", ""), body.get("names") or [],
+                                                                to=body.get("to") or None), to=body.get("to") or "dat"))
+            if route == "de_adopt":
+                return self._send(200, dict(ok=de.adopt(body.get("archive", ""))))
+            if route in ("de_build", "de_restore", "de_newdat"):
+                de.check_pcsx2()          # refused at once, with the reason, instead of from inside the job
+            if route == "de_build":
+                return self._send(200, dict(started=de.start("Build into the working disc", de.build)))
+            if route == "de_restore":
+                return self._send(200, dict(started=de.start("Restore", de.restore, body.get("archives") or [])))
+            if route == "de_newdat":
+                return self._send(200, dict(started=de.start(
+                    "New .dat", de.new_level, "sng" if body.get("kind") == "sng" else "showdown",
+                    body.get("name", ""), body.get("template") or None, body.get("title") or None,
+                    body.get("subtitle") or None, bool(body.get("replace")))))
+            if route == "de_manual_extract":
+                return self._send(200, dict(started=de.start(
+                    "Extract an archive", de.manual_extract, body.get("archive", ""), body.get("to", ""))))
+            if route == "de_manual_build":
+                return self._send(200, dict(started=de.start(
+                    "Build an archive", de.manual_build, body.get("folder", ""), body.get("output", ""))))
+            if route == "de_manual_extract_all":
+                return self._send(200, dict(started=de.start(
+                    "Extract every archive", de.manual_extract_all, body.get("to", ""))))
+            if route.startswith("de_x_"):
+                from . import dataeditor_more as _more
+                r = _more.handle_post(self, route, body)
+                if r is not None:
+                    return self._send(200, r)
+        except _dem.Busy as ex:
+            return self._send(200, dict(ok=False, busy=True, error_text=str(ex)))
+        except (ValueError, OSError, KeyError, zipfile.BadZipFile) as ex:
+            return self._send(200, dict(ok=False, error_text=str(ex)))
+        return self._send(404, {"error": "no such route: %s" % route})
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         try:
@@ -4467,7 +4877,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "settings_reset", "export_patch",
                                        "export_iso", "export_open",
                                        "mod_import", "job_cancel",
-                                       "codemods_build"):
+                                       "codemods_build") and not parsed.path[5:].startswith("de_"):
                 self.studio.ensure_open(force=True)
             return self._api_post(parsed.path[5:], self._body())
         except Exception as ex:
@@ -4480,6 +4890,90 @@ class Handler(BaseHTTPRequestHandler):
 
         if not _feature_allows(route):
             return self._send(404, {"error": "no such route: %s" % route})
+
+        if route.startswith("de_"):
+            return self._de_post(route, body)
+
+        if route == "character_rsc_import":
+            # A character bundle exported by the RDR Blender add-on (.rsc, and
+            # its .rnt) over every copy of that bundle on the disc, as ONE undo
+            # step. An archive with no room for it is rebuilt to make room.
+            import base64 as _b64
+            from . import dataeditor as _dem
+            name = (body.get("name") or "").lower()
+            rsc = _b64.b64decode(body.get("rsc_b64") or "")
+            rnt = _b64.b64decode(body.get("rnt_b64") or "") if body.get("rnt_b64") else None
+            if rsc[:4] != b"RSC0":
+                return self._send(200, dict(ok=False, error_text="That is not a compiled bundle (.rsc): it does not start with RSC0"))
+            stem = name.rsplit(".", 1)[0]
+            code = stem[:-5] if stem.endswith("_lods") else stem
+            if rnt is not None:
+                if rnt[:4] != b"RNT0":
+                    return self._send(200, dict(ok=False, error_text="The names file is not an .rnt (RNT0)"))
+                import sys as _sys
+                _sys.path.insert(0, _dem._LIB)
+                from rdrformats import rsc as _rr
+                mods = [n for t, _num, n in _rr.read_names(rnt) if t == "MOD0"]
+                if code + "_lod_01" not in mods:
+                    return self._send(200, dict(ok=False, error_text=(
+                        "The .rnt names no %s_lod_01, the body the game loads for %s (it names: %s). "
+                        "Export it from Blender with Model name %s_lod_01." % (code, code, ", ".join(mods) or "nothing", code))))
+            copies = [a for a in s.disc.locate(name)] if body.get("everywhere", True) else [body.get("archive")]
+            copies = [a for a in copies if a]
+            if not copies:
+                return self._send(200, dict(ok=False, error_text="No archive on the disc has %s" % name))
+            plan = []
+            for a in copies:
+                fit = s.disc.archive(a).would_fit(name, rsc)
+                plan.append(dict(archive=a, stored=fit["stored"], slot=fit["slot"], fits=fit["fits"]))
+            if body.get("dry"):
+                return self._send(200, dict(dry=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"])))
+            group = s.journal.new_group()
+            for a in copies:
+                s.write(a, name, rsc, "character bundle %s" % name, group)
+                if rnt is not None:
+                    try:
+                        s.disc.archive(a).find(stem + ".rnt")
+                    except KeyError:
+                        continue  # this copy of the bundle has no names file beside it
+                    s.write(a, stem + ".rnt", rnt, "character bundle %s" % name, group)
+            s.note("%s replaced in %d archive(s) from a .rsc import" % (name, len(copies)))
+            return self._send(200, dict(ok=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"])))
+
+        if route == "creature_delete":
+            # BALANCE > Creatures > Delete Character: custom characters only
+            # (a character the unedited disc has is refused). A Data Editor job.
+            from . import dataeditor as _dem
+            de = _data_editor(s)
+            try:
+                plan = de.delete_plan(body.get("code", ""))
+                if body.get("dry"):
+                    return self._send(200, dict(ok=True, **plan))
+                if plan["base_game"]:
+                    return self._send(200, dict(ok=False, error_text=(
+                        "%s is one of the game's own characters: only characters you added can be deleted" % plan["code"])))
+                return self._send(200, dict(ok=True, started=de.start(
+                    "Delete character %s" % body.get("code", ""), de.delete_character, body.get("code", ""))))
+            except (_dem.Busy, ValueError) as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+
+        if route == "creature_add":
+            # BALANCE > Creatures > Add Character: a new character slot in
+            # SWAT.DAT, cloned from another (rdrstudio/dataeditor.py). Adds are
+            # not undoable; Reset to stock takes it away.
+            from . import dataeditor as _dem
+            try:
+                import base64 as _b64c
+                rsc = _b64c.b64decode(body["rsc_b64"]) if body.get("rsc_b64") else None
+                rnt = _b64c.b64decode(body["rnt_b64"]) if body.get("rnt_b64") else None
+                skl = _b64c.b64decode(body["skel_b64"]) if body.get("skel_b64") else None
+                extra = {f["name"]: _b64c.b64decode(f["data"]) for f in (body.get("extra") or [])
+                         if f.get("name") and f.get("data")}
+                added = _data_editor(s).add_character(body.get("source", ""), body.get("code", ""), rsc, rnt, skl, extra,
+                                                      body.get("copy"))
+            except (_dem.Busy, ValueError) as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            return self._send(200, dict(ok=True, added=added, name=(body.get("code") or "").strip().lower() + ".cr"))
 
         if route == "codemods_build":
             # Builds a NEW file, 02_Modded/RDR_CODEMODS.iso, from the stock or the working ISO.
@@ -4516,6 +5010,28 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as ex:
                 return self._send(400, dict(error=str(ex)))
 
+        if route in ("profile_save", "profile_load", "profile_delete", "profile_import"):
+            from . import settings as settings_mod
+            try:
+                name = body.get("name", "")
+                if route == "profile_save":
+                    return self._send(200, dict(profiles=settings_mod.save_profile(name, body.get("local") or {})))
+                if route == "profile_load":
+                    return self._send(200, dict(local=settings_mod.load_profile(name)))
+                if route == "profile_delete":
+                    return self._send(200, dict(profiles=settings_mod.delete_profile(name)))
+                return self._send(200, dict(profiles=settings_mod.import_profile(name, body.get("profile"))))
+            except ValueError as ex:
+                return self._send(400, dict(error=str(ex)))
+
+        if route == "note":
+            # a line for the activity log from the page (the Build button's "Build complete", which spans a queued
+            # rebuild and a Data Editor build -- neither knows when the other is done)
+            msg = str(body.get("text") or "").strip()[:300]
+            if msg:
+                s.note(msg)
+            return self._send(200, dict(ok=True))
+
         if route == "settings_reset":
             from . import settings as settings_mod
             return self._send(200, settings_mod.reset())
@@ -4543,7 +5059,8 @@ class Handler(BaseHTTPRequestHandler):
             # same undo step (no client opt-in).
             from . import collparts
             sets = []          # (anchor uid, member uids incl. anchor, new pos)
-            if not body.get("manifest"):
+            alone = bool(body.get("alone"))   # "Edit collision on its own": no pairing either way
+            if not body.get("manifest") and not alone:
                 try:
                     live_rsc = lvl._load_rsc()
                     have = {int(c["uid"]) for c in body["changes"]}
@@ -4572,7 +5089,8 @@ class Handler(BaseHTTPRequestHandler):
                     body["changes"] = list(body["changes"]) + added
                 except Exception:
                     sets = []
-            body["changes"] = lvl.with_collision(body["changes"])
+            if not alone:
+                body["changes"] = lvl.with_collision(body["changes"])
             group = s.journal.new_group()
             edits = lvl.merge(*[
                 lvl.move(int(c["uid"]), c["pos"], allow_grow=grow)
@@ -5232,7 +5750,10 @@ class Handler(BaseHTTPRequestHandler):
             arc, name = body["archive"], body["name"]
             chunk = int(body["chunk"])
             try:
-                stock_rsc = Rsc(s.vanilla.archive(arc).read(name), name)
+                try:
+                    stock_rsc = Rsc(s.vanilla.archive(arc).read(name), name)
+                except Exception:                          # noqa: BLE001
+                    stock_rsc = Rsc(s.disc.archive(arc).read(name), name)  # an added character
             except Exception as ex:
                 return self._send(404, dict(error=str(ex)))
             if not (0 <= chunk < len(stock_rsc.chunks)) \
@@ -5340,10 +5861,11 @@ class Handler(BaseHTTPRequestHandler):
                                         "was changed." % ex})
             fit = s.disc.archive(arc).would_fit(name, out)
             rep["stored"], rep["slot"] = fit["stored"], fit["slot"]
-            rep["fits"], rep["headroom"] = fit["fits"], fit["headroom"]
+            rep["rebuild"] = not fit["fits"] and s.rebuild_on_overflow
+            rep["fits"], rep["headroom"] = fit["fits"] or rep["rebuild"], fit["headroom"]
             if body.get("dry"):
                 return self._send(200, dict(rep, dry=True))
-            if not fit["fits"]:
+            if not rep["fits"]:
                 return self._send(400, {
                     "error": "Too big: this model needs %d bytes but the "
                              "original only had room for %d (%d too many). "
@@ -5437,6 +5959,9 @@ class Handler(BaseHTTPRequestHandler):
             fit = s.disc.archive(body["archive"]).would_fit(lvl.rsc_name, out)
             rep["stored"], rep["slot"] = fit["stored"], fit["slot"]
             rep["fits"], rep["headroom"] = fit["fits"], fit["headroom"]
+            # Bigger than its old space: queued for the archive's rebuild on the
+            # next Play (Rebuild and play), as every other edit with no room.
+            grow_ok = bool(s.rebuild_on_overflow)
             # Model + collision are ONE thing: a matching solid box is made
             # for the new model (new bound_ chunk + node, or the existing
             # twin's chunk refitted). Whether the console honours it is
@@ -5453,11 +5978,11 @@ class Handler(BaseHTTPRequestHandler):
                 if cplan["ok"]:
                     cfit = s.disc.archive(body["archive"]).would_fit(
                         lvl.rsc_name, cplan["bundle"])
-                    if cfit["fits"]:
+                    if cfit["fits"] or grow_ok:
                         out = cplan["bundle"]
                         fit = cfit
                         rep["stored"], rep["slot"] = fit["stored"], fit["slot"]
-                        rep["fits"], rep["headroom"] = True, fit["headroom"]
+                        rep["fits"], rep["headroom"] = cfit["fits"], fit["headroom"]
                     else:
                         cplan = dict(ok=False, why="No room for the collision "
                                      "chunk: the level file is %d byte(s) too "
@@ -5473,9 +5998,14 @@ class Handler(BaseHTTPRequestHandler):
                               "blocks you and new walls are not solid.") + (
                 " Whether the console honours it is untested until a boot "
                 "test shows it.")
+            rep["rebuild"] = not fit["fits"] and grow_ok
+            if rep["rebuild"]:
+                rep["fits"] = True
+                rep["note"] += (" It is bigger than the original's space (%d of %d bytes): %s is rebuilt to make room "
+                                "on the next Rebuild and play." % (fit["stored"], fit["slot"], body["archive"]))
             if body.get("dry"):
                 return self._send(200, dict(rep, dry=True))
-            if not fit["fits"]:
+            if not fit["fits"] and not grow_ok:
                 return self._send(400, {
                     "error": "Too big: this model needs %d bytes but the "
                              "original only had room for %d (%d too many). "
@@ -5512,6 +6042,69 @@ class Handler(BaseHTTPRequestHandler):
                            rep.get("collision_note") or "Collision is unchanged."),
                 next="Next: press Boot test in the top bar (or run RDR_MODDED.iso "
                      "in PCSX2) to see it. Ctrl+Z undoes this."))
+
+        if route == "collision_add":
+            # LEVEL: a NEW collision box anywhere (world AABB lo..hi), not tied
+            # to a model import: a new BND0 chunk in the level bundle and a new
+            # bound_<stem>_NN node. One undo step; no room -> rebuilt on the
+            # next Rebuild and play.
+            from . import custcoll
+            arc = body["archive"]
+            lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+            try:
+                lo = [float(v) for v in body["lo"]]
+                hi = [float(v) for v in body["hi"]]
+            except (KeyError, TypeError, ValueError):
+                return self._send(400, {"error": "need lo and hi, three numbers each"})
+            if any(h <= l for l, h in zip(lo, hi)):
+                return self._send(400, {"error": "the box needs a size above 0 on every axis"})
+            lvl._load_rsc()                  # resolves rsc_name (set when the bundle is first read)
+            if not lvl.rsc_name:
+                return self._send(200, dict(ok=False, error_text="This part of the level has no model bundle (.rsc) to "
+                                            "hold a collision shell: pick an area that draws geometry"))
+            bundle = s.disc.archive(arc).read(lvl.rsc_name)
+            cplan = custcoll.plan_box(lvl, bundle, lo, hi, body.get("name") or "custom", bool(body.get("solid", True)))
+            if not cplan["ok"]:
+                return self._send(200, dict(ok=False, error_text=cplan["why"]))
+            fit = s.disc.archive(arc).would_fit(lvl.rsc_name, cplan["bundle"])
+            rep = dict(ok=True, name=cplan["name"], chunk=cplan["chunk"], file=cplan.get("file"),
+                       rebuild=not fit["fits"],
+                       note="Collision: added %s (new chunk %d), a %s box of its own."
+                            % (cplan["name"], cplan["chunk"], "solid" if body.get("solid", True) else "walk-through"))
+            if body.get("dry"):
+                return self._send(200, dict(rep, dry=True))
+            label = "new collision %s" % cplan["name"]
+            group = s.journal.new_group()
+            s.write(arc, lvl.rsc_name, cplan["bundle"], label, group)
+            res = lvl.apply(cplan["edits"], writer=s.writer_for(arc, label, group))
+            if not res.get("applied"):
+                s.journal.undo(s._raw_write)
+                return self._send(200, dict(ok=False, error_text="The collision node could not be written, so nothing "
+                                            "was changed: %s" % (res.get("error") or "no room")))
+            s.note("%s: new collision box %s (chunk %d)" % (arc, cplan["name"], cplan["chunk"]))
+            return self._send(200, dict(rep, applied=True))
+
+        if route == "anim_glb_save":
+            # "Export all animations" with the current model: the page bakes
+            # each clip on the model (anim3d.js bakeClipGlb) and hands the
+            # .glb here, to go in the exports folder's animations/<model>.anim.
+            import base64 as _b64
+            import re as _re
+            from .share import exports_dir
+            folder = _re.sub(r'[^A-Za-z0-9_. -]+', '_', str(body.get("folder") or "model.anim")).strip(". ") or "model.anim"
+            out_dir = os.path.join(exports_dir(), "animations", folder)
+            fname = body.get("name")
+            if not fname:
+                return self._send(200, dict(ok=True, folder=out_dir))
+            fname = _re.sub(r'[^A-Za-z0-9_. -]+', '_', os.path.basename(str(fname))).strip(". ")
+            if not fname.lower().endswith((".glb", ".csv")):
+                return self._send(400, dict(error="only .glb and .csv files go here"))
+            os.makedirs(out_dir, exist_ok=True)
+            data = body.get("text")
+            raw = data.encode("utf-8") if isinstance(data, str) else _b64.b64decode(body.get("data") or "")
+            with open(os.path.join(out_dir, fname), "wb") as fh:
+                fh.write(raw)
+            return self._send(200, dict(ok=True, folder=out_dir, path=os.path.join(out_dir, fname), bytes=len(raw)))
 
         if route == "anim_import":
             # An edited BVH back into a .anim. Same contract as geom_import --
@@ -5556,7 +6149,7 @@ class Handler(BaseHTTPRequestHandler):
                 out, rep = BVH.bvh_to_anim(
                     cur, text, bones=bones,
                     euler=body.get("euler") or None,
-                    tolerance=BVH.TEXT_ULP if tol is None else float(tol),
+                    tolerance=BVH.DCC_TOLERANCE if tol is None else float(tol),
                     rounding=body.get("rounding") or "nearest",
                     allow_reshape=bool(body.get("allow_reshape")),
                     reshape_threshold=0 if thr is None else int(thr))
@@ -5585,26 +6178,73 @@ class Handler(BaseHTTPRequestHandler):
                        stored=stored, slot=e.slot,
                        headroom=e.slot - stored,
                        compressed=bool(e.compressed))
-            if stored > e.slot:
-                return self._send(400, dict(
-                    rep, ok=False,
-                    error="the re-encoded clip needs %d bytes of a %d-byte "
-                          "slot (over by %d). Nothing was written, and the "
-                          "archive must NOT be repacked."
-                          % (stored, e.slot, stored - e.slot)))
-            if rep["identical"]:
+            # The same clip in OTHER archives. 552 clip names sit in more than
+            # one: mrd_load_a.anim is in SWAT.DAT and in LVLS_SNG/PERFNEW.DAT,
+            # and the level's load show (its own lvl_perfnew.lsh) plays the
+            # copy in ITS archive -- so an edit made in SWAT.DAT never showed
+            # in the game. Every copy that is still this clip as it was
+            # (before this edit, or as the disc shipped it) gets the edit too,
+            # as one undo step. A copy someone changed on its own is left
+            # alone and named.
+            copies, own_copies = [], []
+            try:
+                holders = s.disc.build_index().get(name.lower()) or s.disc.build_index().get(name) or []
+            except Exception:                                  # noqa: BLE001
+                holders = []
+            try:
+                stock = s.vanilla.archive(arc).read(name) if s.vanilla is not None else None
+            except Exception:                                  # noqa: BLE001
+                stock = None
+            if body.get("copies", True) is not False:
+                for other in holders:
+                    if other.upper() == arc.upper():
+                        continue
+                    try:
+                        theirs = s.disc.read(other, name)
+                    except Exception:                          # noqa: BLE001
+                        continue
+                    if theirs == out:
+                        continue
+                    if theirs == cur or (stock is not None and theirs == stock):
+                        copies.append(other)
+                    else:
+                        own_copies.append(other)
+            rep = dict(rep, copies=copies, copies_left=own_copies)
+
+            # An unedited round trip: every sample as it was. Nothing to write
+            # -- even when the re-encoder lays the same samples out in more
+            # bytes, which used to be refused as "over its slot" for a clip
+            # nobody had touched. (Unless a copy elsewhere is still behind
+            # this one: then that is what gets written.)
+            if (rep["identical"] or not rep.get("changed_samples")) and not (copies and cur != stock):
                 return self._send(200, dict(
                     rep, ok=True, written=False,
-                    note="the BVH decodes to the bytes already on the disc, so "
-                         "nothing was written"))
+                    note="every sample is as it was on the disc, so nothing was "
+                         "written"))
+            if rep["identical"] or not rep.get("changed_samples"):
+                out = cur                     # this one has the edit already: only the copies are behind
+            # Bigger than its slot: s.write queues the archive for a rebuild
+            # (laid out as the game's own, every other edit kept) that the
+            # next Build or Play runs -- the same path every other edit that
+            # grows takes. It used to be refused outright.
+            rep["grows"] = stored > e.slot
+            if rep["grows"]:
+                rep["note"] = ("%d bytes against a %d-byte slot: %s is rebuilt to make room on the next "
+                               "Build (or Play)" % (stored, e.slot, arc))
             if body.get("dry"):
                 return self._send(200, dict(rep, dry=True))
 
             label = body.get("label") or ("import %s" % name)
-            used, slot = s.write(arc, name, out, label)
-            s.note("%s :: %s imported (%d/%d samples changed, %d/%d bytes)"
+            group = s.journal.new_group() if (copies and s.journal is not None) else None
+            if cur != out:
+                used, slot = s.write(arc, name, out, label, group)
+            else:
+                used, slot = len(out), e.slot
+            for other in copies:
+                s.write(other, name, out, label, group)
+            s.note("%s :: %s imported (%d/%d samples changed, %d/%d bytes)%s"
                    % (arc, name, rep["changed_samples"], rep["total_samples"],
-                      used, slot))
+                      used, slot, ("; also into " + ", ".join(copies)) if copies else ""))
             return self._send(200, dict(rep, ok=True, written=True,
                                         used=used, slot=slot))
 
@@ -5786,9 +6426,10 @@ class Handler(BaseHTTPRequestHandler):
                     stored = len(co.compress(data) + co.flush())
                 else:
                     stored = len(data)
+                rebuild = stored > e.slot and s.rebuild_on_overflow
                 return self._send(200, dict(dry=True, stored=stored,
-                                            slot=e.slot, fits=stored <= e.slot,
-                                            headroom=e.slot - stored))
+                                            slot=e.slot, fits=stored <= e.slot or rebuild,
+                                            rebuild=rebuild, headroom=e.slot - stored))
             used, slot = s.write(arc, name, data, "edit %s" % name)
             s.note("%s :: %s saved (%d/%d bytes of slot)" % (arc, name, used, slot))
             return self._send(200, dict(ok=True, used=used, slot=slot))
@@ -5849,13 +6490,17 @@ class Handler(BaseHTTPRequestHandler):
                 stored = stored_size(data, keep_raw=not e.compressed)
                 fits = stored <= e.slot
                 gap = d.largest_gap()[1] if not fits else 0
+                # No room in place: the archive is rebuilt to make room (the
+                # RDR Data Editor's layout), still one undoable edit.
+                rebuild = (not fits and s.rebuild_on_overflow
+                           and not (grow and gap >= stored))
                 plan = dict(mode="replace", name=e.name, stored=stored,
-                            slot=e.slot, fits=fits,
+                            slot=e.slot, fits=fits or rebuild, rebuild=rebuild,
                             grow_possible=(not fits and gap >= stored),
                             undoable=True)
                 if dry:
                     return self._send(200, dict(plan, dry=True))
-                if not fits and not grow:
+                if not fits and not grow and not rebuild:
                     return self._send(200, dict(
                         plan, ok=False,
                         error="needs %d stored bytes, slot is %d -- tick "
@@ -5899,6 +6544,17 @@ class Handler(BaseHTTPRequestHandler):
                                             error=str(ex)))
             r = dict(r, mode="add", name=name, undoable=False, dry=dry,
                      why=list(r.get("reasons") or []))
+            if r["why"] and s.rebuild_on_overflow and not r.get("added"):
+                # No room for one more entry (table slot, name block or
+                # bytes): the archive is rebuilt with the new file in it.
+                plan = dict(mode="add", name=name, undoable=False, dry=dry,
+                            rebuild=True, why=[], reasons_in_place=r["why"])
+                if dry:
+                    return self._send(200, plan)
+                s.pending.queue(arc, name, data, add=True)
+                s.note("%s queued for %s: it is added when the archive is rebuilt (Rebuild and play)"
+                       % (name, arc))
+                return self._send(200, dict(plan, ok=True, added=True, queued=True))
             if dry:
                 return self._send(200, r)
             if r.get("added"):
@@ -5924,11 +6580,12 @@ class Handler(BaseHTTPRequestHandler):
                 stored = len(co.compress(data) + co.flush())
             else:
                 stored = len(data)
+            rebuild = stored > e.slot and s.rebuild_on_overflow
             if body.get("dry"):
                 return self._send(200, dict(dry=True, stored=stored,
-                                            slot=e.slot, fits=stored <= e.slot,
-                                            headroom=e.slot - stored))
-            if stored > e.slot:
+                                            slot=e.slot, fits=stored <= e.slot or rebuild,
+                                            rebuild=rebuild, headroom=e.slot - stored))
+            if stored > e.slot and not rebuild:
                 return self._send(200, dict(
                     ok=False, error="needs %d stored bytes, slot is %d"
                     % (stored, e.slot)))
@@ -6526,6 +7183,29 @@ class Handler(BaseHTTPRequestHandler):
                          % time.strftime("%H:%M:%S"))
             return self._send(200, dict(ok=True))
 
+        if route == "rebuild_pending":
+            # "Rebuild and play", first half: every archive with queued edits
+            # rebuilt once, as a job the page polls (disc_state.rebuild_job).
+            from . import dataeditor as _dem0
+            if _dem0.DataEditor.pcsx2_running():
+                return self._send(200, dict(ok=False, error_text=_dem0.DataEditor.PCSX2_BUSY))
+            job = getattr(s, "_rebuild_job", None)
+            if job and job.get("state") == "running":
+                return self._send(200, dict(ok=True, job=job))
+            job = s._rebuild_job = dict(state="running", done=0, total=len(s.pending.archives()),
+                                        archive="", error="", rebuilt=[], started=time.time())
+
+            def _run():
+                try:
+                    def prog(n, total, arc):
+                        job.update(done=n, total=total, archive=arc)
+                    r = s.rebuild_pending(prog)
+                    job.update(state="done", done=len(r), rebuilt=r)
+                except Exception as ex:                    # noqa: BLE001
+                    job.update(state="error", error=str(ex))
+            threading.Thread(target=_run, name="rebuild_pending", daemon=True).start()
+            return self._send(200, dict(ok=True, job=job))
+
         if route == "play":
             # Release, then launch, in that order and from one click. Doing it
             # by hand is a trap: the Studio reclaims the write handle on its
@@ -6534,6 +7214,12 @@ class Handler(BaseHTTPRequestHandler):
             if not s.pcsx2 or not os.path.exists(s.pcsx2):
                 return self._send(400, dict(
                     error="PCSX2 not found at %r" % s.pcsx2))
+            if s.pending.archives():
+                # Rebuild and play: the queued edits go on the disc first.
+                try:
+                    s.rebuild_pending()
+                except Exception as ex:                    # noqa: BLE001
+                    return self._send(500, dict(error="could not rebuild the queued .dat files: %s" % ex))
             s.hand_over()
             try:
                 subprocess.Popen([s.pcsx2, "-fastboot", s.modded_path])
@@ -6543,8 +7229,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, dict(ok=True, launched=True))
 
         if route == "restore":
-            s.restore()
-            return self._send(200, dict(ok=True))
+            saved, n = s.restore(bool(body.get("clear_mods")))
+            return self._send(200, dict(ok=True, saved_mod=saved, cleared=n))
 
         if route == "boot":
             return self._send(200, s.boot_test(body.get("seconds")))

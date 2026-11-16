@@ -248,6 +248,211 @@ export function bindPositions(bones) {
   return out;
 }
 
+// ------------------------------------------------- .glb: model + skeleton + clip
+//
+// glTF 2.0 binary: the skinned mesh (a primitive per texture run, its textures
+// embedded as PNG), the skeleton as a node tree in its bind pose (translation
+// only, as every rig in this engine), and the clip as one animation, a
+// rotation track per bone and a translation track per root. Blender: File >
+// Import > glTF 2.0.
+function glbFromParts(D) {
+  const nb = D.names.length;
+  const chunks = [];
+  let binLen = 0;
+  const views = [], accessors = [];
+  function view(bytes, target) {
+    const pad = (4 - (binLen % 4)) % 4;
+    if (pad) { chunks.push(new Uint8Array(pad)); binLen += pad; }
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    chunks.push(u8);
+    const v = { buffer: 0, byteOffset: binLen, byteLength: u8.byteLength };
+    if (target) v.target = target;
+    binLen += u8.byteLength;
+    views.push(v);
+    return views.length - 1;
+  }
+  function accessor(arr, type, ctype, count, target, minmax) {
+    const a = { bufferView: view(arr, target), componentType: ctype, count, type };
+    if (minmax) { a.min = minmax[0]; a.max = minmax[1]; }
+    accessors.push(a);
+    return accessors.length - 1;
+  }
+  const pos = Float32Array.from(D.positions);
+  const nv = pos.length / 3;
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < nv; i++) for (let c = 0; c < 3; c++) {
+    const v = pos[i * 3 + c]; if (v < mn[c]) mn[c] = v; if (v > mx[c]) mx[c] = v;
+  }
+  const attrs = { POSITION: accessor(pos, 'VEC3', 5126, nv, 34962, [mn, mx]) };
+  if (D.normals) attrs.NORMAL = accessor(Float32Array.from(D.normals), 'VEC3', 5126, nv, 34962);
+  if (D.uvs && D.uvs.length === nv * 2) attrs.TEXCOORD_0 = accessor(Float32Array.from(D.uvs), 'VEC2', 5126, nv, 34962);
+  const si = D.skinIndex, sw = D.skinWeight;
+  const joints = new Uint16Array(nv * 4), weights = new Float32Array(nv * 4);
+  for (let i = 0; i < nv; i++) {
+    let sum = 0;
+    for (let c = 0; c < 4; c++) { joints[i * 4 + c] = Math.min(si[i * 4 + c], nb - 1); sum += sw[i * 4 + c]; }
+    for (let c = 0; c < 4; c++) weights[i * 4 + c] = sum > 0 ? sw[i * 4 + c] / sum : (c === 0 ? 1 : 0);
+  }
+  attrs.JOINTS_0 = accessor(joints, 'VEC4', 5123, nv, 34962);
+  attrs.WEIGHTS_0 = accessor(weights, 'VEC4', 5126, nv, 34962);
+
+  const images = [], textures = [], materials = [];
+  for (const png of D.pngs.length ? D.pngs : [null]) {
+    const mat = { name: 'mat' + materials.length, doubleSided: true,
+                  pbrMetallicRoughness: { metallicFactor: 0, roughnessFactor: 1 } };
+    if (png && attrs.TEXCOORD_0 !== undefined) {
+      images.push({ bufferView: view(png), mimeType: 'image/png' });
+      textures.push({ sampler: 0, source: images.length - 1 });
+      mat.pbrMetallicRoughness.baseColorTexture = { index: textures.length - 1 };
+      mat.alphaMode = 'MASK';
+      mat.alphaCutoff = 0.35;
+    } else {
+      mat.pbrMetallicRoughness.baseColorFactor = [0.78, 0.74, 0.66, 1];
+    }
+    materials.push(mat);
+  }
+  const prims = D.groups.filter((g) => g.count > 0).map((g) => ({
+    attributes: attrs, mode: 4, material: Math.min(g.materialIndex || 0, materials.length - 1),
+    indices: accessor(Uint32Array.from(D.index.subarray(g.start, g.start + g.count)), 'SCALAR', 5125, g.count, 34963),
+  }));
+
+  const nodes = D.names.map((n, j) => ({ name: n, translation: Array.from(D.rest[j]).map(Number) }));
+  for (let j = 0; j < nb; j++) {
+    const p = D.parents[j];
+    if (p >= 0) (nodes[p].children = nodes[p].children || []).push(j);
+  }
+  const ibm = new Float32Array(nb * 16);
+  for (let j = 0; j < nb; j++) {
+    const o = j * 16;
+    ibm[o] = ibm[o + 5] = ibm[o + 10] = ibm[o + 15] = 1;
+    ibm[o + 12] = -D.bindW[j][0]; ibm[o + 13] = -D.bindW[j][1]; ibm[o + 14] = -D.bindW[j][2];
+  }
+  const roots = D.parents.map((p, j) => (p < 0 ? j : -1)).filter((j) => j >= 0);
+  const skin = { joints: [...Array(nb).keys()], inverseBindMatrices: accessor(ibm, 'MAT4', 5126, nb), skeleton: roots[0] };
+  const meshNode = nodes.length;
+  nodes.push({ name: D.meshName || 'model', mesh: 0, skin: 0 });
+
+  const K = D.keys;
+  const times = new Float32Array(K);
+  for (let k = 0; k < K; k++) times[k] = k / D.rate;
+  const input = accessor(times, 'SCALAR', 5126, K, null, [[0], [K > 0 ? times[K - 1] : 0]]);
+  const samplers = [], channels = [];
+  for (let j = 0; j < nb; j++) {
+    samplers.push({ input, output: accessor(D.rot[j], 'VEC4', 5126, K), interpolation: 'LINEAR' });
+    channels.push({ sampler: samplers.length - 1, target: { node: j, path: 'rotation' } });
+    if (D.parents[j] < 0) {
+      samplers.push({ input, output: accessor(D.tra[j], 'VEC3', 5126, K), interpolation: 'LINEAR' });
+      channels.push({ sampler: samplers.length - 1, target: { node: j, path: 'translation' } });
+    }
+  }
+  const gltf = {
+    asset: { version: '2.0', generator: 'RDR Modding Studio' },
+    scene: 0, scenes: [{ nodes: [meshNode, ...roots] }],
+    nodes, meshes: [{ name: nodes[meshNode].name, primitives: prims }], skins: [skin],
+    animations: [{ name: String(D.clipName || 'clip').replace(/\.[^.]*$/, ''), samplers, channels }],
+    materials, buffers: [{ byteLength: 0 }], bufferViews: views, accessors,
+  };
+  if (images.length) {
+    gltf.images = images; gltf.textures = textures;
+    gltf.samplers = [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }];
+  }
+  const padB = (4 - (binLen % 4)) % 4;
+  if (padB) { chunks.push(new Uint8Array(padB)); binLen += padB; }
+  gltf.buffers[0].byteLength = binLen;
+  let json = new TextEncoder().encode(JSON.stringify(gltf));
+  const padJ = (4 - (json.length % 4)) % 4;
+  if (padJ) { const j2 = new Uint8Array(json.length + padJ).fill(0x20); j2.set(json); json = j2; }
+  const total = 12 + 8 + json.length + 8 + binLen;
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x46546C67, true); dv.setUint32(4, 2, true); dv.setUint32(8, total, true);
+  dv.setUint32(12, json.length, true); dv.setUint32(16, 0x4E4F534A, true);
+  out.set(json, 20);
+  let o = 20 + json.length;
+  dv.setUint32(o, binLen, true); dv.setUint32(o + 4, 0x004E4942, true);
+  o += 8;
+  for (const c of chunks) { out.set(c, o); o += c.byteLength; }
+  return { bytes: out, bones: nb, keys: K, verts: nv, textures: images.length };
+}
+
+// The same .glb without a viewer: one clip on a model, for "Export all
+// animations" with the current model. `rig` is the /api/character_rig payload
+// the viewer loaded, `pngs` its textures by slot (the same PNGs), `skelText`
+// the skeleton the clips play on. Posing is the viewer's: the engine's Euler
+// order, root motion on the root, a rig shorter or longer than the clip as the
+// engine plays it, and -- for a model on another skeleton -- each of its bones
+// taking the rotation of the clip's bone with the same name.
+export function bakeClipGlb({ animBuf, skelText, rig, pngs, order = 'YZX', retarget = false, clipName = '' }) {
+  const anim = decodeAnim(animBuf);
+  const bones = parseSkeleton(skelText);
+  const driven = Math.min(bones.length, anim.bones);
+  const e = new THREE.Euler(), q = new THREE.Quaternion();
+  let names, parents, rest, bindW, map = null;
+  if (retarget) {
+    const rb = rig.bones;
+    names = rb.map((b, j) => String(b.name || 'bone' + j));
+    parents = rb.map((b) => (b.parent >= 0 && b.parent < rb.length ? b.parent : -1));
+    rest = rb.map((b) => (b.parent >= 0 && b.parent < rb.length
+      ? [b.pos[0] - rb[b.parent].pos[0], b.pos[1] - rb[b.parent].pos[1], b.pos[2] - rb[b.parent].pos[2]]
+      : b.pos.slice()));
+    bindW = rb.map((b) => b.pos);
+    const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const exact = new Map(bones.map((b, i) => [String(b.name).toLowerCase(), i]));
+    const loose = new Map(bones.map((b, i) => [norm(b.name), i]));
+    map = rb.map((b) => {
+      const k = String(b.name).toLowerCase();
+      if (exact.has(k)) return exact.get(k);
+      return loose.has(norm(b.name)) ? loose.get(norm(b.name)) : -1;
+    });
+  } else {
+    names = bones.map((b, i) => String(b.name || 'bone' + i));
+    parents = bones.map((b) => b.parent);
+    rest = bones.map((b) => b.offset);
+    bindW = bindPositions(bones);
+  }
+  const nb = names.length, K = anim.keys;
+  const rot = names.map(() => new Float32Array(K * 4));
+  const tra = names.map(() => new Float32Array(K * 3));
+  const clipQ = bones.map(() => new THREE.Quaternion());
+  for (let k = 0; k < K; k++) {
+    const ch = anim.atKey(k);
+    for (let i = 0; i < bones.length; i++) {
+      if (i < driven) { e.set(ch[3 + 3 * i], ch[4 + 3 * i], ch[5 + 3 * i], order); clipQ[i].setFromEuler(e); }
+      else clipQ[i].identity();
+    }
+    for (let j = 0; j < nb; j++) {
+      const src = map ? map[j] : j;
+      if (src >= 0 && src < driven) q.copy(clipQ[src]); else q.identity();
+      rot[j].set([q.x, q.y, q.z, q.w], k * 4);
+      const r = rest[j];
+      if (parents[j] < 0) tra[j].set([r[0] + ch[0], r[1] + ch[1], r[2] + ch[2]], k * 3);
+      else tra[j].set([r[0], r[1], r[2]], k * 3);
+    }
+  }
+  // the mesh, as the viewer builds it: groups per texture run, normals from the triangles
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(rig.positions, 3));
+  geo.setIndex(rig.indices);
+  geo.computeVertexNormals();
+  const slots = [];
+  for (const g of rig.groups || []) if (!slots.includes(g.texture)) slots.push(g.texture);
+  if (!slots.length) slots.push(null);
+  const groups = (rig.groups || []).length
+    ? rig.groups.map((g) => ({ start: g.start, count: g.count, materialIndex: Math.max(0, slots.indexOf(g.texture)) }))
+    : [{ start: 0, count: rig.indices.length, materialIndex: 0 }];
+  const idx = Uint32Array.from(rig.indices);
+  const out = glbFromParts({
+    positions: rig.positions, normals: geo.getAttribute('normal').array,
+    uvs: rig.uvs && rig.uvs.length * 3 === rig.positions.length * 2 ? rig.uvs : null,
+    skinIndex: rig.skin_index, skinWeight: rig.skin_weight, index: idx, groups,
+    pngs: slots.map((sl) => (sl === null || sl === undefined ? null : (pngs || {})[sl] || null)),
+    names, parents, rest, bindW, rate: anim.halfRate ? 15 : 30, keys: K, rot, tra,
+    meshName: rig.stem ? String(rig.stem) : 'model', clipName,
+  });
+  geo.dispose();
+  return out;
+}
+
 // --------------------------------------------------------------- the player
 //
 // Attaches to a container element, draws the skeleton, and plays. Returns a
@@ -315,8 +520,10 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
   for (let k = 0; k < anim.keys; k++) chans.push(anim.atKey(k));
 
   const _e = new THREE.Euler();
+  const rootDelta = new THREE.Vector3();
   function poseBones(k) {
     const ch = chans[k];
+    rootDelta.set(ch[0], ch[1], ch[2]);
     for (let i = 0; i < bones.length; i++) {
       const b = bones[i], o = boneObjs[i], base = 3 + 3 * i;
       // Past `driven` the clip has nothing to say about this bone -- either it
@@ -405,7 +612,24 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
   let mesh = null, meshInfo = null, framedOnce = false;
   const meshTextures = [];
 
+  // A model on ANOTHER skeleton than the clip's (retargeted by bone name): its
+  // own bones, each copying the rotation of the clip's bone of the same name.
+  let ret = null;
+
+  function poseRetarget() {
+    if (!ret) return;
+    for (let j = 0; j < ret.objs.length; j++) {
+      const i = ret.map[j], o = ret.objs[j], L = ret.local[j];
+      if (i >= 0 && i < driven) o.quaternion.copy(boneObjs[i].quaternion);
+      else o.quaternion.identity();
+      if (ret.rb[j].parent < 0) o.position.set(L[0] + rootDelta.x, L[1] + rootDelta.y, L[2] + rootDelta.z);
+      else o.position.set(L[0], L[1], L[2]);
+    }
+    ret.root.updateMatrixWorld(true);
+  }
+
   function clearModel() {
+    if (ret) { scene.remove(ret.root); ret.skel.dispose(); ret = null; }
     if (!mesh) return;
     scene.remove(mesh);
     mesh.geometry.dispose();
@@ -418,8 +642,9 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
   // `rig` is the /api/character_rig payload; `textureUrl(slot)` turns a
   // texture slot into a URL, so this module needs to know nothing about the
   // server's route names.
-  function setModel(rig, textureUrl) {
+  function setModel(rig, textureUrl, mopts = {}) {
     clearModel();
+    const retarget = !!mopts.retarget;
     if (!rig) { applyShow(); return null; }
     // A model may be rigged to MORE bones than the skeleton we are posing --
     // its extra joints simply never move. What it must not do is reference a
@@ -437,7 +662,7 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
     let worst = -1;
     for (let i = 0; i < rig.skin_index.length; i++)
       if (rig.skin_index[i] > worst) worst = rig.skin_index[i];
-    if (worst >= bones.length)
+    if (!retarget && worst >= bones.length)
       throw new Error('that model skins to bone ' + worst + ', and the '
         + 'skeleton playing this clip only has ' + bones.length
         + '. Pick a rig with at least ' + (worst + 1) + ' bones.');
@@ -483,7 +708,43 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
     // already in the skeleton's own space; passing it explicitly stops
     // three.js recomputing the inverse-bind matrices from the CURRENT pose,
     // which would bind the character to whatever frame happened to be up.
-    mesh.bind(skeleton, new THREE.Matrix4());
+    let matched = 0;
+    if (retarget) {
+      // The model keeps its OWN skeleton (bind pose: its bones' positions, no
+      // rotation, as every rig in this engine), and each of its bones takes
+      // the rotation of the clip's bone with the same name: exact first, then
+      // ignoring _ and case (spine01 = spine_01). Bones with no match stay at
+      // rest. Hair, tails and extra joints therefore hang still, and a rig
+      // whose bones sit in another ORDER (ani's hair bones come before its
+      // arms) is still driven joint for joint.
+      const rb = rig.bones;
+      if (worst >= rb.length) throw new Error('that model skins to bone ' + worst + ' and its skeleton has ' + rb.length);
+      const objs = rb.map(() => new THREE.Bone());
+      const root = new THREE.Group();
+      rb.forEach((b, j) => {
+        if (b.parent >= 0 && b.parent < rb.length) objs[b.parent].add(objs[j]); else root.add(objs[j]);
+      });
+      const local = rb.map((b) => (b.parent >= 0 && b.parent < rb.length
+        ? [b.pos[0] - rb[b.parent].pos[0], b.pos[1] - rb[b.parent].pos[1], b.pos[2] - rb[b.parent].pos[2]]
+        : b.pos.slice()));
+      scene.add(root);
+      const skel2 = new THREE.Skeleton(objs,
+        rb.map((b) => new THREE.Matrix4().makeTranslation(-b.pos[0], -b.pos[1], -b.pos[2])));
+      const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const exact = new Map(bones.map((b, i) => [String(b.name).toLowerCase(), i]));
+      const loose = new Map(bones.map((b, i) => [norm(b.name), i]));
+      const map = rb.map((b) => {
+        const k = String(b.name).toLowerCase();
+        if (exact.has(k)) return exact.get(k);
+        return loose.has(norm(b.name)) ? loose.get(norm(b.name)) : -1;
+      });
+      matched = map.filter((i) => i >= 0 && i < driven).length;
+      ret = { objs, root, skel: skel2, map, local, rb };
+      poseRetarget();
+      mesh.bind(skel2, new THREE.Matrix4());
+    } else {
+      mesh.bind(skeleton, new THREE.Matrix4());
+    }
     // An animated pose reaches outside the bind-pose bounding sphere, and a
     // culled character reads as "the model option does nothing".
     mesh.frustumCulled = false;
@@ -494,14 +755,15 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
     // the clip is on a same-size skeleton from a DIFFERENT character and the
     // joints will not line up. Reported, never silently absorbed.
     let drift = 0;
-    for (let i = 0; i < bones.length; i++) {
+    for (let i = 0; i < (retarget ? 0 : bones.length); i++) {
       const p = rig.bones[i].pos;
       drift = Math.max(drift, Math.abs(p[0] - bind[i][0]),
                        Math.abs(p[1] - bind[i][1]), Math.abs(p[2] - bind[i][2]));
     }
     meshInfo = { stem: rig.stem, verts: rig.verts, tris: rig.tris,
                  rigid: rig.rigid_verts || 0, textures: (rig.textures || []).length,
-                 skel: rig.skel, drift, parts: rig.parts || [] };
+                 skel: rig.skel, drift, parts: rig.parts || [],
+                 retarget: retarget ? { matched, total: rig.bones.length } : null };
     applyShow();
 
     // Refit the camera the FIRST time a model appears -- a skeleton's extent
@@ -516,6 +778,52 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
     return meshInfo;
   }
 
+  // ---- the clip on the model, as one .glb Blender opens animated ---------
+  //
+  // Baked key by key from the SAME posing the viewer draws -- Euler order,
+  // root motion, retargeting by name -- so what Blender plays is what was on
+  // screen. The file itself is written by glbFromParts (below the player),
+  // which "Export all animations" with the current model shares.
+  async function exportGlb(clipName) {
+    if (!mesh) throw new Error('load a character model first');
+    const R = ret
+      ? { objs: ret.objs, parents: ret.rb.map((b) => (b.parent >= 0 && b.parent < ret.rb.length ? b.parent : -1)),
+          rest: ret.local, bindW: ret.rb.map((b) => b.pos), names: ret.rb.map((b, j) => String(b.name || 'bone' + j)) }
+      : { objs: boneObjs, parents: bones.map((b) => b.parent), rest: bones.map((b) => b.offset),
+          bindW: bind, names: bones.map((b, i) => String(b.name || 'bone' + i)) };
+    const K = anim.keys, nb = R.objs.length;
+    const rot = R.objs.map(() => new Float32Array(K * 4));
+    const tra = R.objs.map(() => new Float32Array(K * 3));
+    for (let k = 0; k < K; k++) {
+      poseBones(k);
+      poseRetarget();
+      for (let j = 0; j < nb; j++) {
+        const q = R.objs[j].quaternion, t = R.objs[j].position;
+        rot[j].set([q.x, q.y, q.z, q.w], k * 4);
+        tra[j].set([t.x, t.y, t.z], k * 3);
+      }
+    }
+    renderNow();                        // back to the frame on screen
+    const geo = mesh.geometry;
+    const pngs = [];
+    for (const m of [].concat(mesh.material)) {
+      const src = m.map && m.map.image && (m.map.image.currentSrc || m.map.image.src);
+      let png = null;
+      if (src) { try { png = new Uint8Array(await (await fetch(src)).arrayBuffer()); } catch { png = null; } }
+      pngs.push(png);
+    }
+    const idx = geo.getIndex().array;
+    return glbFromParts({
+      positions: geo.getAttribute('position').array, normals: geo.getAttribute('normal')?.array,
+      uvs: geo.getAttribute('uv')?.array, skinIndex: geo.getAttribute('skinIndex').array,
+      skinWeight: geo.getAttribute('skinWeight').array, index: idx,
+      groups: geo.groups.length ? geo.groups : [{ start: 0, count: idx.length, materialIndex: 0 }],
+      pngs, names: R.names, parents: R.parents, rest: R.rest, bindW: R.bindW,
+      rate: anim.halfRate ? 15 : 30, keys: K, rot, tra,
+      meshName: meshInfo && meshInfo.stem ? String(meshInfo.stem) : 'model', clipName,
+    });
+  }
+
   let show = opts.show === 'model' || opts.show === 'both' ? opts.show : 'skeleton';
   function applyShow() {
     const wantMesh = show === 'model' || show === 'both';
@@ -528,6 +836,7 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
 
   function drawFrame(k) {
     poseBones(k);
+    poseRetarget();
     const f = frames[k];
     let s = 0;
     for (const b of bones) {
@@ -596,9 +905,11 @@ export function createAnimPlayer(container, animBuf, skelText, opts = {}) {
     setOrder(o) { if (EULER_ORDERS.includes(o)) { order = o; rebuild(); } },
     // The character's model, skinned to these same bones. Returns what it
     // measured about the model, or null when cleared.
-    setModel(rig, textureUrl) { return setModel(rig, textureUrl); },
+    setModel(rig, textureUrl, mopts) { return setModel(rig, textureUrl, mopts); },
     clearModel() { clearModel(); applyShow(); renderNow(); },
     get modelInfo() { return meshInfo; },
+    // The clip on the current model as a .glb (Blender: File > Import > glTF 2.0).
+    exportGlb(clipName) { return exportGlb(clipName); },
     get show() { return show; },
     setShow(v) {
       show = ['model', 'both', 'skeleton'].includes(v) ? v : 'skeleton';

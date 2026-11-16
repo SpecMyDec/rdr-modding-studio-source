@@ -103,6 +103,7 @@ DEFAULTS = {
     "checkpoints_dir": "",    # defaults to Documents\RDR Mods\checkpoints
     "exports_dir": "",        # defaults to Documents\RDR Mods\exports
     "pcsx2_exe": "",          # optional; Play/Boot test are disabled without it
+    "data_editor_dir": "",    # DISC > Data Editor; empty = data_editor beside the working disc
     "window": {"width": 1600, "height": 1000, "maximized": False},
     "accepted_disclaimer": False,
 }

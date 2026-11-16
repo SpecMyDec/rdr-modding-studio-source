@@ -89,7 +89,9 @@ def run(server, url, out=sys.stdout):
 
     body, code, ctype, ms, err = get("api/archives")
     n = _count(body, "archives")
-    check("api/archives: 66 archives", n == 66, "got %s" % n)
+    # At least the 66 the game ships: a working disc with new levels (the Data
+    # Editor's New .dat, an imported .dat) has more, and is not broken for it.
+    check("api/archives: the game's 66 (or more)", isinstance(n, int) and n >= 66, "got %s" % n)
 
     body, code, ctype, ms, err = get("api/levels")
     n = _count(body, "levels")

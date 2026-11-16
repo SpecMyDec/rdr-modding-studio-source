@@ -420,7 +420,72 @@ class AppApi:
             "pcsx2": p, "pcsx2_ok": bool(p) and os.path.isfile(p),
             "known_working": [x for x in self.s.get("known_working", [])
                               if os.path.isfile(x)],
+            "folders": self.app_folders(),
         }
+
+    # ---- folders: where mods, checkpoints, exports and the Data Editor live
+    FOLDERS = (
+        ("mods_dir", "Mods", "Mod packs and the edit history (undo survives a restart from here)"),
+        ("checkpoints_dir", "Checkpoints", "Checkpoints and the asset catalogue"),
+        ("exports_dir", "Exports", "Exported patches, ISO copies, animations and shares"),
+        ("data_editor_dir", "Data Editor", "DISC > Data Editor: its mods, workbench, base copies and the rebuild queue"),
+    )
+
+    def _folder_value(self, key):
+        v = self.s.get(key) or ""
+        if not v and key == "data_editor_dir":
+            w = self.s.get("working_iso") or ""
+            v = os.path.join(os.path.dirname(os.path.abspath(w)), "data_editor") if w else ""
+        return v
+
+    def app_folders(self):
+        out = []
+        for key, label, note in self.FOLDERS:
+            v = self._folder_value(key)
+            out.append({"key": key, "label": label, "note": note, "path": v,
+                        "exists": bool(v) and os.path.isdir(v),
+                        "default": not self.s.get(key) and key == "data_editor_dir"})
+        return out
+
+    def pick_app_folder(self, key):
+        """Choose a new folder for one of FOLDERS; saved, applied on restart."""
+        if key not in {k for k, _l, _n in self.FOLDERS}:
+            return {"ok": False, "error": "unknown folder"}
+        start = self._folder_value(key)
+        kw = {"directory": start} if start and os.path.isdir(start) else {}
+        res = self.window[0].create_file_dialog(webview.FOLDER_DIALOG, **kw)
+        if not res:
+            return None
+        p = res[0] if isinstance(res, (list, tuple)) else res
+        self.s[key] = p
+        paths.save(self.s)
+        return {"ok": True, "path": p, "restart": True}
+
+    def reset_app_folder(self, key):
+        """Back to the default location (applied on restart)."""
+        if key not in {k for k, _l, _n in self.FOLDERS}:
+            return {"ok": False, "error": "unknown folder"}
+        self.s[key] = ""
+        paths._fill_defaults(self.s)
+        paths.save(self.s)
+        return {"ok": True, "path": self._folder_value(key), "restart": True}
+
+    def open_app_folder(self, key):
+        """Show the folder in Explorer (made if it is not there yet)."""
+        if key not in {k for k, _l, _n in self.FOLDERS} and key not in ("working", "vanilla"):
+            return {"ok": False, "error": "unknown folder"}
+        if key in ("working", "vanilla"):
+            v = os.path.dirname(self.s.get(key + "_iso") or "")
+        else:
+            v = self._folder_value(key)
+        if not v:
+            return {"ok": False, "error": "not set"}
+        try:
+            os.makedirs(v, exist_ok=True)
+            os.startfile(v)                                # noqa: S606 - the user's own folder
+        except OSError as ex:
+            return {"ok": False, "error": str(ex)}
+        return {"ok": True, "path": v}
 
     # ---- pcsx2, same three verbs the setup page has
     def find_pcsx2(self):
@@ -437,6 +502,31 @@ class AppApi:
             return None
         p = res[0] if isinstance(res, (list, tuple)) else res
         return pcsx2.describe(p)
+
+    # ---- DISC > Data Editor > Manual .dat/.zip extracting/building: the user
+    # picks the archive / folder / output in a native dialog, as every other
+    # path the page uses.
+    def pick_open_file(self):
+        res = self.window[0].create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=False,
+            file_types=("Archives (*.dat;*.zip)", "All files (*.*)"))
+        if not res:
+            return None
+        return res[0] if isinstance(res, (list, tuple)) else res
+
+    def pick_folder(self):
+        res = self.window[0].create_file_dialog(webview.FOLDER_DIALOG)
+        if not res:
+            return None
+        return res[0] if isinstance(res, (list, tuple)) else res
+
+    def pick_save_file(self):
+        res = self.window[0].create_file_dialog(
+            webview.SAVE_DIALOG, save_filename="archive.dat",
+            file_types=("Retail archive (*.dat)", "Prototype archive (*.zip)"))
+        if not res:
+            return None
+        return res[0] if isinstance(res, (list, tuple)) else res
 
     def set_pcsx2(self, path):
         self.s["pcsx2_exe"] = path or ""
@@ -551,6 +641,25 @@ class FirstRunThenApp(FirstRunApi):
 
     def restart_app(self, *a, **kw):
         return self._app.restart_app(*a, **kw)
+
+    # the Data Editor's native pickers and App setup's folders, on a first run too
+    def pick_open_file(self):
+        return self._app.pick_open_file()
+
+    def pick_folder(self):
+        return self._app.pick_folder()
+
+    def pick_save_file(self):
+        return self._app.pick_save_file()
+
+    def pick_app_folder(self, key):
+        return self._app.pick_app_folder(key)
+
+    def reset_app_folder(self, key):
+        return self._app.reset_app_folder(key)
+
+    def open_app_folder(self, key):
+        return self._app.open_app_folder(key)
 
 
 def _js_str(s):

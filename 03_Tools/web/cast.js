@@ -1067,14 +1067,26 @@ async function mountCastModel(box, archive, it) {
     geo.computeVertexNormals();
     let mat;
     if (d.textures && geo.getAttribute('uv')) {
-      const tex = new THREE.TextureLoader().load(
-        `/api/character.png?archive=${encodeURIComponent(entry.archive)}`
-        + `&name=${encodeURIComponent(entry.file)}&i=0`);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.flipY = false;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      mat = new THREE.MeshBasicMaterial(
-        { map: tex, side: THREE.DoubleSide, transparent: true, alphaTest: 0.35 });
+      // one material per texture of the bundle, on the triangles it covers
+      const mats = [], slotOf = new Map();
+      const matFor = (k) => {
+        k = k == null ? 0 : k;
+        if (!slotOf.has(k)) {
+          const tex = new THREE.TextureLoader().load(
+            `/api/character.png?archive=${encodeURIComponent(entry.archive)}`
+            + `&name=${encodeURIComponent(entry.file)}&i=${k}`);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.flipY = false;
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+          slotOf.set(k, mats.length);
+          mats.push(new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, alphaTest: 0.35 }));
+        }
+        return slotOf.get(k);
+      };
+      if (d.groups && d.groups.length) {
+        for (const [slot, start, count] of d.groups) geo.addGroup(start * 3, count * 3, matFor(slot));
+        mat = mats;
+      } else { matFor(0); mat = mats[0]; }
     } else {
       mat = new THREE.MeshStandardMaterial(
         { color: 0xc8bda8, roughness: 0.85, side: THREE.DoubleSide });

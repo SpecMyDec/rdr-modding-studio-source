@@ -88,7 +88,11 @@ def parse_palette(data):
     whose alpha is full-range 0..255; a `>=` test would slice those at the
     wrong offset *and* double an alpha that is already full scale.
     """
-    if len(data) == 1040:
+    # A PS2 256-colour palette padded past 1040 (bundles built by the RDR
+    # Blender add-on write 1152, which the game reads fine) keeps the PS2
+    # header -- byte 8 is 4 -- where the Xbox form has 0 there; it must not be
+    # taken for the Xbox layout, which read its colours from the padding.
+    if len(data) == 1040 or (len(data) > 1040 and data[8] == 4):
         body, count = data[16:16 + 1024], 256
     elif len(data) >= 64:
         body, count = data[-64:], 16
@@ -219,6 +223,16 @@ def decode(mip_data, palette):
     # here -- but it is the correct bound rather than a lucky one.
     if bpp == 8 and w >= 16 and is_swizzled(mip_data):
         idx = unswizzle32(idx, w, h)
+    # 4-bit ones were drawn as stored -- a third of MANSINTB's textures (24 of 72) are 4-bit swizzled and came out
+    # as noise. They are read back from the PSMCT32 rectangle the header gives (+0x32, its height), the same
+    # unswizzle the .pck fonts and Png2tex use (ps2gs.unswizzle4); measured on MANSINTB it halves the pixel-to-pixel
+    # roughness of 22 of the 24 and leaves the flat ones alike.
+    elif bpp == 4 and w >= 32 and h >= 16 and is_swizzled(mip_data):
+        try:
+            from . import ps2gs
+            idx = bytes(ps2gs.unswizzle4(raw, w, h, mip_data[0x32] or None).reshape(-1))
+        except Exception:                                      # noqa: BLE001
+            pass
     out = bytearray(w * h * 4)
     n = len(palette)
     for i, p in enumerate(idx):

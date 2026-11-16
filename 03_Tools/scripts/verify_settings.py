@@ -93,6 +93,8 @@ NON_DEFAULT = {
     "envTint": False,
     "bakedLight": False,
     "secondPass": False,
+    "animPrefSkel": "gbw.skel",
+    "animPrefModel": "gbw",
 }
 
 

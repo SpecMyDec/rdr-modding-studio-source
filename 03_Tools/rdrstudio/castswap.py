@@ -52,7 +52,7 @@ def levels_for(game, cr_name, target=None, stock=None):
     `.cr`, in a stable order, each labelled. A caller shows this list and the
     user ticks the levels they mean; nothing is implied by omission.
     """
-    f = _ms.facts(stock or game)
+    f = _ms.facts_for(game, stock)
     if cr_name.lower() not in f.stock:
         raise KeyError(cr_name)
     arcs = list(f.archives_for(cr_name))
@@ -80,7 +80,7 @@ def plan(game, cr_name, target, archives, stock=None):
     """
     if not archives:
         raise SwapRefused("no level was chosen; nothing would change")
-    f = _ms.facts(stock or game)
+    f = _ms.facts_for(game, stock)
     if cr_name.lower() not in f.stock:
         raise KeyError(cr_name)
     known = set(f.archives_for(cr_name))
@@ -153,7 +153,7 @@ def untouched_elsewhere(game, cr_name, written, stock=None):
     The point of a per-level swap is what it did NOT change, and that is the
     half a caller is most likely to take on trust.
     """
-    f = _ms.facts(stock or game)
+    f = _ms.facts_for(game, stock)
     out = []
     for arc in f.archives_for(cr_name):
         if arc in set(written):

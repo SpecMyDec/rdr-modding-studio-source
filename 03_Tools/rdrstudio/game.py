@@ -39,10 +39,18 @@ class Game:
                 out.append(e.path)
         return sorted(out)
 
+    # Set by the Studio on its working disc: the edits queued for a rebuild
+    # (rdrstudio/pendingrebuild.PendingRebuilds), read back through Dave.overlay.
+    pending = None
+
     def archive(self, name):
         key = name.upper()
         if key not in self._cache:
-            self._cache[key] = Dave(IsoBacking(self.iso, name), label=name)
+            d = Dave(IsoBacking(self.iso, name), label=name)
+            if self.pending is not None:
+                d.overlay = self.pending.overlay_for(key)
+                d.on_overlay_drop = self.pending.drop
+            self._cache[key] = d
         return self._cache[key]
 
     # ------------------------------------------------------------------ read
@@ -105,6 +113,11 @@ class Game:
     def patch(self, archive, filename, fn, **kw):
         return self.archive(archive).edit(filename, fn, **kw)
 
+    # Set by the Studio: called after a batch with the copies that had no room,
+    # [(archive, filename, new bytes)], to rebuild those archives; returns
+    # [(archive, used, slot)]. None keeps the old behaviour (they are skipped).
+    overflow_hook = None
+
     def patch_everywhere(self, filename, fn, dry=False, **kw):
         """Apply an edit to every copy of a file on the disc.
 
@@ -113,6 +126,7 @@ class Game:
         e.g. jck2.cr in GHOST.DAT has zero headroom and keeps stock values.
         """
         applied, skipped = [], []
+        pending = []
         for arc in self.locate(filename):
             d = self.archive(arc)
             try:
@@ -124,6 +138,9 @@ class Game:
                     co = zlib.compressobj(9, 8, -15)
                     payload = new if not e.compressed else co.compress(new) + co.flush()
                     if len(payload) > e.slot:
+                        if self.overflow_hook:
+                            applied.append((arc, len(payload), "rebuild"))  # the archive is rebuilt to make room
+                            continue
                         raise SlotOverflow(e.name, len(payload), e.slot)
                     applied.append((arc, len(payload), e.slot))
                 else:
@@ -134,6 +151,9 @@ class Game:
                     used, slot = d.patch(e, new, **kw)
                     applied.append((arc, used, slot))
             except SlotOverflow as ex:
+                if self.overflow_hook and not dry:
+                    pending.append((arc, filename, new))
+                    continue
                 skipped.append((arc, str(ex)))
             except Exception as ex:  # noqa: BLE001 - report, never abort the batch
                 skipped.append((arc, "%s: %s" % (type(ex).__name__, ex)))
@@ -143,6 +163,14 @@ class Game:
                 self.iso.flush()
             except Exception:
                 pass
+            if pending:
+                # After the batch: a rebuild closes and reopens the disc, so
+                # it cannot happen with this Game's handles still in use.
+                hook = self.overflow_hook
+                try:
+                    applied += hook(pending)
+                except Exception as ex:  # noqa: BLE001
+                    skipped += [(arc, "no room, and the rebuild failed: %s" % ex) for arc, _f, _d in pending]
         return applied, skipped
 
 

@@ -44,6 +44,9 @@ WEB = os.environ.get("RDR_WEB_DIR") or os.path.join(TOOLS, "web")
 datas = [
     (WEB, "web"),
     (os.path.join(PKG, "rdrshell", "firstrun.html"), "rdrshell"),
+    # Convert images > book_red picture: the GIMP template's layers, read from <ps2build's folder>/assets --
+    # the bundle's top level once frozen
+    (os.path.join(TOOLS, "rdrstudio", "dataeditor_lib", "assets"), "assets"),
 ]
 # Which edition is being frozen. build.py passes it; a hand-run spec is a
 # developer building for themselves, so the internal default is right.
@@ -75,6 +78,12 @@ hiddenimports = [
     "webview.platforms.edgechromium",
     "clr_loader",
     "PIL.Image",
+    # DISC > Data Editor: the RDR Data Editor's build scripts, imported from
+    # rdrstudio/dataeditor_lib through sys.path (so the analysis cannot see them)
+    "ps2build", "modconvert", "rdrtex", "rdrformats", "rdrformats.rsc", "rdrformats.rscwrite",
+    "rdrformats.ps2rsc", "rdrformats.mod", "rdrformats.builder", "rdrformats.skel", "rdrformats.tex",
+    "rdrformats.bnd", "rdrformats.bnd_write", "rdrformats.disc", "strtbl_tool",
+    "rdrstudio.dataeditor", "rdrstudio.dataeditor_more", "rdrstudio.pendingrebuild",
 ]
 
 excludes = [
@@ -95,7 +104,7 @@ DROP_BINARIES = ("_avif", "_imagingtk", "_imagingcms")
 
 a = Analysis(
     [os.path.join(PKG, "rdrshell", "shell.py")],
-    pathex=[TOOLS, PKG],
+    pathex=[TOOLS, PKG, os.path.join(TOOLS, "rdrstudio", "dataeditor_lib")],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

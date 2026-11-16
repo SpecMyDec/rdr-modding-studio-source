@@ -55,7 +55,7 @@ FORMAT = "rdrmodpack/1"
 # mods stay format 1, so they keep working in every Studio that has packs.
 FORMAT_CODE = "rdrmodpack/2"
 CODE_VERSION = 1
-STUDIO_VERSION = "1.4.0"
+STUDIO_VERSION = "2.0.0"
 GAME = "SLUS-20500"
 SUFFIX = ".rdrmodpack.zip"
 MAX_UNPACKED = 1 << 30
@@ -119,8 +119,30 @@ def scan(stock, working, progress=None, cancelled=None):
     return rows, new_archives
 
 
+DE_PREFIX = "dataeditor/"
+
+
+def de_files(studio, workbench=False):
+    """The Data Editor's own files, for a pack that carries everything: [(zip path, file on disk)] -- every file of
+    its .dat folders (the mods folder: files not built yet, new archives, master_modes.txt) and, asked for, its
+    Workbench. Applied, they go back where they were and the next Build puts them on the disc."""
+    from .studio import _data_editor
+    de = _data_editor(studio)
+    out = []
+    roots = [(de.mods, "mods")] + ([(de.workbench, "workbench")] if workbench else [])
+    for base, tag in roots:
+        if not os.path.isdir(base):
+            continue
+        for r, _d, fs in os.walk(base):
+            for f in fs:
+                full = os.path.join(r, f)
+                rel = os.path.relpath(full, base).replace(os.sep, "/")
+                out.append(("%s%s/%s" % (DE_PREFIX, tag, rel), full))
+    return out
+
+
 def build_pack(rows, path, name="", author="", description="",
-               new_archives=(), codemods=None):
+               new_archives=(), codemods=None, data_editor=()):
     """Write the zip. Returns the manifest. Atomic: .part, then replace.
 
     `codemods` (optional) = dict(features=[...], stock_elf_sha1=..., ...).
@@ -144,6 +166,10 @@ def build_pack(rows, path, name="", author="", description="",
         manifest["not_included"] = sorted(new_archives)
     if codemods:
         manifest["codemods"] = dict(codemods, version=CODE_VERSION)
+    if data_editor:
+        manifest["data_editor"] = dict(
+            mods=sum(1 for z, _f in data_editor if z.startswith(DE_PREFIX + "mods/")),
+            workbench=sum(1 for z, _f in data_editor if z.startswith(DE_PREFIX + "workbench/")))
     manifest["pack_id"] = sha1(json.dumps(
         [(f["archive"], f["name"], f["sha1"]) for f in files]
         + ([sorted(codemods["features"]), codemods.get("stock_elf_sha1")]
@@ -171,8 +197,44 @@ def build_pack(rows, path, name="", author="", description="",
         z.writestr("README.txt", "\n".join(readme) + "\n")
         for f, r in zip(files, rows):
             z.writestr(f["zip"], r["data"])
+        for zpath, full in data_editor:
+            z.write(full, zpath)
     os.replace(tmp, path)
     return manifest
+
+
+def read_de(raw):
+    """The Data Editor part of a pack: [(tag 'mods'|'workbench', relative path, bytes)]; paths checked."""
+    z = zipfile.ZipFile(io.BytesIO(raw))
+    out = []
+    for i in z.infolist():
+        n = i.filename
+        if not n.startswith(DE_PREFIX) or n.endswith("/"):
+            continue
+        tag, _s, rel = n[len(DE_PREFIX):].partition("/")
+        parts = rel.split("/")
+        if tag not in ("mods", "workbench") or not rel or any(p in ("", ".", "..") for p in parts) or ":" in rel:
+            raise Refusal("bad_request", "That mod pack has a file with a bad path (%s). Nothing was changed." % n, "")
+        out.append((tag, rel, z.read(i)))
+    return out
+
+
+def write_de(studio, items):
+    """The Data Editor part of a pack, put back in its .dat folders / Workbench. -> (mods files, workbench files)."""
+    from .studio import _data_editor
+    de = _data_editor(studio)
+    if de.job.get("state") == "running":
+        raise Refusal("bad_request", "The Data Editor is busy (%s): wait for it, then apply again."
+                      % de.job.get("label"), "")
+    n = {"mods": 0, "workbench": 0}
+    for tag, rel, data in items:
+        base = de.mods if tag == "mods" else de.workbench
+        path = de._safe(rel, base)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        n[tag] += 1
+    return n["mods"], n["workbench"]
 
 
 # ------------------------------------------------------------------ import
@@ -546,6 +608,33 @@ def _codemods_for_export(s, body):
                 stock_elf_size=len(elf))
 
 
+def export_everything(s, path, name, author="", desc="", cm=None, include_files=True, workbench=False):
+    """A pack of every change: the working disc's files that differ from stock, and the Data Editor's .dat folders
+    (and Workbench, asked for). -> result dict. Raises Refusal when there is nothing."""
+    t0 = time.time()
+    with s.lock:
+        s.ensure_open(force=True)
+        _need(s)
+        rows, new_arcs = scan(s.vanilla, s.game)
+    if cm is not None and not include_files:
+        rows, new_arcs = [], []
+    de = de_files(s, workbench)
+    if not rows and cm is None and not de:
+        raise Refusal("bad_request", "Nothing to export: the working disc "
+                      "matches stock and the Data Editor has no files.", "Make an edit first.")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    manifest = build_pack(rows, path, name, author, desc, new_arcs,
+                          codemods=cm, data_editor=de)
+    size = os.path.getsize(path)
+    mod = sum(1 for r in rows if r["op"] == "modified")
+    s.note("exported mod pack %s (%d modified, %d added, %d Data Editor files, %s bytes)"
+           % (path, mod, len(rows) - mod, len(de), size))
+    return dict(path=path, size=size, files=len(rows), modified=mod, added=len(rows) - mod,
+                not_included=sorted(new_arcs), pack_id=manifest["pack_id"],
+                codemods=cm["features"] if cm else [], data_editor=manifest.get("data_editor") or {},
+                seconds=round(time.time() - t0, 1))
+
+
 def post_pack_export(handler, s, body):
     name = (body.get("name") or "").strip()
     author = (body.get("author") or "").strip()
@@ -566,29 +655,46 @@ def post_pack_export(handler, s, body):
                     % os.path.basename(path), steps=0)
     if api.is_dry(body):
         return api.ok(plan=plan, path=path)
-    t0 = time.time()
     cm = _codemods_for_export(s, body)
-    with s.lock:
-        s.ensure_open(force=True)
-        _need(s)
-        rows, new_arcs = scan(s.vanilla, s.game)
-    if cm is not None and not body.get("include_files", True):
-        rows, new_arcs = [], []
-    if not rows and cm is None:
-        raise Refusal("bad_request", "Nothing to export: the working disc "
-                      "matches stock.", "Make an edit first.")
-    os.makedirs(_exports_dir(), exist_ok=True)
-    manifest = build_pack(rows, path, name or fn, author, desc, new_arcs,
-                          codemods=cm)
-    size = os.path.getsize(path)
-    mod = sum(1 for r in rows if r["op"] == "modified")
-    s.note("exported mod pack %s (%d modified, %d added, %s bytes)"
-           % (path, mod, len(rows) - mod, size))
-    return api.ok(plan=plan, applied=True, path=path, size=size,
-                  files=len(rows), modified=mod, added=len(rows) - mod,
-                  not_included=sorted(new_arcs), pack_id=manifest["pack_id"],
-                  codemods=cm["features"] if cm else [],
-                  seconds=round(time.time() - t0, 1))
+    res = export_everything(s, path, name or fn, author, desc, cm, body.get("include_files", True),
+                            bool(body.get("include_workbench")))
+    return api.ok(plan=plan, applied=True, **res)
+
+
+def post_new_mod(handler, s, body):
+    """New mod: the current one kept as a pack of everything (exports folder, Import brings it back), then a clean
+    start -- the Data Editor's .dat folders and Workbench emptied, the working disc reset to stock, the new name."""
+    from .studio import _data_editor
+    from . import dataeditor_more as more_mod
+    name = (body.get("name") or "").strip() or "New mod"
+    keep = body.get("keep", True) is not False
+    de = _data_editor(s)
+    m = more_mod.more(de)
+    old = m.current() or "My mod"
+    path = os.path.join(_exports_dir(), _safe("%s (saved %s)" % (old, time.strftime("%Y-%m-%d %H%M")), "mod") + SUFFIX)
+    plan = api.plan([], "Starts '%s': %sthe Data Editor's .dat folders and Workbench emptied, the working disc reset "
+                    "to stock." % (name, ("'%s' kept as %s first; " % (old, os.path.basename(path))) if keep else ""),
+                    "Started a new mod '%s'" % name, steps=1)
+    if api.is_dry(body):
+        return api.ok(plan=plan, keep_path=path if keep else None, current=old)
+    if de.job.get("state") == "running":
+        raise Refusal("bad_request", "The Data Editor is busy (%s): wait for it, then start the new mod."
+                      % de.job.get("label"), "")
+    saved = None
+    if keep:
+        try:
+            saved = export_everything(s, path, old, workbench=True)["path"]
+        except Refusal:
+            saved = None                    # nothing to keep
+    m._empty(de.mods)
+    os.makedirs(os.path.join(de.mods, "Master"), exist_ok=True)
+    m._empty(de.workbench)
+    os.makedirs(de.workbench, exist_ok=True)
+    more_mod._SCENES.clear()
+    s.restore(clear_mods=False)
+    m._set_current(name)
+    s.note("new mod '%s'%s" % (name, (" (the old one kept as %s)" % saved) if saved else ""))
+    return api.ok(plan=plan, applied=True, name=name, saved=saved)
 
 
 def _overview(manifest, rows):
@@ -616,6 +722,7 @@ def post_pack_apply(handler, s, body):
         raise Refusal("bad_request", "The mod pack did not arrive intact.",
                       "", str(ex))
     manifest, blobs = read_pack(raw)
+    de_items = read_de(raw)
     dry = api.is_dry(body)
     allow = bool(body.get("allow_conflicts"))
     with s.lock:
@@ -623,6 +730,8 @@ def post_pack_apply(handler, s, body):
         _need(s)
         rows = assess(s.vanilla, s.game, manifest, blobs)
         info = _overview(manifest, rows)
+        info["data_editor"] = dict(mods=sum(1 for t, _r, _d in de_items if t == "mods"),
+                                   workbench=sum(1 for t, _r, _d in de_items if t == "workbench"))
         v = info["verdict"]
         code = None
         if manifest.get("codemods"):
@@ -686,6 +795,7 @@ def post_pack_apply(handler, s, body):
                           for r in info["conflicts"][:5]),
                 conflict=True, **info)
         res = apply_pack(s.game, manifest, blobs, rows, allow_conflicts=allow)
+        de_written = write_de(s, de_items) if de_items else (0, 0)
         group = s.journal.new_group()
         with s.journal.batch():
             for a in res["applied"]:
@@ -716,7 +826,7 @@ def post_pack_apply(handler, s, body):
         build = dict(started=False, output=None, features=code["features"],
                      problem="not built: some files failed to apply")
     return api.ok(plan=plan, applied=True, written=len(res["applied"]),
-                  codemods_build=build,
+                  codemods_build=build, data_editor_written=dict(mods=de_written[0], workbench=de_written[1]),
                   added=sum(1 for a in res["applied"] if a["op"] == "added"),
                   failed=res["failed"], verified=res["verified"],
                   already=info["counts"].get("already", 0),

@@ -246,6 +246,45 @@ def facts(game):
     return f
 
 
+_LIVE: dict = {}
+
+
+def facts_for(game, stock=None):
+    """The stock facts, plus the characters the working disc has and the stock does not (Add Character): a new
+    character is a creature to swap like any other, and its model a target. The working disc's half is re-read
+    whenever SWAT.DAT's table changes (an add or a delete), the stock half stays cached."""
+    if stock is None or stock is game:
+        return facts(game)
+    fs = facts(stock)
+    try:
+        sw = game.archive("SWAT.DAT")
+        key = (game.path, sw.count, sw.size)
+    except Exception:                                          # noqa: BLE001
+        return fs
+    got = _LIVE.get(game.path)
+    if got is None or got[0] != key:
+        fg = Facts(game)
+        added = {k: v for k, v in fg.stock.items() if k not in fs.stock}
+        if not added:
+            merged = fs
+        else:
+            import copy as _copy
+            merged = _copy.copy(fs)
+            merged.stock = dict(fs.stock, **added)
+            merged.targets = dict(fs.targets, **{k: v for k, v in fg.targets.items() if k not in fs.targets})
+            merged.game = game          # where things are found: the working disc
+        got = _LIVE[game.path] = (key, merged)
+    return got[1]
+
+
+def _src_for(cr_name, game, stock):
+    """The disc to read a character's stock files from: the stock one, unless it is a character only the working
+    disc has."""
+    if stock is not None and cr_name.lower() in facts(stock).stock:
+        return stock
+    return game
+
+
 def current_names(game, cr_name, stock=None):
     """What this `.cr` says RIGHT NOW -- never cached, never from stock.
 
@@ -253,7 +292,7 @@ def current_names(game, cr_name, stock=None):
     level copies are written in the same breath, so they agree; if a copy
     somehow does not, the plan shows the byte counts for every copy anyway.
     """
-    f = facts(stock or game)
+    f = facts_for(game, stock)
     if cr_name.lower() not in f.stock:
         raise KeyError(cr_name)
     stem = cr_name[:-3].lower()
@@ -331,7 +370,7 @@ def palette(game, cr_name, stock=None):
     `stock` is the pristine disc. It decides what the palette CONTAINS; `game`
     decides where the character is pointed today.
     """
-    f = facts(stock or game)
+    f = facts_for(game, stock)
     cur = current_names(game, cr_name, stock)
     stem = cr_name[:-3]
     here = f.targets.get(cur["render"], dict(bones=0))
@@ -342,7 +381,7 @@ def palette(game, cr_name, stock=None):
         if not t["bones"] or t["bones"] != here.get("bones"):
             continue
         ok = f.resolves_in(target, arcs)
-        hits = check_hitboxes(stock or game, stem, target)
+        hits = check_hitboxes(_src_for(cr_name, game, stock), stem, target)
         rows.append(dict(
             id=target, bones=t["bones"], face=t["face"], morphs=t["morphs"],
             current=target == cur["render"],
@@ -363,7 +402,7 @@ def palette(game, cr_name, stock=None):
                      # means something else edited one of them.
                      split=cur["render"] != cur["skel"]),
         archives=len(arcs), archives_all=arcs,
-        hitboxes=check_hitboxes(stock or game, stem, cur["render"]),
+        hitboxes=check_hitboxes(_src_for(cr_name, game, stock), stem, cur["render"]),
         targets=rows)
 
 
@@ -379,7 +418,7 @@ def plan_swap(game, cr_name, target, stock=None):
     """
     from . import api
 
-    f = facts(stock or game)
+    f = facts_for(game, stock)
     if cr_name.lower() not in f.stock:
         raise KeyError(cr_name)
     arcs = f.archives_for(cr_name)

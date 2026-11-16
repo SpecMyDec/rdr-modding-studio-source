@@ -694,7 +694,17 @@ class Level:
                 stored=stored, slot=e.slot, fits=stored <= e.slot,
                 headroom=e.slot - stored,
             )
+            if stored > e.slot and self.grow_by_rebuild:
+                # The Studio rebuilds the archive to make room (queued for the
+                # next Rebuild and play), so a file outgrowing its slot is no
+                # longer a refusal: moved objects, new collision nodes ...
+                report[filename].update(fits=True, rebuild=True)
         return report
+
+    # Set by the Studio on Levels of its working disc: edits that outgrow their
+    # file's slot are written anyway, through its writer, which queues the
+    # archive for a rebuild. Off for any other Level (the unedited disc, tests).
+    grow_by_rebuild = False
 
     def apply(self, edits_by_file, dry=False, writer=None, allow_grow=False):
         """Write edits back into the archive. All-or-nothing per file.

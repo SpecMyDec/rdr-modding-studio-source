@@ -509,7 +509,103 @@ alignment evidence that would have supported it turns out to be vacuous, and
 nothing here has been booted. Recorded in REQ-024 for whoever next touches
 repack, clearly labelled.
 
-The object layout inside the payload is UNKNOWN. `.pck` is **PARTIAL**.
+**Update: the objects are decoded** (after AlgumCorrupto's RAGE-SWF-research, `flashpck.h`). The payload is the
+game's Flash player objects dumped as they lay in memory: the root (swfFILE) at payload 0 holds a pointer list, one
+per object id, and each object starts with a type byte (1 shape, 2 sprite, 3 button, 4 bitmap, 5 font, 6 text, 7
+edit text, 8 sound). Walked on all 78 files of the user's set, the object counts match the converted `.swf`
+(j01_01_mainmenu: 21 edit texts, 2 fonts, 9 bitmaps, 7 buttons, 7 sprites), and every static text decodes against
+its font (glyph indices into the font's char codes; bad glyphs only in `popupsx_01`, 3 of 667). Allocations are
+16-byte aligned (4-byte for a few), which is what lets an edited string use the 0xCD fill up to the next 4-byte
+boundary. Layout in `rdrstudio/pck.py`; text editing ships as TEXT > Flash screens.
+
+**Second update: drawn in full** (`rdrstudio/pckscene.py`, `ps2gs.py`), everything checked against the converted
+`.swf` where it has the answer:
+
+- **The game draws text from bitmap glyph atlases, not shapes.** A font (5) has, past the reference's fields, an
+  ASCII -> glyph map (128 bytes at +0x18), a size count at +0x98 and that many pointers from +0x9c to a size block:
+  atlas info ptr, f32 1/w and 1/h, glyph metrics ptr, u16 size (twips), u16 glyph count. A glyph is 12 bytes: u8 atlas
+  x in 2-pixel units, y, w, h, s16 left / top / advance (1024ths of the size), kerning. The reference's per-glyph
+  "pointers that can't be found" point nowhere: they are left over from the converter's heap. The advances match
+  the font's advance table exactly. The full UI font carries an atlas per size the screen uses (24 and 22 px).
+- **Pictures** (bitmaps and atlases): 256 colours = PSMT8, 16 = PSMT4, both read by the GS from a PSMCT32 upload.
+  The 4-bit one has no reference decoder; it is the PSMT4/PSMCT32 address maps, with the upload rectangle the one
+  whose words are the ones the texture reads (a 128x64 atlas is uploaded 32x32, not 64x16 -- assuming w/2 x h/4
+  put everything in the left half). All 2,018 bitmaps of the 78 decode; the atlases read as clean letters.
+- **Place matrices are packed**: flags bit 0 -> s16 sx, sy in 8.8, bit 1 -> s16 r0, r1 in 8.8, then s16 x, y in
+  twips; the instance name follows in the same block. Every row of j01_01_mainmenu matches the .swf
+  (0x00ff = 0.9961, 0x011d = 1.1133, 0xffb3 = -0.3008). Commands flagged 0xcd have no matrix pointer.
+- **Shapes** are convex polygons (2,655 quads, 454 triangles, 6 more, the 16-point circles), 94% filled with a
+  bitmap; a fill's matrix maps pixels to the bitmap's 0..1 square. Fill entries 36 bytes, stroke entries 8.
+- **Edit text box**: [width, height, xmin, ymin] in 1024ths of the size (6869 x 480 / 1024 = 3220 twips = the .swf's).
+- **Buttons**: u8 record count +9, 40-byte records (states, depth, f32 matrix, Q2.6 colour transform, object ptr).
+
+**A .pck that GROWS works in the game** (2.0.0, measured): font fill, longer strings and new pictures append to the
+payload and repoint, and the screens show correctly. Two conditions made it work, both now enforced on every save:
+
+- **The header's size follows the payload** (+12, file size - 16).
+- **A texture's upload fields follow its size.** A picture's header holds +0x2a = data size in 256-byte units,
+  +0x30 storage (1 swizzled, 5 / 6 linear), +0x31 = (w/2) / W32 and +0x32 = H32, the PSMCT32 rectangle the GS
+  uploads it as. The game's own are as square as can be (W32 = H32 or W32 = 2 x H32: 64x64 4-bit -> 32x16, 128x64 ->
+  32x32, 256x256 -> 128x64). A filled font atlas that kept the old fields drew as scrambled letters; with them
+  rewritten it draws clean (`pckscene.set_tex_header`, `repair_textures` on save).
+
+**Sounds**: the sound objects (type 8) are empty stubs. A screen's ActionScript creates `new Sound()` and calls
+`attachSound("<name>")`; that name is a row of the bank tables (section 3g), which is how a screen's sounds are found
+(`pckavm.attached_sounds`, read from the constant pools and a stack walk).
+
+`.pck` stays **PARTIAL** only for AVM1 (read, not edited).
+(When this section was first written the object layout was unknown.)
+
+---
+
+## 3g. Found while building 2.0.0 (the fork): audio, streams, textures, levels, animation
+
+All measured on the disc unless marked. What the Studio does with each is in [FORK-CHANGES.md](FORK-CHANGES.md).
+
+### Sound bank tables -> wave: the whole chain
+
+`snd_<n>.csv` (SWAT.DAT) rows, PS2 columns: **name, code, bank, program, key**. Column 1 is the sound's code, not a
+wave; column 4 a key. The bank's `.hd` (BANKS.DAT) program holds **splits**: per program a u32 offset to its split
+table, a u8 count and a u8 entry size; a split is u16 sample set, u8 key low, u8, u8 key high. The key picks the
+split, the split names the **set** (`Sset`), the set a **sample** (`Smpl`), the sample a **wave** (`Vagi` index into
+the `.bd`). Reading column 1 as the wave, then the set number as the wave, both played the wrong sound (most landed on
+one page-turn sound); the full chain is right against the game. `vag.key_sets`, `vag.set_waves`.
+
+### `.stm` streams: what a loop needs
+
+IMA ADPCM, high nibble first, channels interleaved in 64-byte blocks. Header: +32 loop flag, +36 the loop restart as
+a byte offset into the data, +40 / +44 the ADPCM predictor and step index of each channel at that point. There is
+**no loop-end field**: a looping stream plays to its end and jumps to the restart. Rates seen: 48,000, 24,000, 12,000.
+The restart and the length must both sit on a whole interleave unit, 64 x channels x rate / 24,000 bytes (128 samples
+at 12 / 24 kHz, 256 at 48 kHz). A stream whose length was not a whole unit played past its intended loop and came back
+distorted (a third-party creator's output, on a level's music); cut to the unit, it loops clean (untested in game for
+every rate; tested for 24 kHz stereo). `.stm` stays **PARTIAL** (the remaining header words are not all named).
+
+### 4-bit textures in level bundles are swizzled too
+
+Level `RSC0` bundles hold MIP0 textures with the same header as above. `0x30 == 1` (swizzled) occurs on **4-bit**
+textures as well as 8-bit: MANSINTB has 24 of 72. They are PSMT4 read back from the PSMCT32 rectangle +0x32 names,
+exactly as a `.pck` atlas. Unswizzled that way, 22 of the 24 lose half their pixel-to-pixel roughness and all 24 draw
+clean (sofa, panelling, books, marble, rug, wallpaper); drawn raw they were noise.
+
+### Levels: where the game looks
+
+- **A mission's player character is read from its level archive.** For all 32 `levelflow.csv` rows the player's `.cr`
+  is in that mission's archive (and in SWAT.DAT).
+- **A level's load show is its own `.lsh`** (`lvl_perfnew.lsh` in PERFNEW.DAT names `mrd_load_a`, `mrd_load_hls`,
+  `ptl_mrd_load_*`), and the clips it names are in the same archive. 552 `.anim` names exist in more than one archive.
+- **Showdown maps** load only from `lvls_m2/<map>2.dat` and `lvls_m4/<map>4.dat`, and only with a row
+  `<LOOKUPDATA:lvl_<map>, levelselect_<thumb>, <name>, <sub text>>` in `postermultiview.swui` (swat.dat and
+  front.dat). Measured: two new maps load and play.
+- **No archive has folders**: 66 of 66 hold only top-level names. A file added as `gbw/gbw.cr` is never found.
+
+### BVH through Blender
+
+Blender's BVH importer converts Y-up to Z-up (forward -Z, up Y) and its exporter has no axis option, so a clip
+exported again is in Z-up: points as Z.p and joint rotations as Z.R.Z^T, with Z mapping (x, y, z) to (x, -z, y)
+(root offset 1.125 m written in the Z column). It also writes frames up to the scene end (250 by default) holding
+the last pose, and with float32 arithmetic moves every sample by up to 0.00095 degrees / 3.5e-6 m. Turned back and
+with a 0.002 dead band, an unedited round trip re-encodes byte-identical (red_cof_rev_die: 16,200 samples).
 
 ---
 
@@ -720,7 +816,7 @@ value swallowed a brace.| ext | files | size range | form | status | read by | p
 | `.tex` | 12932 | 110-917518 B | MIXED | **DECODED** | texture.py | -- | -- |
 | `.anim` | 11138 | 42-75767 B | BINARY | **DECODED** | anim.py (cm2) / animcmp.py (cmp) / `probe_animraw.py` (uncompressed) | -- | -- |
 | `.mod` | 8600 | 70-445370 B | MIXED | **PARTIAL** | rsc.py / vif.py + `probe_modtext.py` (1.10) + `probe_modbin.py` (2.1x header+verts) | -- | header and vertex block settled from the ELF; material/packet tail open |
-| `.stm` | 8361 | 3584-26126336 B | BINARY | **PARTIAL** | stm.py / streams.py | -- | -- |
+| `.stm` | 8361 | 3584-26126336 B | BINARY | **PARTIAL** | stm.py / streams.py / dataeditor_more.stm_make -- loop rules in 3g | -- | new streams |
 | `.stateb` | 7092 | 36-40329 B | BINARY | **PARTIAL** | actb.py / behaviour.py | -- | -- |
 | `.animsnd` | 5797 | 27-2397 B | TEXT | **DECODED** | props.py (generic) + `probe_animsnd.py` | 79.8% | yes |
 | `.gait` | 5159 | 208-111582 B | TEXT | **DECODED** | props.py (9/14 keys) + `probe_gait.py` (all 14) | 11.9% | yes (0 trap fields; 21160 block opens unseen) |
@@ -785,7 +881,7 @@ value swallowed a brace.| ext | files | size range | form | status | read by | p
 | `.spwn` | 97 | 127-1565 B | TEXT | **DECODED** | props.py (generic) | 100.0% | yes |
 | `.lsh` | 94 | 249-3319 B | TEXT | **PARTIAL** | props.py (generic) | 98.9% | yes |
 | `.pow` | 92 | 6-2555 B | TEXT | **PARTIAL** | props.py (generic) | 71.4% | yes |
-| `.pck` | 82 | 11680-1828928 B | BINARY | **PARTIAL** | research/probe_pck.py -- container only | -- | -- |
+| `.pck` | 82 | 11680-1828928 B | BINARY | **PARTIAL** (AVM1 only) | pck.py / pckscene.py / pckfont.py -- objects decoded, drawn, edited, can grow (see `.pck`) | -- | yes |
 | `.shadows` | 81 | 54-990 B | TEXT | **PARTIAL** | props.py (generic) | 82.1% | yes |
 | `.acc` | 77 | 95-145 B | TEXT | **PARTIAL** | props.py (generic) | 83.4% | yes |
 | `.hf` | 67 | 1788-262168 B | BINARY | **DECODED** | research/probe_hf.py (no module yet) | -- | -- |

@@ -1,4 +1,4 @@
-// rig.js — BALANCE ▸ Tuning ▸ Body & Rig.
+// rig.js — STATS ▸ Tuning ▸ Body & Rig.
 //
 // The eight per-character files that are not .cr and not .swt:
 // .dam .sphs .ars .hot .tail .acc .armr .rep — 939 files, 426,648 values.

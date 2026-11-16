@@ -285,6 +285,73 @@ def parse_hd(data):
         return []
 
 
+def _hd_chunk(data, tag):
+    i = 0
+    while i + 8 <= len(data):
+        if data[i:i + 4] == b"IECS" and data[i + 4:i + 8] == tag:
+            return i
+        i += 4
+    return None
+
+
+def _hd_table(data, tag):
+    p = _hd_chunk(data, tag)
+    if p is None:
+        return []
+    n = struct.unpack_from("<I", data, p + 12)[0]
+    if not 0 <= n < 4096:
+        return []
+    return [p + struct.unpack_from("<I", data, p + 16 + 4 * k)[0] for k in range(n + 1)]
+
+
+def set_waves(hd):
+    """The waves (indexes into the Vagi list, as sounds_with_rates numbers them) of each sample set of an `.hd`.
+
+    A game's sound definition (snd_<n>.csv, its fifth column) names a SAMPLE SET, not a wave: `Sset` records are
+    u8 x3, u8 sample count, then that many u16 sample indexes; a `Smpl` record starts with the u16 index of its wave
+    in `Vagi`. So set -> samples -> waves (snd_50: set 91, Menu_HandScroll, is wave 81). -> [[wave, ...], ...]."""
+    sets, smpl = _hd_table(hd, b"tesS"), _hd_table(hd, b"lpmS")
+    out = []
+    for o in sets:
+        try:
+            n = hd[o + 3]
+            waves = []
+            for j in range(n):
+                s = struct.unpack_from("<H", hd, o + 4 + 2 * j)[0]
+                if s < len(smpl):
+                    waves.append(struct.unpack_from("<H", hd, smpl[s])[0])
+            out.append(waves)
+        except (IndexError, struct.error):
+            out.append([])
+    return out
+
+
+def key_sets(hd):
+    """{(program, key): sample set} from an `.hd`'s `Prog` chunk.
+
+    A game sound definition (snd_<n>.csv) plays a program (its 4th column) at a KEY (its 5th), as a MIDI note:
+    `Prog` lists programs (u32 count, count+1 u32 offsets from the chunk); a program starts with a u32 offset (from
+    itself) to its splits, a u8 split count and a u8 split size, and each split is a u16 sample set, u8 lowest key,
+    u8, u8 highest key. (In snd_50 the keys happen to equal the set numbers; in snd_08 key 14 is set 3.)"""
+    out = {}
+    progs = _hd_table(hd, b"gorP")
+    for pi, po in enumerate(progs):
+        try:
+            split_off = struct.unpack_from("<I", hd, po)[0]
+            n, size = hd[po + 4], hd[po + 5]
+            if not size:
+                continue
+            for k in range(n):
+                q = po + split_off + k * size
+                sset = struct.unpack_from("<H", hd, q)[0]
+                lo, hi = hd[q + 2], hd[q + 4]
+                for key in range(lo, max(lo, hi) + 1):
+                    out.setdefault((pi, key), sset)
+        except (IndexError, struct.error):
+            continue
+    return out
+
+
 def sounds_with_rates(bd, hd):
     """Merge the body and its header into one list of playable sounds.
 

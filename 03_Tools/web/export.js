@@ -224,8 +224,8 @@ function packCard() {
   const x = el('span', 'muted', '  .zip');
   x.style.cssText = 'font:var(--t-mono);font-size:11px';
   t.append(x);
-  const b = el('div', 'muted', 'Only the files you changed, no game data. '
-    + 'Post it anywhere; others add it with Apply a mod pack.');
+  const b = el('div', 'muted', 'Every change: the files you changed on the disc and every file in the Data Editor\'s '
+    + '.dat folders (built or not, new archives too), no game data. Post it anywhere; others add it with Import mod.');
   b.style.cssText = 'font-size:11px;margin:2px 0 8px;line-height:1.45';
   const row1 = el('div');
   row1.style.cssText = 'display:flex;gap:8px;margin-bottom:6px';
@@ -249,7 +249,11 @@ function packCard() {
   go.style.flex = 'none';
   go.onclick = exportPack;
   row2.append(ds, go);
-  c.append(t, b, row1, row2);
+  const wbl = el('label', 'muted');
+  wbl.style.cssText = 'display:flex;gap:6px;align-items:center;font-size:11px;margin-top:6px';
+  const wb = el('input'); wb.type = 'checkbox'; wb.id = 'expPackWorkbench';
+  wbl.append(wb, el('span', null, 'Include the Data Editor\'s Workbench too (its working copies; can be large)'));
+  c.append(t, b, row1, row2, wbl);
   return c;
 }
 
@@ -257,7 +261,8 @@ async function exportPack() {
   const name = $('#expPackName').value.trim();
   if (!name) { $('#expPackName').focus(); return say('Give the mod a name.', 'bad'); }
   const body = { name, author: $('#expPackAuthor').value.trim(),
-    description: $('#expPackDesc').value.trim() };
+    description: $('#expPackDesc').value.trim(),
+    include_workbench: !!($('#expPackWorkbench') && $('#expPackWorkbench').checked) };
   const dry = await call('pack_export', 'POST', { ...body, dry: true });
   if (!dry.ok) return renderProblem($('#expResult'), dry.problem);
   const r = await A.withProgress('Comparing your disc with stock — about a minute',
@@ -266,8 +271,11 @@ async function exportPack() {
   const skipped = (r.not_included || []).length
     ? `<br><span style="color:var(--warn)">Not included (brand-new .dat files): `
       + `${esc(r.not_included.join(', '))}</span>` : '';
+  const deN = r.data_editor || {};
   say(`<b style="color:var(--grn)">Mod pack saved.</b> ${r.files} file(s) `
-    + `(${r.modified} changed, ${r.added} new), ${esc(fmtSize(r.size))}.<br>`
+    + `(${r.modified} changed, ${r.added} new)`
+    + ((deN.mods || deN.workbench) ? `, ${deN.mods || 0} Data Editor .dat folder file(s)` + (deN.workbench ? `, ${deN.workbench} Workbench file(s)` : '') : '')
+    + `, ${esc(fmtSize(r.size))}.<br>`
     + `<span class="mono">${esc(r.path)}</span><br>`
     + `<span class="muted">Post that .zip. It holds no game data.</span>`
     + skipped);
@@ -324,6 +332,15 @@ function showPackPlan(b64, r) {
     + (r.counts.already ? `, ${r.counts.already} already there` : '') + '.');
   sum.style.marginTop = '4px';
   box.append(sum);
+  const deIn = r.data_editor || {};
+  const deN = (deIn.mods || 0) + (deIn.workbench || 0);
+  if (deN) {
+    const d = el('div', null, `${deIn.mods || 0} file(s) into the Data Editor's .dat folders`
+      + (deIn.workbench ? `, ${deIn.workbench} into its Workbench` : '')
+      + ' (files of the same name there are replaced). The next Build puts the .dat folder files on the disc.');
+    d.style.marginTop = '4px';
+    box.append(d);
+  }
   if (cmods.length) {
     const cm = el('div', null, 'Code mods: ' + cmods.join(', ') + '. Your Studio builds a NEW disc '
       + '(02_Modded/RDR_CODEMODS.iso) from your own stock game; your working disc stays free of code mods.');
@@ -350,7 +367,7 @@ function showPackPlan(b64, r) {
   bar.style.cssText = 'display:flex;gap:8px;margin-top:8px';
   const go = el('button', conf.length ? null : 'primary',
     conf.length ? `Apply and overwrite ${conf.length}` : 'Apply');
-  go.disabled = !n && !conf.length && !cmods.length;
+  go.disabled = !n && !conf.length && !cmods.length && !deN;
   go.onclick = async () => {
     go.disabled = true;
     const done = await A.withProgress('Putting the mod on your disc',
@@ -363,6 +380,10 @@ function showPackPlan(b64, r) {
       + `${done.written} file(s) written and read back`
       + (done.added ? ` (${done.added} new)` : '')
       + (done.already ? `, ${done.already} already there` : '') + '.'
+      + ((done.data_editor_written && (done.data_editor_written.mods || done.data_editor_written.workbench))
+        ? `<br>${done.data_editor_written.mods} file(s) into the Data Editor's .dat folders`
+          + (done.data_editor_written.workbench ? `, ${done.data_editor_written.workbench} into its Workbench` : '')
+          + ': <b>Build</b> (top bar) puts them on the disc.' : '')
       + (bad ? '<br>' + done.failed.slice(0, 5).map(
           (x) => esc(x.name + ': ' + x.error)).join('<br>') : '')
       + (done.codemods_build ? (done.codemods_build.started
@@ -424,10 +445,32 @@ function close() {
   if (d) d.style.display = 'none';
 }
 
+// New mod: the current one kept as a pack of everything, then a clean start (modpack.post_new_mod).
+async function newMod() {
+  const dry = await call('new_mod', 'POST', { dry: true, name: 'x' });
+  if (!dry.ok) return A.toast(dry.problem.message, 'bad');
+  const name = prompt('A name for the new mod:', '');
+  if (name == null) return;
+  const keep = confirm(`Keep "${dry.current}" first?\n\nOK: it is saved as a mod pack of everything (disc changes, `
+    + `.dat folders, Workbench) in your exports folder; Import mod brings it back.\nCancel: it is not kept.`);
+  if (!confirm(`Start "${name || 'New mod'}"?\n\nThe Data Editor's .dat folders and Workbench are emptied and the `
+    + `working disc is reset to stock.` + (keep ? '' : '\n\nThe current mod is NOT kept.'))) return;
+  const r = await A.withProgress('Starting a new mod' + (keep ? ': keeping the current one, then resetting the disc' : ''),
+    () => call('new_mod', 'POST', { dry: false, name, keep }));
+  if (!r.ok) return A.toast(r.problem.message, 'bad');
+  alert(`"${r.name}" started: a clean working disc, empty .dat folders and Workbench.`
+    + (r.saved ? `\n\nThe previous mod is kept as:\n${r.saved}\n(Import mod brings it back.)` : ''));
+  location.reload();
+}
+
 export function init(bridge) {
   A = bridge;
   const b = $('#hdrExport');
   if (b) b.onclick = open;
+  const nm = $('#hdrNewMod');
+  if (nm) nm.onclick = () => newMod().catch((e) => A.toast(e.message, 'bad'));
+  const ip = $('#hdrImportPack');
+  if (ip) ip.onclick = applyPack;
   const save = $('#btnSaveMod');
   if (save) save.onclick = () => saveVersion();
   const share = $('#btnShareMod');

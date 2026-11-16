@@ -214,7 +214,25 @@ def plan(lvl, bundle, chunk, obj_text, solid=True, box=None):
                     note="Collision: the old shell %s now matches your model "
                          "(a solid box). Moves with the model." % b.name)
 
-    # No twin: a NEW bound_<stem>_01 node + a NEW BND0 chunk.
+    return _add_new(lvl, bundle, shell, stem, solid)
+
+
+def plan_box(lvl, bundle, lo, hi, stem="custom", solid=True):
+    """A standalone collision box (world AABB lo..hi): a NEW BND0 chunk + a NEW bound_<stem>_NN node. NOTHING is
+    written. -> the same dict as plan(). For collision where the level has none: a wall, a ledge, a model of
+    your own that never had a shell."""
+    try:
+        shell = box_collision(lo, hi)
+    except (CollisionError, ValueError, struct.error) as ex:
+        return dict(ok=False, why="Could not make the box: %s" % ex)
+    stem = re.sub(r'[^A-Za-z0-9]+', '', stem_of(stem) or "custom") or "custom"
+    return _add_new(lvl, bundle, shell, stem, solid)
+
+
+def _add_new(lvl, bundle, shell, stem, solid=True):
+    """A NEW bound_<stem>_NN node + a NEW BND0 chunk holding `shell`."""
+    from . import rsc as R
+    from . import scene
     try:
         out, new_idx = R.append_chunk(bundle, "BND0", shell, "custom collision")
     except (ValueError, AssertionError, struct.error) as ex:

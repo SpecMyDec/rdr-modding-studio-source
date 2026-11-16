@@ -1813,7 +1813,7 @@ def post_model_swap(handler, s, body):
         # is the reason the list is short, and a route that took whatever it
         # was handed would let a crafted request feed a 52-bone animation to a
         # 59-bone rig.
-        f = modelswap.facts(s.vanilla)
+        f = modelswap.facts_for(disc, s.vanilla)
         known = f.targets.get(target)
         if known is None:
             raise Refusal("unknown_value",
@@ -2848,6 +2848,7 @@ _POST = {
     "mod_import": (share_mod.post_mod_import, "versions"),
     "pack_export": (modpack_mod.post_pack_export, "versions"),
     "pack_apply": (modpack_mod.post_pack_apply, "versions"),
+    "new_mod": (modpack_mod.post_new_mod, "versions"),
     "transfer_check": (post_transfer_check, "transfer"),
     "transfer_apply": (post_transfer_apply, "transfer"),
     "transfer_export": (post_transfer_export, "transfer"),

@@ -23,6 +23,7 @@ SHOWDOWN2 = "showdown2"
 SHOWDOWN4 = "showdown4"
 BONUS = "bonus"
 FRONTEND = "frontend"
+CUSTOM = "custom"         # a level archive the unedited disc does not have (New .dat, an imported .dat)
 
 MODE_LABELS = {
     CAMPAIGN: "Campaign",
@@ -30,6 +31,7 @@ MODE_LABELS = {
     SHOWDOWN4: "Showdown - 4 player",
     BONUS: "Campaign (unused by the mission list)",
     FRONTEND: "Main menu",
+    CUSTOM: "Custom levels",
 }
 
 # The main menu is a level too. FRONT.DAT holds one `.lvl`, a `.bnds`, three
@@ -86,8 +88,16 @@ def mission_archive_key(level_name, variation, archives):
     return None
 
 
-def catalog(game):
-    """Every level archive with the mode and progression data attached."""
+def catalog(game, stock=None):
+    """Every level archive with the mode and progression data attached.
+
+    `stock`: the unedited disc. A level archive it does not have is a custom
+    level, listed in its own group after the main menu, named with (M) for a
+    Showdown stage or (S) for a single player level."""
+    try:
+        stock_arcs = set(a.upper() for a in stock.archives()) if stock is not None else None
+    except Exception:                                      # noqa: BLE001
+        stock_arcs = None
     data = campaign.summary(game)
 
     # Resolve each MISSION to one archive, then invert.
@@ -144,6 +154,12 @@ def catalog(game):
         if entry["base"].startswith("TOMB"):
             entry["town"] = "Brimstone"
 
+        if stock_arcs is not None and archive.upper() not in stock_arcs:
+            showdown = group in ("LVLS_M2", "LVLS_M4")
+            entry["players"] = "2P" if group == "LVLS_M2" else "4P" if group == "LVLS_M4" else ""
+            entry["kind"] = "showdown" if showdown else "single"
+            entry["name"] = name + (" (M)" if showdown else " (S)")
+            entry["mode"] = CUSTOM
         entry["mode_label"] = MODE_LABELS[entry["mode"]]
         out.append(entry)
 
@@ -154,7 +170,7 @@ def catalog(game):
                         group="", base=FRONT_ARCHIVE[:-4], mode=FRONTEND,
                         mode_label=MODE_LABELS[FRONTEND], missions=[]))
 
-    order = {CAMPAIGN: 0, BONUS: 1, SHOWDOWN2: 2, SHOWDOWN4: 3, FRONTEND: 4}
+    order = {CAMPAIGN: 0, BONUS: 1, SHOWDOWN2: 2, SHOWDOWN4: 3, FRONTEND: 4, CUSTOM: 5}
     out.sort(key=lambda e: (order[e["mode"]],
                             e["missions"][0]["number"] if e["missions"] else 99,
                             e["name"]))

@@ -27,11 +27,19 @@ SLUS_*
 06_Backups/
 07_Research/
 08_ForkLab/
+*.pck
+*.stm
+*.anim
+*.skel
+*.strtbl
+*.glb
+data_editor/
 
 # Build outputs, caches, environments
 03_Tools/packaging/.venv/
 03_Tools/packaging/build/
 03_Tools/packaging/dist/
+03_Tools/packaging/testdata/
 __pycache__/
 *.pyc
 .mypy_cache/

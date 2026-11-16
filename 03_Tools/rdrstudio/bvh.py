@@ -550,6 +550,14 @@ def to_bvh(a, bones, fps=DEFAULT_FPS, euler="YZX", name="", allow_short=False):
 # metres for channels 0-2, degrees for 3+.
 TEXT_ULP = 1e-6
 
+# The dead band the app imports with. A clip that went through Blender and back
+# untouched carries float32 arithmetic on every sample -- measured on
+# red_cof_rev_die, at most 0.00095 degrees and 3.5e-6 m -- so at TEXT_ULP 86%
+# of an unedited clip read as edits, re-encoded bigger and no longer fitted its
+# slot. At 0.002 (degrees / metres) that clip comes back byte-identical, while
+# a real edit (5 degrees on one joint for 20 frames) still writes all of it.
+DCC_TOLERANCE = 0.002
+
 # The encoder's clamp rails, 0x002D2E5C and 0x002D2E78.
 RAIL_HI = 32767.0
 RAIL_LO = -32768.0
@@ -807,6 +815,99 @@ def recompose_rows(m, cols, joints, reference=None):
             row[cy] = yang * deg
             row[cz] = zang * deg
     return len(convert), sorted(set(orders)), len(snapped)
+
+
+# ------------------------------------------------- Blender's Z-up re-export
+#
+# Blender's BVH IMPORTER turns the file from Y-up into its own Z-up (its
+# defaults: forward -Z, up Y), and its BVH EXPORTER has no axis setting at all:
+# it writes what it holds, in Z-up. So the most ordinary round trip there is --
+# import a clip, export it again, touch nothing -- comes back with every point
+# p written as Z.p and every joint rotation R as Z.R.Z^T, where Z maps
+# (x, y, z) to (x, -z, y): the root's 1.125 m height sits in its Z column, and
+# each joint's three angles describe the same bend about turned axes. Read as
+# it stands, that is a different motion (measured on red_cof_rev_die: 86% of
+# the samples "changed", a median of 34 degrees per joint, the root moved by
+# 2.5 m), it re-encodes bigger and no longer fits. Turned back it is the clip.
+#
+# Which one a file is, is decided by the clip itself: both readings are
+# compared with what the clip stores now, and the Z-up one is taken only when
+# it is clearly the closer (an edit is a change of SOME joints on SOME keys;
+# the axis turn moves all of them).
+
+_Z = ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0))
+_ZT = ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0))
+
+
+def _rot_angle(a, b):
+    tr = sum(a[r][c] * b[r][c] for r in range(3) for c in range(3))
+    return math.acos(max(-1.0, min(1.0, (tr - 1.0) / 2.0)))
+
+
+def _from_zup(m3):
+    return _mat_mul(_mat_mul(_ZT, m3), _Z)
+
+
+def unturn_zup(m, cols, joints, a):
+    """Rows written by Blender in Z-up turned back to the clip's Y-up, when that
+    is what they are. -> (turned, error_as_is, error_turned) in mean degrees."""
+    orders = declared_orders(m)
+    rad = math.pi / 180.0
+    keys = min(len(m.rows), a.keys)
+    sample = sorted(set(int(i * (keys - 1) / 15) for i in range(16))) if keys > 1 else [0]
+    err0 = err1 = 0.0
+    n = 0
+    for k in sample:
+        p = a.at_key(k)
+        row = m.rows[k]
+        for j in range(joints):
+            o = orders[j]
+            if len(o) != 3:
+                continue
+            by_axis = {"X": cols[3 + 3 * j], "Y": cols[4 + 3 * j], "Z": cols[5 + 3 * j]}
+            if None in by_axis.values():
+                continue
+            f = euler_to_matrix(o, tuple(row[by_axis[ax]] * rad for ax in o))
+            base = 3 + 3 * j
+            g = euler_to_matrix("YZX", (p[base + 1], p[base + 2], p[base]))
+            err0 += _rot_angle(f, g)
+            err1 += _rot_angle(_from_zup(f), g)
+            n += 1
+    if not n:
+        return False, 0.0, 0.0
+    err0, err1 = math.degrees(err0 / n), math.degrees(err1 / n)
+    if not (err1 < err0 * 0.5 and err0 > 1.0):
+        return False, err0, err1
+    for row in m.rows:
+        if None not in cols[:3]:
+            x, y, z = row[cols[0]], row[cols[1]], row[cols[2]]
+            row[cols[0]], row[cols[1]], row[cols[2]] = x, z, -y
+        for j in range(joints):
+            o = orders[j]
+            if len(o) != 3:
+                continue
+            by_axis = {"X": cols[3 + 3 * j], "Y": cols[4 + 3 * j], "Z": cols[5 + 3 * j]}
+            if None in by_axis.values():
+                continue
+            r = _from_zup(euler_to_matrix(o, tuple(row[by_axis[ax]] * rad for ax in o)))
+            for ax, v in zip(o, matrix_to_euler(o, r)):
+                row[by_axis[ax]] = math.degrees(v)
+    return True, err0, err1
+
+
+def trim_held_frames(m, keys, eps=1e-4):
+    """Frames past the clip's own length that only hold its last pose (Blender's scene end, 250 by default, ran
+    past the clip) dropped. -> how many were dropped (0 when there is nothing to drop or they move)."""
+    if m.frames <= keys or keys < 1:
+        return 0
+    last = m.rows[keys - 1]
+    for row in m.rows[keys:]:
+        if any(abs(u - v) > eps for u, v in zip(row, last)):
+            return 0
+    extra = m.frames - keys
+    del m.rows[keys:]
+    m.frames = keys
+    return extra
 
 
 def _column_map(m, joints_wanted, extra_pos=None):
@@ -1185,6 +1286,7 @@ def bvh_to_anim(original, text, bones=None, euler=None, tolerance=TEXT_ULP,
             raise ImportRefused(
                 "the BVH declares rotations as %s but %s was asserted"
                 % (" ".join(got), " ".join(want)))
+    trimmed = trim_held_frames(m, a.keys)
     extra_pos = []
     cols = _column_map(m, want_joints, extra_pos=extra_pos)
 
@@ -1198,7 +1300,9 @@ def bvh_to_anim(original, text, bones=None, euler=None, tolerance=TEXT_ULP,
     for j, jname, col in extra_pos:
         vals = [row[col] for row in m.rows]
         span = max(vals) - min(vals) if vals else 0.0
-        if span > tolerance:
+        # Blender writes these from float32 matrices: a bone nobody moved wobbles by ~1e-6 m. Only a real
+        # translation (a tenth of a millimetre and up) is refused.
+        if span > max(tolerance, 1e-4):
             raise ImportRefused(
                 "joint %s is translated by %.4f over the clip, but only the "
                 "root has translation channels in this format -- a clip "
@@ -1221,6 +1325,10 @@ def bvh_to_anim(original, text, bones=None, euler=None, tolerance=TEXT_ULP,
         base = 3 + 3 * j
         return (p[base], p[base + 1], p[base + 2])
 
+    zup, zup_err0, zup_err1 = (False, 0.0, 0.0)
+    if m.frames == a.keys:
+        zup, zup_err0, zup_err1 = unturn_zup(m, cols, want_joints, a)
+
     converted_joints, orders_seen, snapped_joints = recompose_rows(
         m, cols, want_joints, reference=_reference)
 
@@ -1234,10 +1342,13 @@ def bvh_to_anim(original, text, bones=None, euler=None, tolerance=TEXT_ULP,
         raise ImportRefused(
             "the BVH has %d frames but this clip stores %d keys%s. Changing "
             "the key count would resize the file and change the clip's timing; "
-            "re-export at the original length."
+            "re-export at the original length. In Blender: tick \"Update Scene "
+            "Duration\" when importing the .bvh, or set the timeline's End to "
+            "frame %d before exporting (its default, 250, %s)."
             % (m.frames, a.keys,
                " (%d game frames at half rate)" % a.frames if a.half_rate
-               else ""))
+               else "", a.keys,
+               "cuts a longer clip short" if m.frames < a.keys else "adds frames"))
 
     names_differ = []
     if bones is not None:
@@ -1275,6 +1386,18 @@ def bvh_to_anim(original, text, bones=None, euler=None, tolerance=TEXT_ULP,
                "/".join(o for o in orders_seen if o != "YZX")
                or "another order")),
         joints_snapped=snapped_joints,
+        zup_turned=zup,
+        zup_note=(
+            "" if not zup else
+            "Blender wrote this file in its own Z-up axes (its BVH export has "
+            "no axis setting), so every point and joint rotation was turned "
+            "back to the game's Y-up (%.1f degrees off per joint as written, "
+            "%.2f once turned back)." % (zup_err0, zup_err1)),
+        frames_trimmed=trimmed,
+        trim_note=(
+            "" if not trimmed else
+            "%d frame(s) past the clip's end only held its last pose (Blender's "
+            "scene end ran past the clip) and were dropped." % trimmed),
         snap_note=(
             "" if not snapped_joints else
             "%d joint(s) came back on the principal branch of their "

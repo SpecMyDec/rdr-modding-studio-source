@@ -37,8 +37,10 @@ const COMPOSITES = {
   // One search over one tree. "Find setting" was never a place.
   weapons: {
     label: 'Weapons & stats',
-    views: [['weapons', 'Weapons', 'Damage, clip, spread, range'],
-            ['creatures', 'Creatures', 'Enemy and animal stats'],
+    // no label and no "Weapons" button: the Stats row's own "Weapons & stats" button opens the weapons page, and
+    // both of these repeated it
+    noLabel: true,
+    views: [['creatures', 'Creatures', 'Enemy and animal stats'],
             ['rig', 'Body & Rig',
              'Collision spheres, hit boxes, arsenal, physics chains, '
              + 'animation slots'],
@@ -59,10 +61,10 @@ const WHERE = {
   editor: 'LEVEL', env: 'LEVEL', textures: 'LEVEL',
   cast: 'LOGIC', states: 'LOGIC', campaign: 'LOGIC', rules: 'LOGIC', unlocks: 'LOGIC',
   behaviour: 'LOGIC', links: 'LOGIC', scripting: 'LOGIC',
-  weapons: 'BALANCE', creatures: 'BALANCE', fields: 'BALANCE', strings: 'BALANCE',
-  csv: 'BALANCE', rig: 'BALANCE',
-  anim: 'ANIMATION', audio: 'MEDIA', movies: 'MEDIA', menus: 'MEDIA',
-  text: 'DISC', hidden: 'DISC', archives: 'DISC',
+  weapons: 'BALANCE', creatures: 'BALANCE', fields: 'BALANCE', strings: 'TEXT',
+  csv: 'TEXT', hudtext: 'TEXT', pck: 'TEXT', rig: 'BALANCE',
+  anim: 'ANIMATION', audio: 'MEDIA', movies: 'MEDIA', menus: 'TEXT',
+  text: 'DISC', hidden: 'DISC', archives: 'DISC', dataeditor: 'DISC',
   versions: 'PROJECT', mods: 'PROJECT', codemods: 'PROJECT',
   assets: 'LEVEL', saves: 'SAVE',
 };
@@ -79,8 +81,7 @@ function syncSubnav(tab) {
   const c = COMPOSITES[primary];
   bar.innerHTML = '';
   if (!c) { bar.classList.remove('on'); return; }
-  const lab = A.el('span', 'slab', c.label);
-  bar.append(lab);
+  if (!c.noLabel) bar.append(A.el('span', 'slab', c.label));
   for (const [id, label, title] of c.views) {
     // A feature-gated sub-view has its whole <section> stripped out of the
     // release build, so its button would lead to a blank screen. Absent
@@ -95,7 +96,7 @@ function syncSubnav(tab) {
   }
   // A strip of one is not a choice. Files kept a lone "Every file" button
   // after Cut & dev content left the build.
-  bar.classList.toggle('on', bar.querySelectorAll('button').length > 1);
+  bar.classList.toggle('on', bar.querySelectorAll('button').length > (c.noLabel ? 0 : 1));
 }
 
 // Row 1 of the nav. A workspace name is a tab: it opens the mode you were
@@ -507,7 +508,7 @@ async function pollDisc() {
 // Ctrl+K is an accelerator, not navigation, and it must name every one of the
 // twenty-four destinations -- otherwise it becomes the place things hide.
 // DESIGN-REVIEW A17: the destination's own name in ink, where it lives in
-// dim type on the right -- not "BALANCE ▸ Weapons & stats ▸ Weapons" in bold
+// dim type on the right -- not "STATS ▸ Weapons & stats ▸ Weapons" in bold
 // accent on every row. Once per row; the observer passes over rows again.
 function splitPath(row) {
   if (row.dataset.split) return;
@@ -533,21 +534,23 @@ function extendPalette() {
     ['LOGIC ▸ Behaviour', 'The AI condition vocabulary', 'behaviour'],
     ['LOGIC ▸ Links', 'Doors between levels', 'links'],
     ['LOGIC ▸ Scripting', 'Mission scripts, read-only', 'scripting'],
-    ['BALANCE ▸ Weapons & stats', 'Weapon numbers', 'weapons'],
-    ['BALANCE ▸ Weapons & stats ▸ Creatures', 'Enemy and animal stats', 'creatures'],
-    ['BALANCE ▸ Weapons & stats ▸ Body & Rig',
+    ['STATS ▸ Weapons & stats', 'Weapon numbers', 'weapons'],
+    ['STATS ▸ Weapons & stats ▸ Creatures', 'Enemy and animal stats', 'creatures'],
+    ['STATS ▸ Weapons & stats ▸ Body & Rig',
      'Collision, hit boxes, arsenal, physics chains, animation slots', 'rig'],
-    ['BALANCE ▸ Weapons & stats ▸ Find setting', 'One value across the whole disc', 'fields'],
-    ['BALANCE ▸ Text', 'Anything the game says', 'strings'],
-    ['BALANCE ▸ Tables', 'Sound banks, music, shops, the multiplayer roster', 'csv'],
+    ['STATS ▸ Weapons & stats ▸ Find setting', 'One value across the whole disc', 'fields'],
+    ['TEXT ▸ Text', 'Anything the game says', 'strings'],
+    ['TEXT ▸ Tables', 'Sound banks, music, shops, the multiplayer roster', 'csv'],
+    ['TEXT ▸ HUD text', 'The text tables (.strtbl): HUD, menu and subtitle text', 'hudtext'],
+    ['TEXT ▸ Flash screens', 'The .pck screens: menus, journal pages, shops, popups, credits', 'pck'],
     ['LOGIC ▸ Missions ▸ Unlocks & shop', 'Unlock switches and shop prices', 'unlocks'],
     ['ANIMATIONS ▸ Animations', 'Watch clips on their skeleton', 'anim'],
     ['MEDIA ▸ Audio', 'Voices, music and banks', 'audio'],
     ['MEDIA ▸ Cutscenes', 'Cutscenes and still screens', 'movies'],
-    ['MEDIA ▸ Menus', 'The main menu and the in-game HUD', 'menus'],
-    ['DISC ▸ Files', 'Search the disc, edit any file', 'text'],
-    ['DISC ▸ Files ▸ Cut & dev content', 'What was left on the disc', 'hidden'],
-    ['DISC ▸ Archives', 'Where there is room', 'archives'],
+    ['TEXT ▸ Menus', 'The main menu and the in-game HUD', 'menus'],
+    ['DATA EDITOR ▸ Archives', 'Where there is room', 'archives'],
+    ['DATA EDITOR ▸ Data Editor', 'Rebuild .dat files from your mods folder onto the working disc', 'dataeditor'],
+    ['DATA EDITOR ▸ Data Editor ▸ Manual .dat/.zip extracting/building', 'Extract or build an archive by hand', 'dataeditor'],
     ['MY MOD ▸ Versions', 'Saved copies: save, restore, compare', 'versions'],
     ['MY MOD ▸ Code Mods', 'Noclip, freeze, camera lock, slow-mo, cheats menu', 'codemods'],
     ['MY MOD ▸ Changes', 'Changed files and edit history', 'mods'],
@@ -571,17 +574,17 @@ function extendPalette() {
     Assets: ['LEVEL ▸ Library', 'editor'],
     Environment: ['LEVEL ▸ Lighting', 'env'],
     Textures: ['LEVEL ▸ Textures', 'textures'],
-    Text: ['BALANCE ▸ Text', 'strings'],
-    Weapons: ['BALANCE ▸ Weapons & stats ▸ Weapons', 'weapons'],
-    Creatures: ['BALANCE ▸ Weapons & stats ▸ Creatures', 'creatures'],
-    Settings: ['BALANCE ▸ Weapons & stats ▸ Find setting', 'fields'],
+    Text: ['TEXT ▸ Text', 'strings'],
+    Weapons: ['STATS ▸ Weapons & stats ▸ Weapons', 'weapons'],
+    Creatures: ['STATS ▸ Weapons & stats ▸ Creatures', 'creatures'],
+    Settings: ['STATS ▸ Weapons & stats ▸ Find setting', 'fields'],
     Animation: ['ANIMATIONS ▸ Animations', 'anim'],
     'Voices & music': ['MEDIA ▸ Audio', 'audio'],
     Campaign: ['LOGIC ▸ Missions', 'campaign'],
     'Game Rules': ['LOGIC ▸ Missions ▸ Game Rules', 'rules'],
-    Files: ['DISC ▸ Files', 'text'],
-    Archives: ['DISC ▸ Archives', 'archives'],
-    Hidden: ['DISC ▸ Files ▸ Cut & dev content', 'hidden'],
+    Files: ['DATA EDITOR ▸ Files', 'text'],
+    Archives: ['DATA EDITOR ▸ Archives', 'archives'],
+    Hidden: ['DATA EDITOR ▸ Files ▸ Cut & dev content', 'hidden'],
     Changes: ['MY MOD ▸ Changes', 'mods'],
     'Restore vanilla': ['Reset to stock', null],
   }));

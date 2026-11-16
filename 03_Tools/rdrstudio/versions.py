@@ -166,18 +166,52 @@ def _freshness(studio, rows):
     without changing this key, and if it somehow did, the key changes on the
     very next edit and the banner corrects itself.
     """
-    try:
-        st = os.stat(studio.modded_path)
-        disc = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        disc = None
+    def stat(path):
+        try:
+            st = os.stat(path)
+            return (path, st.st_mtime_ns, st.st_size)
+        except (OSError, TypeError):
+            return None
     j = studio.journal
-    return (disc, len(j.entries), getattr(j, "_seq", 0),
+    # (no journal yet, at startup: no edits -- not "unknown", which used to switch the cache off entirely)
+    return (stat(studio.modded_path), stat(getattr(studio, "vanilla_path", None)),
+            len(j.entries) if j is not None else 0, getattr(j, "_seq", 0) if j is not None else 0,
             tuple(sorted((r["path"], os.path.getmtime(r["path"]),
                           r["bytes"]) for r in rows)))
 
 
 _ON_DISC: dict[str, Any] = {}
+
+
+def _on_disc_file():
+    """Where the last answer is kept between launches (beside the app's settings)."""
+    return os.path.join(os.path.dirname(cfg._settings_file()), "cache", "on_disc.json")
+
+
+def _remembered(key):
+    """The answer worked out at an earlier launch, if nothing it depends on has changed since: the same key
+    (the working and stock discs' size and time, the journal, every version file) -- a launch on an unchanged disc
+    no longer re-diffs all 66 archives (6-8 s, holding the disc lock)."""
+    try:
+        with open(_on_disc_file(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        if doc.get("key") == repr(key):
+            return doc.get("value")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _remember(key, value):
+    try:
+        path = _on_disc_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".part"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"key": repr(key), "value": value}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def on_disc(studio, rows=None):
@@ -200,6 +234,12 @@ def on_disc(studio, rows=None):
         key = None
     if key is not None and _ON_DISC.get("key") == key:
         return dict(_ON_DISC["value"])
+    if key is not None:
+        kept = _remembered(key)
+        if isinstance(kept, dict):
+            _ON_DISC.clear()
+            _ON_DISC.update(key=key, value=kept)
+            return dict(kept)
 
     state = disc_state(studio)
 
@@ -230,6 +270,7 @@ def on_disc(studio, rows=None):
     if key is not None:
         _ON_DISC.clear()
         _ON_DISC.update(key=key, value=answer)
+        _remember(key, answer)
     return dict(answer)
 
 

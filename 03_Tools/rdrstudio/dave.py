@@ -203,6 +203,41 @@ def encode_packed_name(name):
     return bytes(out)
 
 
+MAX_SHARED_RUN = 31      # the shipped archives never chain more prefix-shared names than this
+
+
+def encode_packed_name_shared(name, prev):
+    """A packed name sharing its prefix with `prev` (the name before it in the
+    table), as `_decode_packed_names` reads it: a first value 0x38 + n % 8 and a
+    second 0x20 + n // 8 say "the first n characters of the previous name",
+    then the rest. Shared from 2 characters up (the marker costs two values),
+    at most 255. A name with nothing to share is written in full."""
+    name = name.lower()
+    n = 0
+    for a, b in zip(name, prev):
+        if a != b:
+            break
+        n += 1
+    n = min(n, 255)
+    if n < 2:
+        return encode_packed_name(name)
+    vals = [0x38 + n % 8, 0x20 + n // 8]
+    for ch in name[n:]:
+        i = CHARS.find(ch)
+        if i <= 0 or i >= 0x38:
+            raise ValueError("%r cannot appear in a packed name" % ch)
+        vals.append(i)
+    vals.append(0)
+    while len(vals) % 4:
+        vals.append(0)
+    out = bytearray()
+    for i in range(0, len(vals), 4):
+        trio = (vals[i] | (vals[i + 1] << 6) | (vals[i + 2] << 12)
+                | (vals[i + 3] << 18))
+        out += bytes(((trio & 0xFF), (trio >> 8) & 0xFF, (trio >> 16) & 0xFF))
+    return bytes(out)
+
+
 def create(files, magic="Dave", align_exts=True):
     """Build a complete `Dave` archive from nothing. Returns bytes.
 
@@ -245,11 +280,25 @@ def create(files, magic="Dave", align_exts=True):
         return [CHARS.find(c) for c in nm.lower()]
     names = sorted(files, key=key)
 
+    # Names share their prefix with the previous name, as the shipped archives
+    # do. Written in full, swat.dat's name table came out 907 KB against the
+    # original's 473 KB -- and the game holds an archive's whole table in
+    # memory, so the PS2 game went to a black screen at boot. Shared: 477 KB.
+    #
+    # And never more than 31 SHARED NAMES IN A ROW: the shipped archives hold
+    # to that in all 118,694 entries on the disc (the longest run is 31), so a
+    # name is always found within 31 steps of one written in full. Unbounded,
+    # swat.dat chained 7,483 names and every level took minutes to load.
     name_block = bytearray()
     name_offsets = []
+    prev = ""
+    run = 0
     for nm in names:
         name_offsets.append(len(name_block))
-        name_block += encode_packed_name(nm)
+        enc = encode_packed_name_shared(nm, prev) if run < MAX_SHARED_RUN else encode_packed_name(nm)
+        run = run + 1 if (enc[0] & 0x3F) >= 0x38 else 0
+        name_block += enc
+        prev = nm.lower()
 
     info_size = _align(len(names) * 16, SECTOR)
     name_size = _align(len(name_block), SECTOR)
@@ -438,6 +487,13 @@ def repack_status(label):
 
 
 class Dave:
+    # Files queued for a rebuild ("Rebuild and play", rdrstudio/pendingrebuild):
+    # name -> the new bytes, read back as if they were on the disc. Set by the
+    # Studio's Game on the working disc only; a write that lands in place takes
+    # the file out of the queue (on_overlay_drop is told).
+    overlay = None
+    on_overlay_drop = None
+
     def __init__(self, backing, label=""):
         self.backing = backing
         self.label = label
@@ -510,6 +566,8 @@ class Dave:
     def read(self, name_or_entry):
         """Decompressed contents."""
         e = self._resolve(name_or_entry)
+        if self.overlay and e.name in self.overlay:
+            return self.overlay[e.name]
         data = self.backing.read_at(e.offset, e.size_comp)
         if not e.compressed:
             return data
@@ -600,7 +658,16 @@ class Dave:
         )
         if flush:
             self.backing.flush()
+        self._landed(e)
         return len(payload), e.slot
+
+    def _landed(self, e):
+        """The file is on the disc now: no longer waiting for a rebuild."""
+        if self.overlay and e.name in self.overlay:
+            if self.on_overlay_drop:
+                self.on_overlay_drop(self.label, e.name)
+            else:
+                self.overlay.pop(e.name, None)
 
     def _relocate(self, e, new_data, payload, keep_raw, flush):
         """Grow a file by moving its payload into the largest free gap.
@@ -653,6 +720,7 @@ class Dave:
         self._compute_slots()
         if flush:
             self.backing.flush()
+        self._landed(e)
         return len(payload), e.slot
 
     def edit(self, name_or_entry, fn, **kw):

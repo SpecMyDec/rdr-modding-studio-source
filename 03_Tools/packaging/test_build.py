@@ -608,8 +608,10 @@ def t_leak_gate():
 def t_machine_gate():
     step(10, "the machine-path gate")
     world(config=DIRTY_CONFIG)
-    check(build.machine_gate("internal") is True,
-          "the internal build is allowed to carry them")
+    # 2.0.0: the Full (internal) edition is this fork's public download, so it
+    # is held to the same rule.
+    check(build.machine_gate("internal") is False,
+          "the Full (internal) build refuses them too")
     check(build.machine_gate("release") is False,
           "a drive-letter RDR-Modding literal fails the release build")
 

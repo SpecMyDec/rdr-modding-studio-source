@@ -51,17 +51,19 @@ PY = VENV_PY if os.path.isfile(VENV_PY) else sys.executable
 WEB = os.path.join(TOOLS, "web")
 MANIFEST = os.path.join(TOOLS, "features.json")
 
-VERSION = "1.4.0"
+VERSION = "2.0.0"
 APPNAME = "RDR Modding Studio"
 
 EDITIONS = {
     "release": dict(tag="release", label="Release",
                     zip="RDR-Modding-Studio-%s.zip" % VERSION,
                     blurb="The public build. This is the one to share."),
-    "internal": dict(tag="internal", label="Internal",
-                     zip="RDR-Modding-Studio-%s-internal.zip" % VERSION,
-                     blurb="Everything, including work that is not finished "
-                           "and not proven."),
+    # The edition this fork ships: every tool, the Data Editor and the
+    # Flash-screen / audio / animation work included.
+    "internal": dict(tag="internal", label="Full",
+                     zip="RDR-Modding-Studio-%s-full.zip" % VERSION,
+                     blurb="Every tool, including the ones still being "
+                           "proven. This is the one to share."),
 }
 
 # `\r?\n?` rather than `\n?`: stage_web reads with newline="" now, so a CRLF
@@ -801,19 +803,22 @@ def machine_gate(edition):
     them -- which is exactly why this survived a leak gate that walks the
     built tree.
     """
-    if edition != "release":
-        return True
+    # Both editions: the full one is the public download of this fork, so it
+    # must not carry the build machine's paths either.
     # Any drive-letter path into the project or emulator folders, and any
     # path through a real user's home folder (Public/Default are not one).
     bad = re.compile(r"""r?["'][A-Za-z]:[\\/]{1,2}(?:RDR-Modding|Emulation)"""
                      r"""|[Uu]sers[\\/]{1,2}(?!Public|Default|you\b)\w+[\\/]""")
     hits = []
+    files = []
     for base in (os.path.join(TOOLS, "rdrstudio"),
                  os.path.join(HERE, "rdrshell")):
-        for f in sorted(os.listdir(base)):
-            if not f.endswith(".py"):
-                continue
-            p = os.path.join(base, f)
+        for r, ds, fs in os.walk(base):
+            ds[:] = [d for d in ds if d != "__pycache__"]
+            files += [(os.path.relpath(os.path.join(r, f), base), os.path.join(r, f))
+                      for f in sorted(fs) if f.endswith(".py")]
+    for f, p in files:
+        if True:
             with open(p, encoding="utf-8", errors="replace") as fh:
                 for n, line in enumerate(fh, 1):
                     if line.lstrip().startswith("#"):

@@ -775,6 +775,71 @@
   table.vers tr:focus-within td.acts button{visibility:visible}
   /* View switches: one tab-strip style. A filled accent button meant
      "primary action" everywhere else. */
+  /* DISC > Data Editor */
+  #tab-dataeditor .de-folder{display:flex;gap:6px;align-items:center;padding:3px 10px;cursor:pointer;
+    font:var(--t-body);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #tab-dataeditor .de-folder:hover{background:var(--hover)}
+  #tab-dataeditor .de-folder.on{background:var(--selbg);color:var(--title)}
+  #tab-dataeditor .de-folder.drop, #tab-dataeditor #deFilesZone.drop{outline:2px dashed var(--blue);outline-offset:-2px}
+  #tab-dataeditor .de-dot{width:8px;height:8px;border-radius:50%;flex:none;background:transparent}
+  #tab-dataeditor .de-dot.pending{background:var(--rust)}
+  #tab-dataeditor .de-dot.built{background:var(--grn)}
+  #tab-dataeditor .de-inj{margin-left:auto;color:var(--blue);font-size:11px}
+  #tab-dataeditor #deTable{width:100%;border-collapse:collapse}
+  #tab-dataeditor #deTable td, #tab-dataeditor #deTable th{padding:3px 8px;text-align:left;border-bottom:1px solid var(--line)}
+  #tab-dataeditor #deTable td.num, #tab-dataeditor #deTable th.num{text-align:right}
+  #tab-dataeditor #deTable tr{cursor:pointer}
+  #tab-dataeditor #deTable tr.sel{background:var(--selbg)}
+  #tab-dataeditor .de-st.new, #tab-dataeditor .de-st.changed{color:var(--rust)}
+  #tab-dataeditor .de-st.built{color:var(--grn)}
+  #tab-dataeditor .de-st.removed, #tab-dataeditor .de-st.not-a-game-file{color:var(--warn)}
+  #tab-dataeditor.de-busy #deFilesZone{opacity:.7}
+  /* the RDR Data Editor app's layout, in the Studio's style */
+  #tab-dataeditor .de-topbar{flex-wrap:wrap;gap:4px}
+  #tab-dataeditor .de-topbar select{min-width:150px}
+  #tab-dataeditor .de-sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
+  #tab-dataeditor .de-help{padding:6px 12px 4px;font-weight:600;color:var(--title);line-height:1.45;border-bottom:1px solid var(--line)}
+  #tab-dataeditor .de-help span{font-weight:400;color:var(--dim-ink)}
+  #tab-dataeditor .de-buttons, #tab-dataeditor .de-masterbar{flex-wrap:wrap;gap:4px}
+  #tab-dataeditor .de-masterbar{border-top:none}
+  #tab-dataeditor .de-split{height:5px;flex:none;cursor:row-resize;background:var(--line);opacity:.55}
+  #tab-dataeditor .de-split:hover{opacity:1;background:var(--blue)}
+  #tab-dataeditor .de-status{border-top:1px solid var(--line);min-height:28px}
+  #tab-dataeditor .de-wbbar{flex-wrap:wrap;gap:4px}
+  #tab-dataeditor .de-wbbar.drop, #tab-dataeditor #deWbTree.drop{outline:2px dashed var(--blue);outline-offset:-2px}
+  #tab-dataeditor .de-wbrow{display:flex;gap:6px;align-items:center;padding:2px 10px;cursor:pointer;white-space:nowrap}
+  #tab-dataeditor .de-wbrow:hover{background:var(--hover)}
+  #tab-hudtext .de-wbrow{display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap}
+  #tab-hudtext .de-wbrow:hover{background:var(--hover)}
+  #tab-hudtext .de-wbrow.on{background:var(--selbg);color:var(--title)}
+  #tab-pck .de-wbrow{display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap}
+  #tab-pck .de-wbrow:hover{background:var(--hover)}
+  #tab-pck .de-wbrow.on{background:var(--selbg);color:var(--title)}
+  #tab-dataeditor .de-wbrow.on{background:var(--selbg);color:var(--title)}
+  #tab-dataeditor .de-wbrow.drop{outline:2px dashed var(--blue);outline-offset:-2px}
+  #tab-dataeditor .de-tw{width:12px;color:var(--dim-ink);flex:none}
+  #tab-dataeditor .de-ic{font-size:12px;flex:none}
+  #tab-dataeditor .de-mode{font-size:11px;padding:1px 6px}
+  #tab-dataeditor #deTable tr.dragging{opacity:.5}
+  .de-card{border:1px solid var(--line);border-radius:5px;padding:10px 12px;margin:0 0 12px;max-width:900px}
+  .de-card-title{font:var(--t-section);color:var(--title);margin-bottom:4px}
+  .de-setrow{display:flex;gap:8px;align-items:center;margin:5px 0}
+  .de-setlabel{width:190px;flex:none}
+  .de-ok{color:var(--grn);width:14px}
+  .de-bad{color:var(--rust);width:14px}
+  .de-menu{position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--line);border-radius:5px;
+    box-shadow:0 8px 28px rgba(0,0,0,.5);padding:4px 0;min-width:220px}
+  .de-menu-item{padding:5px 14px;cursor:pointer;white-space:nowrap}
+  .de-menu-item:hover{background:var(--selbg);color:var(--title)}
+  .de-menu-item.off{opacity:.45;cursor:default}
+  .de-menu-item.off:hover{background:none;color:inherit}
+  .de-menu-sep{height:1px;background:var(--line);margin:4px 0}
+  table.de-hud{width:100%;border-collapse:collapse}
+  table.de-hud th{position:sticky;top:0;background:var(--bg2);text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
+  table.de-hud td{padding:3px 8px;border-bottom:1px solid var(--line);vertical-align:top;cursor:pointer}
+  table.de-hud tr.sel{background:var(--selbg);color:var(--title)}
+  table.de-hud tr.sel2{background:var(--hover)}
+  #btnPlay.rebuildplay{background:#d9a441;color:#1b1406;border-color:#d9a441;font-weight:600}
   button.vtab{
     background:none; border:none; border-bottom:2px solid transparent;
     border-radius:0; color:var(--nav-idle); padding:4px 10px;
@@ -923,11 +988,14 @@ try {
          This is the way OUT -- mod file, patch or ISO -- and it sits beside
          Play because the two questions come together: does it work, and how
          do I hand it over. -->
+    <button id="hdrNewMod" title="Start a new mod: the current one is kept as a mod pack in your exports folder (Import mod brings it back), then the Data Editor's .dat folders and Workbench are emptied and the working disc is reset to stock">New mod…</button>
     <button id="hdrExport" class="primary" title="Get your mod out: mod pack, mod file, patch, or playable ISO">Build &amp; share…</button>
+    <button id="hdrImportPack" title="Import a mod pack (.zip from Build &amp; share): its files go on your working disc, its Data Editor files back into the .dat folders and Workbench">Import mod…</button>
+    <!-- Build: the changes waiting to go on the disc (queued rebuilds, Data Editor
+         mods not built yet). Greyed out when there are none. -->
+    <button id="btnBuild" disabled title="Nothing to build: every change is on the working disc">Build</button>
     <!-- @feature:emulator -->
     <button id="btnPlay" title="Start the game in PCSX2.">Play</button>
-    <button id="btnBoot"
-            title="Three-minute boot check in PCSX2. Details: Guides > Modding guide.">Boot test</button>
     <!-- @end:emulator -->
     <!-- Held apart from its neighbour on purpose. Every other pair in this bar
          sits 14px apart, and "Boot test" is a routine button, so the nuclear
@@ -1043,17 +1111,28 @@ try {
       <!-- @end:scripting_browser -->
     </span>
     <span class="ws" data-ws="BALANCE">
-      <span class="wslabel">Balance</span>
+      <span class="wslabel">Stats</span>
       <button data-tab="weapons" data-ws="BALANCE"
               title="Weapons, creatures, and settings search">Weapons &amp; stats</button>
+    </span>
+    <span class="ws" data-ws="TEXT">
+      <span class="wslabel">Text</span>
       <!-- @feature:strings_editor -->
-      <button data-tab="strings" data-ws="BALANCE"
+      <button data-tab="strings" data-ws="TEXT"
               title="Rewrite anything the game says">Text</button>
       <!-- @end:strings_editor -->
       <!-- @feature:csv_editor -->
-      <button data-tab="csv" data-ws="BALANCE"
+      <button data-tab="csv" data-ws="TEXT"
               title="Sound banks, shop stock, rosters, mission flow">Tables</button>
       <!-- @end:csv_editor -->
+      <button data-tab="hudtext" data-ws="TEXT"
+              title="For editing HUD Text: the game's text tables (.strtbl)">HUD text</button>
+      <button data-tab="pck" data-ws="TEXT"
+              title="The game's Flash screens (.pck): menus, journal pages, shops, popups, credits">Flash screens</button>
+      <!-- @feature:menu_edit -->
+      <button data-tab="menus" data-ws="TEXT"
+              title="The main menu and the in-game HUD">Menus</button>
+      <!-- @end:menu_edit -->
     </span>
     <span class="ws" data-ws="MEDIA">
       <span class="wslabel">Media</span>
@@ -1061,15 +1140,11 @@ try {
               title="Every spoken line and the sound-effect banks">Audio</button>
       <button data-tab="movies" data-ws="MEDIA"
               title="The cutscenes and the still screens">Cutscenes</button>
-      <!-- @feature:menu_edit -->
-      <button data-tab="menus" data-ws="MEDIA"
-              title="The main menu and the in-game HUD">Menus</button>
-      <!-- @end:menu_edit -->
     </span>
     <span class="ws" data-ws="DISC">
-      <span class="wslabel">Disc</span>
-      <button data-tab="text" data-ws="DISC"
-              title="Search the disc and edit any file">Files</button>
+      <span class="wslabel">Data Editor</span>
+      <button data-tab="dataeditor" data-ws="DISC"
+              title="The RDR Data Editor: keep changed game files in its mods folder, rebuild the .dat files they go in and put them on the working disc (undone only here)">Data Editor</button>
       <button data-tab="archives" data-ws="DISC"
               title="Browse archives and see where there is room">Archives</button>
     </span>
@@ -1137,6 +1212,13 @@ try {
         <div class="pad" id="lvlExportRow" style="padding-top:2px">
           <button id="btnLevelExport" style="width:100%"
                   title="Every area, textures included, zipped">Export whole level&hellip;</button>
+        </div>
+        <!-- A Showdown map's name and sub text in the Showdown menu (postermultiview.swui, swat.dat + front.dat). -->
+        <div class="pad" id="lvlNameRow" style="display:none;padding-top:2px">
+          <div class="dim" style="font-size:11px;margin-bottom:3px">Name in the Showdown menu</div>
+          <input id="lvlNameTitle" placeholder="name (The Ranch)" maxlength="40" style="width:100%;margin-bottom:4px;box-sizing:border-box">
+          <input id="lvlNameSub" placeholder="sub text (fertile land)" maxlength="40" style="width:100%;margin-bottom:4px;box-sizing:border-box">
+          <button id="lvlNameSave" style="width:100%" title="Both copies of the Showdown menu (in-game and the front end) get it; Build puts it on the disc">Save name</button>
         </div>
         <h2 id="areaHead" style="display:none">Areas in this archive</h2>
         <div class="pad" id="areaList" style="display:none;padding-top:5px"></div>
@@ -1431,6 +1513,31 @@ try {
 
     <!-- ------------------------------------------- text the game shows -->
     <!-- @feature:strings_editor -->
+    <!-- TEXT > HUD text: the game's text tables (.strtbl), opened in the Data
+         Editor's HUD text editor (web/dataeditor.js) -->
+    <section class="tab" id="tab-hudtext">
+      <div class="panel" style="width:380px">
+        <h2>Text tables <span class="tag" id="hudTally"></span></h2>
+        <div class="pad" style="padding-bottom:6px">
+          <input id="hudFilter" placeholder="filter tables…" style="width:100%">
+        </div>
+        <div class="scroll" id="hudList" style="flex:1"></div>
+      </div>
+      <div id="hudPane" style="flex:1;display:flex;flex-direction:column;min-width:0"></div>
+    </section>
+
+    <!-- TEXT > Flash screens: the .pck screens' text, edited in place (web/dataeditor.js, rdrstudio/pck.py) -->
+    <section class="tab" id="tab-pck">
+      <div class="panel" style="width:380px">
+        <h2>Flash screens <span class="tag" id="pckTally"></span></h2>
+        <div class="pad" style="padding-bottom:6px">
+          <input id="pckFilter" placeholder="filter screens…" style="width:100%">
+        </div>
+        <div class="scroll" id="pckList" style="flex:1"></div>
+      </div>
+      <div id="pckPane" style="flex:1;display:flex;flex-direction:column;min-width:0"></div>
+    </section>
+
     <section class="tab" id="tab-strings">
       <div style="flex:1; display:flex; flex-direction:column; min-width:0">
         <div class="bar">
@@ -1670,7 +1777,7 @@ try {
               <li>Pick the weapon on the left. Its model name shows above.</li>
               <li>Make the gun in Blender (small and simple), File &gt; Export &gt; Wavefront (.obj).</li>
               <li>Press <b>Choose .obj</b>. It is checked at once; then press <b>Import</b>.</li>
-              <li>Press <b>Boot test</b> (top bar).</li>
+              <li>Press <b>Play</b> (top bar) to see it in the game.</li>
             </ol>
             <div class="muted">Limits: the model must fit the space of the one it
               replaces (the Studio tells you). Many weapons share one model, so
@@ -1718,6 +1825,10 @@ try {
           <input id="crFilter" placeholder="filter creatures..." style="width:100%">
         </div>
         <div class="scroll" id="crList"></div>
+        <div class="pad"><button id="crAddChar" style="width:100%"
+             title="A new character slot: copies a character's files under a new code (its model, skeleton, damage, hit spots ...) into SWAT.DAT. Rebuilds SWAT.DAT to make room.">Add Character…</button>
+          <button id="crDelChar" class="ghost" style="width:100%;margin-top:6px" disabled
+             title="Delete the selected character from the working disc. Only characters you added: the game's own cannot be deleted.">Delete Character…</button></div>
       </div>
       <div style="flex:1; display:flex; flex-direction:column; min-width:0">
         <div class="bar">
@@ -1795,6 +1906,13 @@ try {
                apologies for a dropdown pre-filled with all 236 skeletons in
                the archive whether they fitted or not. -->
           <select id="animSkel" style="width:100%" disabled></select>
+          <div style="display:flex;gap:4px;margin-top:5px;align-items:center">
+            <span class="muted" style="font-size:11px">Preferred</span>
+            <input id="animPrefSkel" placeholder="none (e.g. gbw.skel)" style="flex:1;min-width:0;font-size:11px"
+                   title="Tried first on every clip: when it fits the clip it is the skeleton loaded (empty: whichever fits the clip best)">
+            <button id="animPrefSkelSet" class="ghost" style="font-size:11px;padding:2px 6px"
+                    title="Make the one picked above the preferred one">Use current</button>
+          </div>
           <div class="muted" id="animSkelNote"
                style="font-size:11px;margin-top:4px;line-height:1.5"></div>
         </div>
@@ -1805,6 +1923,13 @@ try {
         <h2>Character model</h2>
         <div class="pad">
           <select id="animModel" style="width:100%" disabled></select>
+          <div style="display:flex;gap:4px;margin-top:5px;align-items:center">
+            <span class="muted" style="font-size:11px">Preferred</span>
+            <input id="animPrefModel" placeholder="none (e.g. gbw)" style="flex:1;min-width:0;font-size:11px"
+                   title="Tried first on every clip: when it is offered for the clip it is the model loaded (empty: the clip owner character)">
+            <button id="animPrefModelSet" class="ghost" style="font-size:11px;padding:2px 6px"
+                    title="Make the one picked above the preferred one">Use current</button>
+          </div>
           <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
             <span class="muted" style="font-size:11px">Show</span>
             <select id="animShow" style="flex:1;font-size:11px" disabled>
@@ -1822,6 +1947,9 @@ try {
         <h2>Blender round trip</h2>
         <div class="pad">
           <button id="animExportBtn" style="width:100%" disabled>Export BVH…</button>
+          <button id="animExportGlbBtn" style="width:100%;margin-top:5px" disabled
+                  title="The clip on the character model shown, as one .glb: the model, its skeleton, its textures and the animation (Blender: File > Import > glTF 2.0)">
+            Export animation with current model…</button>
           <button id="animExportAllBtn" style="width:100%;margin-top:5px"
                   title="Every clip on the disc as .bvh, by archive and skeleton, with an index.csv">
             Export all animations…</button>
@@ -1911,6 +2039,8 @@ try {
         <div class="panel" style="width:280px">
           <h2>Banks</h2>
           <div class="pad" style="padding-bottom:4px">
+            <input id="sndFind" placeholder="find a sound (name or description)…" style="width:100%;margin-bottom:4px"
+                   title="Searches every bank's sound names and descriptions (e.g. scroll, ricochet, horse)">
             <input id="sndFilter" placeholder="filter banks…" style="width:100%">
           </div>
           <div class="scroll" id="sndBanks" style="flex:1;min-height:120px"></div>
@@ -1957,6 +2087,9 @@ try {
           <div class="bar">
             <span id="strInfo" class="muted" style="font-size:11px"></span>
             <span style="flex:1"></span>
+            <span id="strAdded" class="muted" style="font-size:11px"></span>
+            <button id="strAdd" style="font-size:12px" title="New streams for STREAMS.DAT: .stm files as they are, or .wav files (16-bit PCM, mono or stereo) encoded to .stm. They go in streams.dat's Data Editor folder; the next Build adds them. A name the disc already has replaces that stream; a new name plays only where something asks for it.">Add .stm / .wav…</button>
+            <button id="strCreate" style="font-size:12px" title="Make a .stm from any audio (.wav, .mp3, .flac, .ogg) or edit a .stm's loop: a waveform with loop start / end, played as the game will loop it">Create a stream…</button>
             <audio id="strPlayer" controls style="height:30px"></audio>
           </div>
           <div class="scroll" id="strBody" style="flex:1; padding:14px 20px"><div class="empty">Pick a group</div></div>
@@ -2236,6 +2369,116 @@ try {
     </section>
 
     <!-- PROJECT > Code Mods. The executable hooks behind one checklist and one Build button. -->
+    <!-- DISC > Data Editor (dataeditor.js, rdrstudio/dataeditor.py): the RDR Data Editor. Its mods folder is
+         rebuilt into whole .dat files that are injected into the working disc; undone only here. -->
+    <section class="tab" id="tab-dataeditor">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <!-- the RDR Data Editor app's top bar: its pages, and the saved Mods -->
+        <div class="bar de-topbar">
+          <b>Data Editor</b>
+          <button id="dePgMain" class="vtab on" title="Your mods folder: Master and a folder for each .dat, built into the working disc">Working disc</button>
+          <button id="dePgManual" class="vtab" title="Extract and build archives by hand">Manual .dat/.zip extracting/building</button>
+          <button id="dePgSettings" class="vtab" title="Where everything is">Settings</button>
+          <span class="de-sep"></span>
+          <span class="muted">Mod:</span>
+          <select id="deModBox" title="The saved Mod you are working on"></select>
+          <button id="deModSave" data-write="1" title="Save the mods folder and the Workbench as this Mod">Save</button>
+          <button id="deModSaveAs" data-write="1" title="Save the mods folder and the Workbench as a new Mod">Save As…</button>
+          <button id="deModLoad" data-write="1" title="Open one of your saved Mods (the current files go to the Recycle Bin; you are asked to save them first)">Load…</button>
+          <button id="deModDelete" data-write="1" class="ghost" title="Delete the saved Mod (to the Recycle Bin)">Delete</button>
+          <button id="deModExport" title="The whole Mod (Master, each .dat folder, the Master settings and the Workbench) as one .rdrmod file to share">Export Mod…</button>
+          <button id="deModImport" data-write="1" title="A .rdrmod file: its .dat folders into the mods folder, its Workbench into a new folder on the Workbench">Import Mod…</button>
+          <input id="deModImportInput" type="file" accept=".rdrmod,.zip" style="display:none">
+        </div>
+
+        <!-- ============================================== page: the working disc -->
+        <div id="dePageMain" style="flex:1;display:flex;flex-direction:column;min-height:0">
+          <div class="de-help">
+            Drop files into .dat folders to add them to the specified .dat file.<br>
+            <span>Master files: Replace only = just the .dat files that have a file of that name; Add to all = every level .dat, front.dat and swat.dat.</span>
+          </div>
+          <div class="bar de-buttons">
+            <button id="deBuild" data-write="1" class="primary" title="Rebuild the .dat files your mods go in and put them on the working disc">Build into working disc</button>
+            <span class="de-sep"></span>
+            <button id="deAddBtn" data-write="1" title="Add files to the selected folder (or drop them on the list or on a folder)">Add files…</button>
+            <button id="deFromGame" data-write="1" title="Copy the selected .dat's own files out of the working disc to change them">Add from game…</button>
+            <button id="deDelete" data-write="1" title="Delete the selected files (to the Recycle Bin). Delete key">Remove</button>
+            <button id="deDelNew" data-write="1" class="ghost" title="Delete all files new to the archive: the selected .dat folder's files that the archive has no file of the name of go to the Recycle Bin, so the folder only replaces the archive's own files">Delete new files</button>
+            <button id="deOpenFolder" class="ghost" title="Open the selected folder in Explorer">Open folder</button>
+            <button id="deRestore" data-write="1" class="ghost" title="Take your builds off the working disc: the archives go back to how they were before the Data Editor built them">Restore defaults…</button>
+            <button id="deConvert" title=".png images to the game's textures (.tex), see-through ones too (menu portraits, blood, dust, the book pages)">Convert images…</button>
+            <input id="deAddInput" type="file" multiple style="display:none">
+          </div>
+          <div class="bar de-masterbar">
+            <span class="muted">All Master files with game names:</span>
+            <button id="deAllReplace" data-write="1" title="Every Master file goes only into the .dat files that already have a file of its name">Replace only</button>
+            <button id="deAllAdd" data-write="1" title="Every Master file goes into every level .dat, front.dat and swat.dat (replacing a file of its name, else added)">Add to all</button>
+            <span id="deMasterCounts" class="muted"></span>
+            <span class="de-sep"></span>
+            <button id="deHud" title="For editing HUD Text">Edit HUD text…</button>
+            <button id="deExportDat" data-write="1" title="The selected .dat in full (every file of the game's, with your mods' files in place) copied to the Workbench, in a folder named after it">Export .dat to Workbench</button>
+            <button id="deExportZip" title="The selected .dat folder (your files for it) saved as a .zip in your exports folder, with a file inside saying which disc folder it belongs in (lvls_sng, lvls_m2, lvls_m4): Import .dat puts it back there by itself">Export .dat folder (.zip)</button>
+            <button id="deNewDat" data-write="1" title="A new level as new archives: a Showdown map (lvls_m2 + lvls_m4, with its menu row, unlock and thumbnail) or a single player level">New .dat…</button>
+            <button id="deImportBtn" data-write="1" title="Add a custom .dat (a built .dat file, or a folder of its files) to your mods: it becomes its .dat folder">Import .dat… ▾</button>
+            <input id="deImportInput" type="file" accept=".dat" multiple style="display:none">
+            <input id="deImportDirInput" type="file" webkitdirectory multiple style="display:none">
+            <input id="deImportZipInput" type="file" accept=".zip" multiple style="display:none">
+            <span style="flex:1"></span>
+            <span id="deSummary" class="muted"></span>
+          </div>
+          <div id="deUpper" style="flex:1;display:flex;min-height:120px">
+            <div class="panel" style="width:270px">
+              <div class="pad" style="padding-bottom:4px">
+                <input id="deFolderFilter" placeholder="filter folders…" style="width:100%">
+              </div>
+              <div class="scroll" id="deFolders"></div>
+              <div class="pad muted" id="deDisc" style="font:var(--t-meta)"></div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+              <div id="deFilesZone" class="scroll" style="flex:1;min-height:80px">
+                <table id="deTable"><thead><tr>
+                  <th>File</th><th>Status</th><th class="num">Size</th><th>Modified</th><th>Goes into</th><th>Master</th>
+                </tr></thead><tbody></tbody></table>
+                <div class="empty" id="deEmpty"></div>
+              </div>
+              <div class="de-split" id="deSplitEditor" title="Drag to resize"></div>
+              <div id="deViewer" style="height:220px;min-height:90px;display:flex;flex-direction:column"></div>
+            </div>
+          </div>
+          <div class="de-split" id="deSplitWb" title="Drag to resize"></div>
+          <!-- the Workbench: a table that holds files freely (never built) -->
+          <div id="deWb" style="height:210px;min-height:90px;display:flex;flex-direction:column">
+            <div class="bar de-wbbar" id="deWbBar" title="This table will hold files freely">
+              <b>Workbench</b>
+              <button id="deWbFolder" title="A new folder in the selected folder">Add New Folder</button>
+              <button id="deWbAdd" title="Add files to the selected folder (or drop files and folders here)">Add files…</button>
+              <button id="deWbRename" title="Rename the selected item (F2)">Rename</button>
+              <button id="deWbRemove" class="ghost" title="Delete the selected items (to the Recycle Bin). Delete key">Remove</button>
+              <button id="deWbToDat" data-write="1" title="Copy the selected Workbench files into the selected .dat folder (or drag them onto a folder)">Copy to .dat folder</button>
+              <button id="deWbOpen" class="ghost" title="Open the Workbench (or the selected item) in Explorer">Open in Explorer</button>
+              <input id="deWbAddInput" type="file" multiple style="display:none">
+              <span style="flex:1"></span>
+              <span class="muted" id="deWbInfo">This table will hold files freely</span>
+            </div>
+            <div class="scroll" id="deWbTree" tabindex="0" style="flex:1"></div>
+          </div>
+        </div>
+
+        <!-- ============================================== page: manual -->
+        <div id="dePageManual" class="scroll" style="display:none;flex:1;padding:14px 18px"></div>
+
+        <!-- ============================================== page: settings -->
+        <div id="dePageSettings" class="scroll" style="display:none;flex:1;padding:14px 18px"></div>
+
+        <!-- the status line and the log behind it -->
+        <div class="bar de-status">
+          <span id="deStatus" class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <span class="muted" style="margin-right:8px">Game: PS2</span>
+          <button id="deLogBtn" class="ghost" title="Everything the Data Editor did">Log</button>
+        </div>
+      </div>
+    </section>
+
     <section class="tab" id="tab-codemods">
       <div style="flex:1;display:flex;flex-direction:column;min-width:0">
         <div class="bar"><b>Code Mods</b><span class="muted" style="margin-left:10px">noclip &middot; freeze world &middot; camera lock &middot; slow-mo &middot; cheats menu, built into a copy of the game</span><span style="flex:1"></span><span id="cmBarSlot"></span></div>
@@ -2550,8 +2793,9 @@ try {
        light theme while its text went dark with everything else, which is
        the modal disappearing into itself. --bg2 is the panel colour and the
        stylesheet's own header already says a palette change is one block. -->
-  <div style="max-width:640px;margin:8vh auto 0;background:var(--bg2);
-       border:1px solid var(--line);border-radius:10px;padding:22px 26px">
+  <div style="max-width:640px;margin:5vh auto 0;background:var(--bg2);
+       border:1px solid var(--line);border-radius:10px;padding:22px 26px;
+       max-height:90vh;overflow-y:auto;box-sizing:border-box">
     <h2 style="margin:0 0 4px;font-size:17px">App setup</h2>
     <p class="dim" style="margin:0 0 16px;font-size:12px">
       The discs this Studio uses. Changing one restarts the app.</p>
@@ -2579,7 +2823,7 @@ try {
       </div>
       <div id="asKnown" style="margin:6px 0 0"></div>
 
-      <h3 style="font-size:13px;margin:16px 0 4px">PCSX2 (Play and Boot test)</h3>
+      <h3 style="font-size:13px;margin:16px 0 4px">PCSX2 (Play)</h3>
       <div class="mono dim" id="asPcsx2" style="word-break:break-all">&mdash;</div>
       <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
         <button id="asPickPcsx2">Choose&hellip;</button>
@@ -2587,6 +2831,14 @@ try {
         <button id="asClearPcsx2" class="ghost">Forget</button>
       </div>
       <div id="asPcsx2Note" class="dim" style="font-size:11px;margin-top:4px"></div>
+
+      <h3 style="font-size:13px;margin:16px 0 6px">Folders</h3>
+      <div id="asFolders"></div>
+      <div class="dim" style="font-size:11px">Changing a folder restarts the Studio; nothing is moved for you.</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asOpenWorking" class="ghost" style="font-size:11px">Open working disc folder</button>
+        <button id="asOpenVanilla" class="ghost" style="font-size:11px">Open original disc folder</button>
+      </div>
     </div>
 
     <!-- Appearance is app setup too, and unlike the disc paths it works in a
@@ -2616,6 +2868,19 @@ try {
            style="font-size:11px;margin-top:8px;line-height:1.5"></div>
       <div class="bar" style="display:flex;gap:8px;margin-top:8px">
         <button id="asLookReset" class="ghost">Back to the stock look</button>
+      </div>
+    </div>
+    <div id="asProfiles" style="border-top:1px solid var(--line);margin-top:18px;padding-top:12px">
+      <h3 style="font-size:13px;margin:0 0 4px">Profiles</h3>
+      <div class="dim" style="font-size:11px;line-height:1.5">A profile keeps every preference together under a name:
+        the theme and accent, the level editor's viewport and view settings (X-ray, grid, orbit / fly, world and render
+        modes, hidden box types, the output mode), game lighting, and the panels' remembered choices. Load one to switch
+        to it; export it to take it to another computer.</div>
+      <div id="asProfileList" style="margin:8px 0;display:flex;flex-direction:column;gap:4px"></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="asProfileName" placeholder="profile name" style="flex:1;min-width:140px">
+        <button id="asProfileSave">Save current as profile</button>
+        <button id="asProfileImport" class="ghost">Import…</button>
       </div>
     </div>
 

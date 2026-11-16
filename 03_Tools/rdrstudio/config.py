@@ -41,6 +41,10 @@ MODS = os.path.join(ROOT, "02_Modded", "mods")
 # Patches and ISO copies made by Export. The desktop app points this at
 # Documents\RDR Mods\exports (rdrshell/server.py).
 EXPORTS = os.path.join(ROOT, "02_Modded", "exports")
+# DISC > Data Editor's folder (mods, workbench, bases, the rebuild queue).
+# Empty: `data_editor` beside the working disc. Set by App setup (settings.json
+# "data_editor_dir") in the desktop app.
+DATA_EDITOR = os.environ.get("RDR_DATA_EDITOR", "")
 
 
 def _settings_file():

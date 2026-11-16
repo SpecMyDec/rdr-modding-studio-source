@@ -443,6 +443,17 @@ function wireResetToStock() {
         inp.placeholder = 'Type RESET';
         inp.style.cssText = 'width:160px;margin-top:6px';
         host.append(inp);
+        // the Data Editor's own mod files (.pck, .dat folder files): else the next Build puts them back
+        const cm = el('input'); cm.type = 'checkbox'; cm.checked = true;
+        const cml = el('label');
+        cml.style.cssText = 'display:flex;gap:6px;align-items:flex-start;margin-top:8px;max-width:440px';
+        cml.append(cm, el('span', null, 'Also take the Data Editor\'s mod files out (the files put in its .dat folders, '
+          + 'e.g. edited Flash screens) and the editors\' working copies (Workbench: Flash screens, HUD text), so the '
+          + 'Studio shows the stock ones again. They are kept as a Saved Mod "Before reset ..." first. Left in, the '
+          + 'next Build or Play puts the mod files back on the disc.'));
+        host.append(cml);
+        window.__resetClearMods = true;
+        cm.onchange = () => { window.__resetClearMods = cm.checked; };
         inp.oninput = () => {
           const go = sheetEl.querySelector('#xferGo');
           go.disabled = inp.value.trim().toUpperCase() !== 'RESET';

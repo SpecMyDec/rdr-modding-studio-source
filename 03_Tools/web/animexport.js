@@ -8,6 +8,7 @@
 // archive, watch it run, cancel it, read the result.
 
 import { call, el, renderProblem } from './transfer.js';
+import { bakeClipGlb, decodeAnim, parseSkeleton } from './anim3d.js';
 
 let A = null;
 let timer = null;
@@ -38,6 +39,11 @@ function build() {
   const form = el('div');
   form.id = 'animAllForm';
   form.innerHTML = `
+    <div class="field"><label>Export as</label>
+      <select id="animAllMode" style="width:100%">
+        <option value="bvh">.bvh — the skeleton only</option>
+        <option value="model">.glb — with the current model</option></select>
+      <div id="animAllModeNote" class="muted" style="font-size:11px;margin-top:3px"></div></div>
     <div class="field"><label>Which clips</label>
       <select id="animAllArc" style="width:100%"></select></div>
     <div class="field"><label>Folder name</label>
@@ -72,6 +78,7 @@ function build() {
   cancel.style.display = 'none';
   cancel.onclick = async () => {
     cancel.disabled = true;
+    if (glbRun) { glbRun.cancel = true; return; }
     await call('job_cancel', 'POST', {});
   };
   const open = el('button', null, 'Open exports folder');
@@ -111,8 +118,109 @@ async function open() {
       + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes());
   }
   $('#animAllWhere').textContent = 'Saved under ' + r.folder;
+  modeNote();
+  $('#animAllMode').onchange = modeNote;
   // A run may already be going (dialog closed and reopened).
   poll(true);
+}
+
+// ---- .glb with the current model ------------------------------------------
+//
+// Done here in the page, not by the server's batch: posing the skinned model is
+// the viewer's code (anim3d.js), so each clip is baked with it -- bakeClipGlb,
+// the same writer as "Export animation with current model" -- and handed to the
+// server to save. Every clip that plays on the skeleton the model is on (the
+// engine's rule: the same bone count, or one either side) goes in
+// animations/<model>.anim/, one <clip>.glb each, with an index.csv.
+
+let glbRun = null;
+
+function modeNote() {
+  const st = A.animModelState && A.animModelState();
+  const note = $('#animAllModeNote');
+  const model = $('#animAllMode').value === 'model';
+  $('#animAllName').disabled = model;
+  $('#animAllEuler').disabled = model;
+  if (!model) { note.textContent = ''; return; }
+  note.textContent = st
+    ? `${st.stem} on ${st.skelName}: every clip that plays on that skeleton, in a folder "${st.stem}.anim". `
+      + `The rotation order is the viewer's (${st.order}).`
+    : 'Load a clip and pick a character model in the Animations panel first.';
+}
+
+async function startGlb() {
+  const st = A.animModelState && A.animModelState();
+  if (!st) return A.toast('Load a clip and pick a character model first.', 'bad');
+  const nbones = parseSkeleton(st.skelText).length;
+  const folder = st.stem + '.anim';
+  const res = $('#animAllResult');
+  res.innerHTML = '';
+  // the clips: one archive, or every archive the info lists
+  const info = await call('anims_export_info', 'GET');
+  if (!info.ok) return renderProblem(res, info.problem);
+  const arcs = $('#animAllArc').value ? [$('#animAllArc').value] : info.archives.map((a) => a.archive);
+  glbRun = { cancel: false };
+  const run = glbRun;
+  busy(true);
+  const text = (t) => { $('#animAllText').textContent = t; };
+  text('Listing the clips…');
+  const clips = [];
+  for (const arc of arcs) {
+    try {
+      const t = await A.api(`toc?archive=${encodeURIComponent(arc)}&ext=anim&limit=20000`);
+      for (const f of (t.rows || t.files || t || [])) clips.push([arc, f.name || f]);
+    } catch { /* an archive that does not list: skipped */ }
+  }
+  // the model's textures, once
+  const pngs = {};
+  for (const g of st.rig.groups || []) {
+    if (g.texture === null || g.texture === undefined || g.texture in pngs) continue;
+    try { pngs[g.texture] = new Uint8Array(await (await fetch(st.texUrl(g.texture))).arrayBuffer()); }
+    catch { pngs[g.texture] = null; }
+  }
+  const seen = new Set();
+  const rows = [['clip', 'archive', 'keys', 'bones', 'result']];
+  let done = 0, wrote = 0, skipped = 0, failed = 0, outDir = '';
+  const t0 = performance.now();
+  for (const [arc, clip] of clips) {
+    if (run.cancel) break;
+    done++;
+    $('#animAllBar').style.width = Math.round(100 * done / clips.length) + '%';
+    text(`${done} / ${clips.length} clips · ${wrote} written · ${arc} ${clip}`);
+    if (seen.has(clip.toLowerCase())) { skipped++; continue; }    // the same clip in another archive
+    let buf;
+    try {
+      buf = await (await fetch(`/api/file.bin?archive=${encodeURIComponent(arc)}&name=${encodeURIComponent(clip)}`)).arrayBuffer();
+    } catch (e) { failed++; rows.push([clip, arc, '', '', 'not read: ' + e.message]); continue; }
+    let a;
+    try { a = decodeAnim(buf); } catch (e) { failed++; rows.push([clip, arc, '', '', 'not decoded: ' + e.message]); continue; }
+    if (Math.abs(a.bones - nbones) > 1) { skipped++; continue; }   // another skeleton's clip
+    try {
+      const r = bakeClipGlb({ animBuf: buf, skelText: st.skelText, rig: st.rig, pngs, order: st.order,
+                              retarget: st.retarget, clipName: clip });
+      let bin = '';
+      for (let i = 0; i < r.bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, r.bytes.subarray(i, i + 0x8000));
+      const sv = await call('anim_glb_save', 'POST', { folder, name: clip.replace(/\.anim$/i, '') + '.glb', data: btoa(bin) });
+      if (!sv.ok) throw new Error((sv.problem && sv.problem.message) || 'not saved');
+      outDir = sv.folder || outDir;
+      seen.add(clip.toLowerCase());
+      wrote++;
+      rows.push([clip, arc, a.keys, a.bones, 'ok']);
+    } catch (e) { failed++; rows.push([clip, arc, a.keys, a.bones, String(e.message || e)]); }
+  }
+  const cell = (v) => '"' + String(v).split('"').join('""') + '"';
+  const csv = rows.map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n';
+  const idx = await call('anim_glb_save', 'POST', { folder, name: 'index.csv', text: csv });
+  if (idx.ok) outDir = idx.folder || outDir;
+  busy(false);
+  const secs = Math.round((performance.now() - t0) / 1000);
+  res.innerHTML = (run.cancel ? '<b style="color:var(--warn)">Cancelled.</b> ' : '<b style="color:var(--grn)">Done.</b> ')
+    + `${wrote} clip(s) on ${esc(st.stem)} exported as .glb in ${secs}s`
+    + (skipped ? ` (${skipped} skipped: another skeleton's, or the same clip in another archive)` : '') + '.'
+    + `<br><span class="mono" style="word-break:break-all">${esc(outDir)}</span>`
+    + '<br><span class="muted">Blender: File &gt; Import &gt; glTF 2.0. index.csv lists every clip.</span>'
+    + (failed ? `<br><span style="color:var(--warn)">${failed} clip(s) could not be exported (in index.csv with the reason).</span>` : '');
+  glbRun = null;
 }
 
 function close() {
@@ -121,6 +229,7 @@ function close() {
 }
 
 async function start() {
+  if ($('#animAllMode').value === 'model') return startGlb();
   const arc = $('#animAllArc').value;
   const body = { folder: $('#animAllName').value.trim(),
     euler: $('#animAllEuler').value };

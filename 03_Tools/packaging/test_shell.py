@@ -250,7 +250,7 @@ def main():
     body, code, ms = get("api/archives")
     arcs = json.loads(body)
     n = len(arcs.get("archives", arcs) if isinstance(arcs, dict) else arcs)
-    check(code == 200 and n == 66, "GET api/archives lists 66 archives",
+    check(code == 200 and isinstance(n, int) and n >= 66, "GET api/archives lists the game's 66 archives (or more)",
           "%.0f ms" % (ms * 1000))
 
     body, code, ms = get("api/levels")

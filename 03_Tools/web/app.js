@@ -20,6 +20,53 @@ function setOffline(on) {
   if (b) b.classList.toggle('on', on);
 }
 
+// An edit with no room in its slot is queued for its archive's rebuild, which
+// happens on the next Play ("Rebuild and play"). The server says so on the
+// response (X-RDR-Rebuild-Queued), whichever tab or module made the edit.
+{
+  const _fetch = window.fetch.bind(window);
+  window.fetch = async (...args) => {
+    const r = await _fetch(...args);
+    try {
+      const q = r.headers.get('X-RDR-Rebuild-Queued');
+      if (q) setTimeout(() => rebuildQueued(q.split(',').filter(Boolean)), 0);
+    } catch { /* never in the way of the call */ }
+    return r;
+  };
+}
+
+let rebuildNoteTimer = null;
+function rebuildQueued(archives) {
+  let n = document.getElementById('rebuildNote');
+  if (!n) {
+    n = document.createElement('div');
+    n.id = 'rebuildNote';
+    n.setAttribute('role', 'alert');
+    n.style.cssText = 'position:fixed;left:50%;top:58px;transform:translateX(-50%);z-index:95;max-width:620px;'
+      + 'background:var(--bg2);border:1px solid #d9a441;border-left:5px solid #d9a441;border-radius:8px;'
+      + 'padding:10px 34px 10px 14px;font-size:12.5px;box-shadow:0 6px 24px rgba(0,0,0,.45);color:var(--fg,inherit)';
+    const x = document.createElement('button');
+    x.className = 'ghost';
+    x.textContent = '×';
+    x.title = 'Dismiss';
+    x.style.cssText = 'position:absolute;right:6px;top:4px;font-size:15px;padding:0 6px';
+    x.onclick = () => { n.style.display = 'none'; };
+    const t = document.createElement('div');
+    t.id = 'rebuildNoteText';
+    n.append(t, x);
+    document.body.append(n);
+  }
+  const names = archives.map((a) => a.split(/[\\/]/).pop()).join(', ');
+  n.querySelector('#rebuildNoteText').textContent = (archives.length === 1
+    ? `${names} has been updated and will rebuild on next launch.`
+    : `${names} have been updated and will rebuild on next launch.`)
+    + ' The change needs more room than its old space; keep editing, and Rebuild and play puts every queued change on the disc in one go.';
+  n.style.display = 'block';
+  clearTimeout(rebuildNoteTimer);
+  rebuildNoteTimer = setTimeout(() => { n.style.display = 'none'; }, 12000);
+  if (typeof refreshDiscState === 'function') refreshDiscState();
+}
+
 const api = async (route, opts) => {
   let r;
   try {
@@ -116,6 +163,14 @@ function applyPrefs(s) {
 
   // Game lighting. `setEnvTint` reads `$('#envTint').checked` rather than a
   // variable, so for these the DOM IS the state and has to be set too.
+  // Animations: the preferred skeleton / model (the panel reads them through the localStorage mirror)
+  for (const [key, local, id] of [['animPrefSkel', 'rdr.anim.prefSkel', '#animPrefSkel'],
+                                  ['animPrefModel', 'rdr.anim.prefModel', '#animPrefModel']]) {
+    if (typeof s[key] !== 'string') continue;
+    mirror(local, s[key]);
+    const inp = $(id);
+    if (inp) inp.value = s[key];
+  }
   bakedLight = bool('bakedLight', bakedLight);
   showSecondPass = bool('secondPass', showSecondPass);
   for (const [id, on] of [['#envTint', bool('envTint', true)],
@@ -185,6 +240,34 @@ async function saveFile(url, filename) {
   a.href = href; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(href), 30000);
   return true;
+}
+
+// A character mesh's materials: one per texture of its bundle, each on the
+// triangles that texture covers (groups: [texture index, first triangle,
+// count] from the server). Without the ranges, the whole figure got texture 0
+// -- right only for single-texture bundles; a custom model with a texture per
+// piece of clothing came out as the holes of its first texture's alpha.
+function characterMaterials(geo, groups, urlFor) {
+  const mats = [], slotOf = new Map();
+  const matFor = (slot) => {
+    const k = slot == null ? 0 : slot;
+    if (!slotOf.has(k)) {
+      const tex = new THREE.TextureLoader().load(urlFor(k));
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.flipY = false;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      slotOf.set(k, mats.length);
+      mats.push(new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, alphaTest: 0.35 }));
+    }
+    return slotOf.get(k);
+  };
+  if (groups && groups.length) {
+    geo.clearGroups();
+    for (const [slot, start, count] of groups) geo.addGroup(start * 3, count * 3, matFor(slot));
+    return mats;
+  }
+  matFor(0);
+  return mats[0];
 }
 
 let toastTimer = null;
@@ -1186,6 +1269,7 @@ function buildLevel(data, keepView) {
   loadGen += 1;
   applyTileOrigins(data);
   level = data;
+  refreshLevelName();
   chunkUid = uidChunk = null;   // rebuilt lazily for the new level
   for (const g of Object.values(groups)) {
     while (g.children.length) {
@@ -2278,14 +2362,8 @@ async function loadCast(archive) {
         geo.setAttribute('uv', new THREE.Float32BufferAttribute(c.model.uvs, 2));
       geo.setIndex(c.model.indices);
       geo.computeVertexNormals();
-      const url = `/api/character.png?archive=${encodeURIComponent(archive)}`
-        + `&name=${encodeURIComponent(c.file)}&i=0`;
-      const tex = new THREE.TextureLoader().load(url);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.flipY = false;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      byType.set(c.type, { geo, mat: new THREE.MeshBasicMaterial({
-        map: tex, side: THREE.DoubleSide, transparent: true, alphaTest: 0.35 }) });
+      byType.set(c.type, { geo, mat: characterMaterials(geo, c.model.groups, (i) =>
+        `/api/character.png?archive=${encodeURIComponent(archive)}&name=${encodeURIComponent(c.file)}&i=${i}`) });
     }
 
     let placed = 0, spawns = 0;
@@ -2761,7 +2839,7 @@ function select(uid, add = false) {
   // No separate collision entity: a shell that belongs to a model IS that
   // model. Clicking one (Collision pick filter, or the layer) selects the
   // model, whose panel carries the solid / walk-through switch.
-  if (uid != null) {
+  if (uid != null && !collisionAlone) {
     const bn = nodeOf(uid);
     if (bn && bn.kind === 'bound' && bn.linked !== undefined && bn.linked !== null
         && nodeOf(bn.linked)) uid = bn.linked;
@@ -3117,9 +3195,13 @@ function pushChange(uid, change) {
 // was wrong -- an automatic follow that is sometimes wrong surprises more
 // than it helps. Tick "move a building with its collision" to opt in.
 let linkCollision = false;  // literal kept = settings DEFAULTS; forced true at load (see settings loader)
+// "Edit collision on its own" (a model's Collision panel): a shell can be
+// selected and moved by itself, and moving a model leaves its shell where it
+// is. It stays on until unticked.
+let collisionAlone = false;
 
 function withLinkedCollision(changes) {
-  if (!linkCollision || !level) return changes;
+  if (!linkCollision || !level || collisionAlone) return changes;
   const have = new Set(changes.map((c) => c.uid));
   const extra = [];
   for (const c of changes) {
@@ -3176,7 +3258,7 @@ async function pushChanges(changes, label) {
   changes = changes.map((c) => (c.pos ? { ...c, pos: unoffset(c.uid, c.pos) } : c));
   const payload = { archive: level.archive, manifest: level.manifest,
                     area: level.area, changes, label, grow: allowGrow,
-                    set: moveAsSet };
+                    set: moveAsSet && !collisionAlone, alone: collisionAlone };
   try {
     // ONE round trip. There used to be a dry POST first, but the server runs
     // the identical preview at the head of the real call and refuses with the
@@ -4381,7 +4463,81 @@ function renderCollisionSection(box, n) {
       .catch(() => { line.textContent = 'No linked collision to change here.'; });
   }
   sec.append(line);
+  // Collision on its own: select a shell and move it without its model (and
+  // the model without its shell). The Collision view must be on to click one.
+  const alone = el('label');
+  alone.style.cssText = 'display:flex;gap:6px;align-items:flex-start;font-size:11px;margin-top:6px;cursor:pointer';
+  const acb = el('input'); acb.type = 'checkbox'; acb.checked = collisionAlone;
+  acb.onchange = () => {
+    collisionAlone = acb.checked;
+    toast(collisionAlone
+      ? 'Editing collision on its own: click a collision shell (Collision view on) to select and move it by itself. Models move without their shells.'
+      : 'Collision moves with its model again.', 'good');
+    if (collisionAlone && n.kind !== 'bound' && hasPartner && shell) select(shell.uid);
+  };
+  alone.append(acb, el('span', null, 'Edit collision on its own (select and move a collision shell by itself)'));
+  sec.append(alone);
+  const add = el('button', null, 'Add collision box…');
+  add.style.cssText = 'font-size:11px;margin-top:6px;width:100%';
+  add.title = 'A new solid box: around this object by default, or anywhere you type. A new collision shell of its own.';
+  add.onclick = () => addCollisionBoxDialog(n);
+  sec.append(add);
   box.append(sec);
+}
+
+// A new collision box anywhere in the level (server: collision_add). Starts
+// around the selected object's drawn extent; every number can be changed.
+function addCollisionBoxDialog(n) {
+  const obj = meshes.get(n.uid);
+  let lo = [-1, 0, -1], hi = [1, 2, 1];
+  if (obj) {
+    const b = new THREE.Box3().setFromObject(obj);
+    if (!b.isEmpty()) { lo = b.min.toArray(); hi = b.max.toArray(); }
+  } else if (n.pos) { lo = [n.pos[0] - 1, n.pos[1], n.pos[2] - 1]; hi = [n.pos[0] + 1, n.pos[1] + 2, n.pos[2] + 1]; }
+  const back = el('div');
+  back.style.cssText = 'position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
+  const dlg = el('div');
+  dlg.style.cssText = 'width:min(460px,94vw);background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:14px 16px';
+  dlg.append(el('div', null, 'Add collision box'));
+  dlg.firstChild.style.cssText = 'font-size:14px;color:var(--title);margin-bottom:8px';
+  const grid = el('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:70px repeat(3,1fr);gap:6px;align-items:center;font-size:12px';
+  const num = (v) => { const i = el('input'); i.type = 'number'; i.step = '0.1'; i.value = (+v).toFixed(2); i.style.width = '100%'; return i; };
+  const c = lo.map((v, i) => (v + hi[i]) / 2), sz = lo.map((v, i) => Math.max(0.25, hi[i] - v));
+  const ci = c.map(num), si = sz.map(num);
+  grid.append(el('span'), el('span', 'muted', 'X'), el('span', 'muted', 'Y (up)'), el('span', 'muted', 'Z'));
+  grid.append(el('span', 'muted', 'Centre'), ...ci, el('span', 'muted', 'Size'), ...si);
+  const nm = el('input'); nm.value = String(n.name || 'custom').replace(/^(zone|bound)_/i, '').replace(/(_\d+)+$/, '');
+  nm.style.width = '100%';
+  const solid = el('input'); solid.type = 'checkbox'; solid.checked = true;
+  const sl = el('label'); sl.style.fontSize = '12px'; sl.append(solid, el('span', null, ' Solid (walk-through when off: still stops bullets and the camera)'));
+  const note = el('div', 'muted'); note.style.cssText = 'font-size:11px;margin-top:8px';
+  note.textContent = 'Starts around the selected object. Named bound_<name>_NN: a name matching a model (e.g. ppear01) ties it to that model, so it moves with it. Ctrl+Z undoes it.';
+  const nrow = el('div'); nrow.style.cssText = 'display:grid;grid-template-columns:70px 1fr;gap:6px;align-items:center;margin-top:8px;font-size:12px';
+  nrow.append(el('span', 'muted', 'Name'), nm);
+  const bar = el('div'); bar.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px';
+  const cancel = el('button', null, 'Cancel'); const ok = el('button', 'primary', 'Add');
+  cancel.onclick = () => back.remove();
+  ok.onclick = async () => {
+    const cc = ci.map((i) => +i.value), ss = si.map((i) => Math.max(0.25, +i.value));
+    const body = { archive: level.archive, manifest: level.manifest, area: level.area,
+                   lo: cc.map((v, i) => v - ss[i] / 2), hi: cc.map((v, i) => v + ss[i] / 2),
+                   name: nm.value.trim() || 'custom', solid: solid.checked };
+    ok.disabled = true;
+    try {
+      const r = await post('collision_add', body);
+      if (r.ok === false) throw new Error(r.error_text);
+      toast(`Added ${r.name}` + (r.rebuild ? ' (the level is rebuilt to make room on the next Rebuild and play)' : '') + '. Ctrl+Z undoes it.', 'good');
+      back.remove();
+      await refreshHistory();
+      await reloadLevel(true, true);
+    } catch (e) { ok.disabled = false; toast(e.message, 'bad'); }
+  };
+  bar.append(cancel, ok);
+  dlg.append(grid, nrow, el('div'), sl, note, bar);
+  back.append(dlg);
+  back.addEventListener('mousedown', (e) => { if (e.target === back) back.remove(); });
+  document.body.append(back);
 }
 
 function renderShapeControls(box, n) {
@@ -4577,7 +4733,7 @@ function shapeControlsForChunk(box, chunk) {
       'Reshape it. Keep it roughly the same size and in the same place.',
       'Export from Blender: File > Export > Wavefront (.obj).',
       'Press "Import custom model" and choose that file.',
-      'Press Boot test (top bar) to see it in the game.',
+      'Press Play (top bar) to see it in the game.',
     ]) ol.append(el('li', '', t));
     const lim = el('div', 'muted');
     lim.textContent = 'Limits: the new model must be about as small as the '
@@ -5491,18 +5647,28 @@ async function openMovie(m) {
 // to index the same way or ▶ plays the wrong clip -- they did not, and it did.
 let sndBanks = [];
 let sndBank = null;
+// The banks organised: grouped by what their definition (snd_<n>.csv) says they are -- Game and system, Menus,
+// Characters, Levels -- each by its title, and their sounds by the names the definitions give
+// (dataeditor_more.sound_catalog / sound_names / sound_search).
+let sndCatalog = null;
+const sndOpen = new Set(['Game and system', 'Menus']);
+const sndCase = {};                     // lower-case bank name -> its name in BANKS.DAT
 
 async function initAudioTab() {
   if (sndBanks.length) return;
   try {
     const r = await api('sounds');
     sndBanks = r.banks || [];
+    for (const n of sndBanks) sndCase[n.toLowerCase()] = n;
   } catch (e) {
     $('#sndBanks').innerHTML = '';
     $('#sndBanks').append(el('div', 'pad muted', 'Could not list banks: ' + e.message));
     return;
   }
+  try { sndCatalog = await api('de_x_sound_catalog'); } catch (e) { sndCatalog = null; }
   $('#sndFilter').oninput = renderSndBanks;
+  let findTimer = null;
+  $('#sndFind').oninput = () => { clearTimeout(findTimer); findTimer = setTimeout(findSounds, 250); };
   $('#sndRate').onchange = () => { if (sndBank) loadBank(sndBank); };
   renderSndBanks();
 }
@@ -5511,14 +5677,77 @@ function renderSndBanks() {
   const box = $('#sndBanks');
   const f = ($('#sndFilter').value || '').toLowerCase();
   box.innerHTML = '';
-  const shown = sndBanks.filter((n) => !f || n.toLowerCase().includes(f));
-  if (!shown.length) return box.append(el('div', 'pad muted', 'No bank matches.'));
-  for (const n of shown) {
-    const row = el('div', 'row' + (n === sndBank ? ' sel' : ''));
-    row.append(el('span', 'nm', n.replace(/\.bd$/i, '')));
-    row.onclick = () => loadBank(n);
-    box.append(row);
+  if (!sndCatalog) {
+    const shown = sndBanks.filter((n) => !f || n.toLowerCase().includes(f));
+    if (!shown.length) return box.append(el('div', 'pad muted', 'No bank matches.'));
+    for (const n of shown) {
+      const row = el('div', 'row' + (n === sndBank ? ' sel' : ''));
+      row.append(el('span', 'nm', n.replace(/\.bd$/i, '')));
+      row.onclick = () => loadBank(n);
+      box.append(row);
+    }
+    return;
   }
+  let any = false;
+  for (const g of sndCatalog.groups) {
+    const banks = g.banks.filter((b) => !f || (b.title + ' ' + b.bd + ' ' + b.full).toLowerCase().includes(f));
+    if (!banks.length) continue;
+    any = true;
+    const open = f || sndOpen.has(g.title);
+    const head = el('div', 'row');
+    head.style.cssText = 'font-weight:600;cursor:pointer';
+    head.textContent = (open ? '▾ ' : '▸ ') + g.title + ' (' + banks.length + ')';
+    head.onclick = () => { if (sndOpen.has(g.title)) sndOpen.delete(g.title); else sndOpen.add(g.title); renderSndBanks(); };
+    box.append(head);
+    if (!open) continue;
+    for (const b of banks) {
+      const n = sndCase[b.bd] || b.bd;
+      const row = el('div', 'row' + (n === sndBank ? ' sel' : ''));
+      row.style.paddingLeft = '18px';
+      row.title = (b.full || b.title) + ' — ' + b.bd + (b.named ? ` (${b.named} named sounds)` : ' (no names in its definition)');
+      const t = el('span', 'nm', b.title); t.style.flex = '1';
+      row.append(t, el('span', 'muted', b.bd.replace(/\.bd$/i, '')));
+      row.style.display = 'flex'; row.style.gap = '6px';
+      row.onclick = () => loadBank(n);
+      box.append(row);
+    }
+  }
+  if (!any) box.append(el('div', 'pad muted', 'No bank matches.'));
+}
+
+// every named sound of every bank that has the words typed
+async function findSounds() {
+  const q = ($('#sndFind').value || '').trim();
+  const list = $('#sndList');
+  if (q.length < 2) { if (sndBank) loadBank(sndBank); else list.innerHTML = '<div class="empty">Pick a bank</div>'; return; }
+  let r;
+  try { r = await api('de_x_sound_search?q=' + encodeURIComponent(q)); } catch (e) { list.innerHTML = ''; return list.append(el('div', 'pad muted', 'Search failed: ' + e.message)); }
+  $('#sndInfo').textContent = `${r.results.length}${r.results.length >= 400 ? '+' : ''} sound(s) named or described "${q}"`;
+  list.innerHTML = '';
+  if (!r.results.length) return list.append(el('div', 'pad muted', 'No named sound matches.'));
+  const t = el('table');
+  t.style.cssText = 'width:100%;font-size:12px';
+  for (const s of r.results) {
+    const bank = sndCase[s.bd] || s.bd;
+    const url = `/api/sound_wav?name=${encodeURIComponent(bank)}&index=${s.index}`;
+    const tr = el('tr');
+    const play = el('button', '', '▶');
+    play.style.cssText = 'font-size:11px;padding:1px 7px';
+    play.onclick = () => { const p = $('#sndPlayer'); p.src = url; p.play().catch(() => {}); };
+    const nm = el('td'); nm.append(el('b', null, s.name));
+    if (s.note) nm.append(el('div', 'muted', s.note));
+    const bk = el('a', 'nm', s.bank + ' · ' + s.bd.replace(/\.bd$/i, '') + ' #' + s.index);
+    bk.style.cssText = 'font-size:11px;cursor:pointer';
+    bk.title = 'Open this bank';
+    bk.onclick = () => { $('#sndFind').value = ''; loadBank(bank); };
+    const dl = el('a', 'nm', 'save'); dl.href = url; dl.download = s.name + '.wav'; dl.style.cssText = 'font-size:11px;cursor:pointer';
+    const rep = el('a', 'nm', 'replace'); rep.style.cssText = 'font-size:11px;cursor:pointer';
+    rep.onclick = () => replaceSound(bank, { index: s.index });
+    const td = (x) => { const d = el('td'); d.append(x); return d; };
+    tr.append(td(play), nm, td(bk), td(dl), td(rep));
+    t.append(tr);
+  }
+  list.append(t);
 }
 
 async function loadBank(name) {
@@ -5539,7 +5768,9 @@ async function loadBank(name) {
     return list.append(el('div', 'pad muted', r.error || 'Not decodable.'));
   }
   const fallbackRate = +$('#sndRate').value || 22050;
-  $('#sndInfo').textContent =
+  let names = {}, title = '';
+  try { const nr = await api('de_x_sound_names?bd=' + encodeURIComponent(name)); names = nr.names || {}; title = nr.title ? nr.title + ' — ' : ''; } catch (e) { /* unnamed */ }
+  $('#sndInfo').textContent = title +
     `${name} — ${r.sounds.length} sounds · ${(r.bytes / 1024).toFixed(0)} KB · `
     + `ADPCM gate ${r.gate.toFixed(3)}`
     + (r.rates_from === 'hd' ? ' · rates from the .hd'
@@ -5570,8 +5801,17 @@ async function loadBank(name) {
     rep.style.cssText = 'font-size:11px;cursor:pointer';
     rep.onclick = () => replaceSound(name, s);
     const td = (x, cls) => { const d = el('td', cls || ''); d.append(x); return d; };
-    tr.append(td(play), td(document.createTextNode('#' + s.index), 'muted'),
-              td(document.createTextNode(s.samples.toLocaleString() + ' samples')),
+    // the names the bank's definition gives this sound (several rows can play one sound)
+    const nm = el('td');
+    const these = names[String(s.index)] || [];
+    if (these.length) {
+      nm.append(el('b', null, these[0].name));
+      if (these.length > 1) nm.append(el('span', 'muted', ' (also ' + these.slice(1).map((x) => x.name).join(', ') + ')'));
+      const note = these.map((x) => x.note).find((x) => x);
+      if (note) nm.append(el('div', 'muted', note));
+      dl.download = these[0].name + '.wav';
+    } else nm.append(el('span', 'muted', '(no name in its definition)'));
+    tr.append(td(play), td(document.createTextNode('#' + s.index), 'muted'), nm,
               td(document.createTextNode(secs.toFixed(2) + ' s'), 'muted'),
               td(document.createTextNode((s.rate || '?') + ' Hz'), 'muted'),
               td(dl), td(rep));
@@ -8093,6 +8333,64 @@ async function renderCharacterParts(entry, host, onImported) {
     box.innerHTML = `<div class="muted" style="font-size:11px">${e.message}</div>`;
     return;
   }
+  // The whole character as the game's compiled bundle (.rsc + .rnt), for the
+  // RDR Blender add-on -- beside the per-part OBJ round trip below, not
+  // instead of it. Import goes into every copy of the bundle on the disc; an
+  // archive with no room for it is rebuilt to make room. One Ctrl+Z.
+  {
+    const row = el('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 0 6px;'
+      + 'border-bottom:1px solid var(--line);margin-bottom:4px';
+    const nm = el('span', '', 'Whole character (.rsc)');
+    nm.style.cssText = 'flex:1;font-size:11px';
+    nm.title = `${entry.file}: the compiled bundle with every part and texture, as the Blender add-on imports and exports it`;
+    const down = el('button', '', '↓ .rsc');
+    down.style.fontSize = '11px';
+    down.title = 'Download the compiled bundle (a zip: .rsc, .rnt, and the .skel and .cr it uses) for the RDR Blender add-on: File > Import > Red Dead Revolver bundle';
+    down.onclick = () => {
+      saveFile(`/api/character_rsc?archive=${encodeURIComponent(entry.archive)}&name=${encodeURIComponent(entry.file)}`,
+        `${entry.stem}_rsc.zip`).then((ok) => { if (ok) toast(`Exported ${entry.stem}_rsc.zip: unzip it and import the .rsc in Blender`, 'good'); });
+    };
+    const rfile = el('input');
+    rfile.type = 'file';
+    rfile.accept = '.rsc,.rnt';
+    rfile.multiple = true;
+    rfile.style.display = 'none';
+    rfile.onchange = async () => {
+      const files = [...rfile.files];
+      rfile.value = '';
+      const rscF = files.find((f) => /\.rsc$/i.test(f.name));
+      const rntF = files.find((f) => /\.rnt$/i.test(f.name));
+      if (!rscF) return toast('Pick the .rsc (and its .rnt) the Blender add-on exported', 'bad');
+      const b64 = async (f) => { const u = new Uint8Array(await f.arrayBuffer()); let x = '';
+        for (let i = 0; i < u.length; i += 0x8000) x += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(x); };
+      const b = { name: entry.file, archive: entry.archive, rsc_b64: await b64(rscF),
+                  rnt_b64: rntF ? await b64(rntF) : null, everywhere: true };
+      try {
+        const dry = await post('character_rsc_import', { ...b, dry: true });
+        if (dry.ok === false) return toast(dry.error_text, 'bad');
+        const n = dry.copies.length;
+        if (!confirm(`Replace ${entry.file} with ${rscF.name}${rntF ? ' and ' + rntF.name : ''} in ${n} archive${n === 1 ? '' : 's'}?`
+          + (rntF ? '' : '\n\nNo .rnt picked: the bundle keeps its old names file, which must still match the new bundle.')
+          + (dry.rebuilds ? `\n\n${dry.rebuilds} of them have no room for it: they are rebuilt to make room on the next Rebuild and play.` : '')
+          + '\n\nOne Ctrl+Z undoes it.')) return;
+        toast(`Importing ${rscF.name} into ${n} archive(s)…`, 'good');
+        const r = await post('character_rsc_import', b);
+        if (r.ok === false) return toast(r.error_text, 'bad');
+        toast(`${entry.file}: replaced in ${r.copies.length} archive(s)` + (r.rebuilds ? `, ${r.rebuilds} queued to rebuild on the next launch` : '') + '. Ctrl+Z undoes it.', 'good');
+        await refreshHistory();
+        crChars = null;
+        if (onImported) onImported(); else showCreatureModel(entry.stem);
+        renderCharacterParts(entry, host, onImported);
+      } catch (e) { toast(e.message, 'bad'); }
+    };
+    const up = el('button', '', '↑ .rsc');
+    up.style.fontSize = '11px';
+    up.title = 'Import a bundle exported by the RDR Blender add-on (pick the .rsc and its .rnt) over every copy of this character on the disc';
+    up.onclick = () => rfile.click();
+    row.append(nm, down, up, rfile);
+    box.append(row);
+  }
   for (const p of d.parts) {
     const row = el('div');
     row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 0';
@@ -8163,8 +8461,10 @@ async function renderCharacterParts(entry, host, onImported) {
           + '(Decimate) and import again. Nothing was changed.', 'bad');
           mfile.value = ''; return; }
         if (!confirm(`Replace "${p.name}" with "${f.name}"?\n\n`
-          + `${dry.triangles} triangles. Uses ${dry.stored} of ${dry.slot} `
-          + 'bytes available.\n\nEXPERIMENTAL: each point is attached to the '
+          + `${dry.triangles} triangles. ` + (dry.rebuild
+            ? `It needs ${dry.stored} bytes and the original space is ${dry.slot}: the archive is rebuilt to make room on the next Rebuild and play.`
+            : `Uses ${dry.stored} of ${dry.slot} bytes available.`)
+          + '\n\nEXPERIMENTAL: each point is attached to the '
           + 'bones nearest to it on the original, so very different shapes '
           + 'may bend oddly. Shown working in PCSX2 on one character so far. Ctrl+Z undoes it.')) {
           mfile.value = ''; return; }
@@ -8246,14 +8546,8 @@ async function showCreatureModel(stem, lod) {
   // figure hides exactly the detail you would be inspecting it for.
   let mat;
   if (d.textures && geo.getAttribute('uv')) {
-    const url = `/api/character.png?archive=${encodeURIComponent(entry.archive)}`
-      + `&name=${encodeURIComponent(entry.file)}&i=0`;
-    const tex = new THREE.TextureLoader().load(url);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.flipY = false;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    mat = new THREE.MeshBasicMaterial(
-      { map: tex, side: THREE.DoubleSide, transparent: true, alphaTest: 0.35 });
+    mat = characterMaterials(geo, d.groups, (i) => `/api/character.png?archive=${encodeURIComponent(entry.archive)}`
+      + `&name=${encodeURIComponent(entry.file)}&i=${i}`);
   } else {
     mat = new THREE.MeshStandardMaterial(
       { color: 0xc8bda8, roughness: 0.85, side: THREE.DoubleSide });
@@ -8605,6 +8899,7 @@ async function loadLevels() {
     let tag = '';
     if (l.missions?.length) tag = `mission ${l.missions.map((m) => m.number).join(', ')}`;
     if (l.town) tag += ` · ${l.town}`;
+    else if (l.mode === 'custom') tag = (l.kind === 'showdown' ? 'Showdown ' + (l.players || '') : 'single player').trim();
     else if (l.mode === 'showdown2') tag = '2P';
     else if (l.mode === 'showdown4') tag = '4P';
     else if (l.mode === 'bonus') tag = 'no mission';
@@ -8706,6 +9001,31 @@ $('#btnLevelExportGo').onclick = async () => {
     btn.disabled = false;
     btn.textContent = was;
   }
+};
+
+// A Showdown map's name and sub text in the Showdown menu (rdrstudio/dataeditor_more.py level_name).
+async function refreshLevelName() {
+  const row = $('#lvlNameRow');
+  if (!row) return;
+  const arc = level?.archive || '';
+  if (!/^LVLS_M[24]\//i.test(arc)) { row.style.display = 'none'; return; }
+  try {
+    const r = await post('de_x_level_name', { archive: arc });
+    if ((level?.archive || '') !== arc) return;
+    if (!r.found) { row.style.display = 'none'; return; }
+    $('#lvlNameTitle').value = r.title || '';
+    $('#lvlNameSub').value = r.subtitle || '';
+    row.style.display = '';
+  } catch { row.style.display = 'none'; }
+}
+if ($('#lvlNameSave')) $('#lvlNameSave').onclick = async () => {
+  const arc = level?.archive;
+  if (!arc) return;
+  try {
+    const r = await post('de_x_level_name_set', { archive: arc, title: $('#lvlNameTitle').value, subtitle: $('#lvlNameSub').value });
+    toast(`Showdown menu: "${r.title}" / "${r.subtitle}". Press Build to put it on the disc.`, 'good');
+    refreshDiscState();
+  } catch (e) { toast('Could not save the name: ' + e.message, 'bad'); }
 };
 
 // Sibling areas of the loaded archive, as a switcher.
@@ -9171,9 +9491,10 @@ async function checkFit() {
   const pct = Math.min(100, (res.stored / res.slot) * 100);
   const bar = $('#fitBar');
   bar.style.width = pct + '%';
-  bar.className = res.fits ? '' : 'over';
+  bar.className = res.fits && !res.rebuild ? '' : 'over';
   $('#fitInfo').textContent =
-    `${res.stored} / ${res.slot} bytes` + (res.fits ? ` (${res.headroom} spare)` : ' — TOO BIG');
+    `${res.stored} / ${res.slot} bytes` + (res.rebuild ? ' — over its slot: the archive rebuilds to make room on the next launch'
+      : res.fits ? ` (${res.headroom} spare)` : ' — TOO BIG');
   $('#btnSaveText').disabled = !res.fits;
 }
 
@@ -9237,7 +9558,6 @@ const PALETTE = [
   ['Voices & music', 'Every spoken line, searchable by what is said',
    () => { showTab('audio'); setAudioView('streams'); }],
   ['Settings', 'Find one setting across the whole disc', () => showTab('fields')],
-  ['Files', 'Search the disc and edit any file', () => showTab('text')],
   ['Archives', 'Browse archives and see where there is room',
    () => { showTab('archives'); setArcView('files'); }],
   ['Room to build', 'Slot headroom per level',
@@ -9565,7 +9885,8 @@ $('#btnImport').onclick = () => {
           `slot is ${dry.slot}. Nothing was written.`, 'bad');
       }
       if (!confirm(`Replace ${openText.name} with ${file.name}?\n` +
-                   `${dry.stored}/${dry.slot} bytes of slot used.`)) return;
+                   (dry.rebuild ? `It needs ${dry.stored} bytes and the slot is ${dry.slot}: the archive is rebuilt to make room on the next Rebuild and play.`
+                                : `${dry.stored}/${dry.slot} bytes of slot used.`))) return;
       const r = await post('file_import', body);
       if (!r.ok) return toast('Import refused: ' + r.error, 'bad');
       toast(`Imported ${file.name} over ${openText.name} — ` +
@@ -9621,11 +9942,18 @@ $('#btnRestore').onclick = async () => {
       && !confirm('Overwrite the working disc from the stock disc?\n' +
                   'Every change is lost. The stock disc is untouched.')) return;
   window.__resetConfirmed = false;
+  const clearMods = window.__resetClearMods !== false;
+  window.__resetClearMods = undefined;
+  let res = null;
   try {
-    await withProgress('Restoring the working ISO from vanilla — copying 2.2 GB',
-                       () => post('restore', {}));
+    res = await withProgress('Restoring the working ISO from vanilla — copying 2.2 GB',
+                             () => post('restore', { clear_mods: clearMods }));
   } catch (e) { return toast('Restore failed: ' + e.message, 'bad'); }
-  toast('Working ISO restored to vanilla.', 'good');
+  const saved = res && res.saved_mod;
+  if (saved) alert(`Working ISO restored to vanilla.
+
+The Data Editor's ${res.cleared} mod file(s) were taken out too, so the next Build will not put them back. They are kept as the Saved Mod "${saved}" (DATA EDITOR > Data Editor, Saved Mods) if you want them again.`);
+  else toast('Working ISO restored to vanilla.', 'good');
   level = null;
   chunkUid = uidChunk = null;
   location.reload();
@@ -9634,8 +9962,87 @@ $('#btnRestore').onclick = async () => {
 // Guarded: the release build strips these two buttons, and a top-level
 // `.onclick =` on a missing element throws -- taking every line after it with
 // it, which is what stopped levels loading in the first release.
+// The .dat files with queued edits (no room in their slots), from disc_state.
+let pendingRebuild = [];
+
+// Build (top bar, beside Play): everything waiting to go on the working disc in one go -- the archives queued for a
+// rebuild, then the Data Editor's mod files not built yet. Greyed out when there is nothing.
+let buildWaiting = null, building = false;
+function renderBuildButton(w) {
+  const b = $('#btnBuild');
+  if (!b) return;
+  buildWaiting = w || null;
+  const q = (w && w.queued) || [];
+  const n = (w && w.data_editor) || 0;
+  b.disabled = building || !(w && w.any) || (w && w.running);
+  b.textContent = building ? 'Building…' : 'Build';
+  const lines = [];
+  if (q.length) lines.push(q.length + ' .dat file(s) to rebuild with Studio changes: ' + q.map((p) => p.archive).join(', '));
+  if (n) lines.push(n + ' Data Editor file(s) waiting' + (w.folders && w.folders.length ? ' (' + w.folders.join(', ') + ')' : ''));
+  b.title = building ? 'Building…' : (w && w.running) ? 'The Data Editor is busy'
+    : lines.length ? 'Build these into the working disc:\n' + lines.join('\n') : 'Nothing to build: every change is on the working disc';
+}
+
+async function waitDataEditorJob(label) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1200));
+    let j;
+    try { j = await api('de_job'); } catch { continue; }
+    if (label && $('#busyLabel')) $('#busyLabel').textContent = label + (j.log && j.log.length ? ' — ' + j.log[j.log.length - 1] : '');
+    if (j.state !== 'running') return j;
+  }
+}
+
+if ($('#btnBuild')) $('#btnBuild').onclick = async () => {
+  const w = buildWaiting;
+  if (!w || !w.any || building) return;
+  building = true; renderBuildButton(w);
+  try {
+    await withProgress('Building your changes into the working disc', async () => {
+      if ((w.queued || []).length) await rebuildQueuedArchives();
+      if (w.data_editor) {
+        const r = await post('de_build', {});
+        if (r && r.ok === false) throw new Error(r.error_text || 'the Data Editor refused');
+        const j = await waitDataEditorJob('Data Editor build');
+        if (j.state !== 'done') throw new Error('the Data Editor build stopped: ' + ((j.log || []).slice(-1)[0] || j.state));
+      }
+    });
+    toast('Built: every change is on the working disc.', 'good');
+    post('note', { text: 'Build complete: every change is on the working disc.' }).catch(() => {});
+    if (window.RDR && window.RDR.refreshLists) window.RDR.refreshLists();
+  } catch (e) {
+    post('note', { text: 'Build failed: ' + e.message }).catch(() => {});
+    toast('Build failed: ' + e.message, 'bad');
+    alert('Build failed\n\n' + e.message);
+  } finally {
+    building = false;
+    refreshDiscState();
+  }
+};
+
+async function rebuildQueuedArchives() {
+  // One rebuild per archive, every queued file in it, as a job polled here.
+  const label = $('#busyLabel');
+  let r = await post('rebuild_pending', {});
+  if (r && r.ok === false) throw new Error(r.error_text || 'the rebuild was refused');
+  let job = r.job || {};
+  while (job.state === 'running') {
+    if (label) label.textContent = `Rebuilding ${job.total} .dat file${job.total === 1 ? '' : 's'} with your changes`
+      + (job.archive ? ` — ${job.done + 1} / ${job.total}: ${job.archive}` : '')
+      + (/SWAT/i.test(job.archive || '') ? ' (swat.dat takes a few minutes)' : '');
+    await new Promise((res) => setTimeout(res, 1500));
+    try { job = (await api('disc_state')).rebuild_job || {}; } catch { /* restarting the disc: ask again */ }
+  }
+  if (job.state === 'error') throw new Error('rebuilding the queued .dat files failed: ' + job.error);
+  return job.rebuilt || [];
+}
+
 if ($('#btnPlay')) $('#btnPlay').onclick = async () => {
   try {
+    if (pendingRebuild.length) {
+      const done = await withProgress('Rebuilding the .dat files with your changes', rebuildQueuedArchives);
+      if (done.length) toast(`Rebuilt ${done.join(', ')}. Starting PCSX2…`, 'good');
+    }
     await withProgress('Releasing the disc and starting PCSX2',
                        () => post('play', {}));
     toast('PCSX2 launched with your modded disc.\n' +
@@ -9652,6 +10059,7 @@ if ($('#btnPlay')) $('#btnPlay').onclick = async () => {
       $('#btnAppSetup').click();
     } else {
       toast('Could not start the game: ' + e.message, 'bad');
+      alert('Could not start the game\n\n' + e.message);
     }
   }
 };
@@ -9694,10 +10102,11 @@ async function appSetupRefresh() {
   $('#asWorking').textContent = s.working || 'not set';
   $('#asPcsx2').textContent = s.pcsx2 || 'not configured';
   $('#asPcsx2Note').textContent = s.pcsx2_ok ? ''
-    : 'Play and Boot test stay off until this points at a real pcsx2.exe.';
+    : 'Play stays off until this points at a real pcsx2.exe.';
   // DOM-built rather than a template string: paths carry quotes and
   // backslashes, and the build's balance scanner (rightly) refuses regexes
   // inside template literals. Elements dodge both problems at once.
+  renderAppFolders(s.folders || []);
   const known = (s.known_working || []).filter((p) => p !== s.working);
   const kbox = $('#asKnown');
   kbox.textContent = known.length ? 'Recent working discs:' : '';
@@ -9712,6 +10121,57 @@ async function appSetupRefresh() {
   }
 }
 
+// App setup > Folders: where mods, checkpoints, exports and the Data Editor
+// live. Open shows it in Explorer; Change / Default save the choice, which the
+// Studio picks up on a restart (the server reads its folders at start).
+function renderAppFolders(folders) {
+  const box = $('#asFolders');
+  if (!box) return;
+  box.textContent = '';
+  for (const f of folders) {
+    const row = document.createElement('div');
+    row.style.cssText = 'margin:0 0 9px';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const name = document.createElement('b');
+    name.style.cssText = 'font-size:12px;flex:1';
+    name.textContent = f.label;
+    name.title = f.note;
+    const mk = (text, title, fn, ghost) => {
+      const b = document.createElement('button');
+      if (ghost) b.className = 'ghost';
+      b.style.fontSize = '11px';
+      b.textContent = text; b.title = title; b.onclick = fn;
+      return b;
+    };
+    const api = shellApi();
+    head.append(name,
+      mk('Open', 'Show this folder in Explorer', async () => {
+        const r = await api.open_app_folder(f.key);
+        if (r && r.ok === false) toast('Could not open it: ' + r.error, 'bad');
+      }),
+      mk('Change…', 'Pick another folder (the Studio restarts to use it)', async () => {
+        const r = await api.pick_app_folder(f.key);
+        if (!r) return;
+        if (r.ok === false) return toast(r.error, 'bad');
+        appSetupRefresh();
+        if (confirm(`${f.label} folder set to\n${r.path}\n\nRestart the Studio now to use it?`)) api.restart_app();
+      }),
+      mk('Default', 'Back to the default location', async () => {
+        const r = await api.reset_app_folder(f.key);
+        appSetupRefresh();
+        if (r && r.ok && confirm(`${f.label} folder back to\n${r.path}\n\nRestart the Studio now to use it?`)) api.restart_app();
+      }, true));
+    const p = document.createElement('div');
+    p.className = 'mono dim';
+    p.style.cssText = 'word-break:break-all;font-size:11px';
+    p.textContent = (f.path || 'not set') + (f.exists ? '' : '  (made when first used)');
+    p.title = f.note;
+    row.append(head, p);
+    box.append(row);
+  }
+}
+
 async function switchDisc(purpose, path) {
   const api = shellApi();
   if (!api) return;
@@ -9721,10 +10181,106 @@ async function switchDisc(purpose, path) {
   setTimeout(() => api.restart_app(), 900);
 }
 
+// ---- Settings > Profiles: every preference kept under a name (rdrstudio/settings.py, "profiles" in settings.json).
+// A profile holds the server-side preferences and the front end's own local keys (rdr.*: the theme's resolved
+// colours the first paint uses, the panels' remembered choices); loading one puts both back and reloads.
+function localPrefs() {
+  const out = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('rdr.') && !k.startsWith('rdr.tmp')) out[k] = localStorage.getItem(k);
+    }
+  } catch { /* private mode */ }
+  return out;
+}
+async function renderProfiles() {
+  const box = $('#asProfileList');
+  if (!box) return;
+  let r;
+  try { r = await api('profiles'); } catch (e) { box.textContent = 'Profiles are not available: ' + e.message; return; }
+  box.innerHTML = '';
+  const names = Object.keys(r.profiles || {}).sort((a, b) => a.localeCompare(b));
+  if (!names.length) { box.append(el('div', 'dim', 'No profiles yet.')); return; }
+  for (const n of names) {
+    const p = r.profiles[n];
+    const row = el('div');
+    row.style.cssText = 'display:flex;gap:6px;align-items:center';
+    const nm = el('b', null, n); nm.style.flex = '1';
+    const when = el('span', 'dim', p.saved || ''); when.style.fontSize = '11px';
+    const load = el('button', '', 'Load');
+    load.title = 'Switch to this profile (the Studio reloads)';
+    load.onclick = async () => {
+      if (!confirm(`Load the profile "${n}"? Your current preferences are replaced (save them as a profile first to keep them). The Studio reloads.`)) return;
+      try {
+        const res = await post('profile_load', { name: n });
+        try {
+          for (const [k, v] of Object.entries(res.local || {})) localStorage.setItem(k, v);
+        } catch { /* private mode: the file still has the server side */ }
+        location.reload();
+      } catch (e) { toast('Could not load it: ' + e.message, 'bad'); }
+    };
+    const exp = el('button', 'ghost', 'Export');
+    exp.title = 'Save this profile as a .json file';
+    exp.onclick = async () => {
+      try {
+        const got = await api('profile_get?name=' + encodeURIComponent(n));
+        const doc = { format: 'rdrstudio-profile/1', name: n, ui: got.profile.ui || {}, local: got.profile.local || {} };
+        const a = el('a');
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 1)], { type: 'application/json' }));
+        a.download = n.replace(/[^A-Za-z0-9_ -]+/g, '_') + '.rdrprofile.json';
+        document.body.append(a); a.click(); a.remove();
+      } catch (e) { toast(e.message, 'bad'); }
+    };
+    const del = el('button', 'ghost', 'Delete');
+    del.onclick = async () => {
+      if (!confirm(`Delete the profile "${n}"?`)) return;
+      try { await post('profile_delete', { name: n }); renderProfiles(); } catch (e) { toast(e.message, 'bad'); }
+    };
+    row.append(nm, when, load, exp, del);
+    box.append(row);
+  }
+}
+function wireProfiles() {
+  const save = $('#asProfileSave');
+  if (!save || save.dataset.wired) return;
+  save.dataset.wired = '1';
+  save.onclick = async () => {
+    const n = ($('#asProfileName').value || '').trim();
+    if (!n) { $('#asProfileName').focus(); return toast('Name the profile', 'bad'); }
+    try {
+      await flushPrefs();
+      await post('profile_save', { name: n, local: localPrefs() });
+      $('#asProfileName').value = '';
+      toast(`Profile "${n}" saved.`, 'good');
+      renderProfiles();
+    } catch (e) { toast('Could not save it: ' + e.message, 'bad'); }
+  };
+  $('#asProfileImport').onclick = () => {
+    const f = el('input'); f.type = 'file'; f.accept = '.json';
+    f.onchange = async () => {
+      const file = f.files[0];
+      if (!file) return;
+      try {
+        const doc = JSON.parse(await file.text());
+        if (!doc || (doc.format && doc.format !== 'rdrstudio-profile/1')) throw new Error('not a Studio profile file');
+        const n = (($('#asProfileName').value || '').trim()) || doc.name || file.name.replace(/\.rdrprofile\.json$|\.json$/i, '');
+        await post('profile_import', { name: n, profile: doc });
+        toast(`Profile "${n}" imported. Load it to switch to it.`, 'good');
+        renderProfiles();
+      } catch (e) { toast('Could not import it: ' + e.message, 'bad'); }
+    };
+    f.click();
+  };
+}
+
+if ($('#btnAppSetup')) $('#btnAppSetup').addEventListener('click', () => { wireProfiles(); renderProfiles(); });
 if ($('#btnAppSetup')) $('#btnAppSetup').onclick = () => {
   $('#appSetup').style.display = 'block';
   appSetupRefresh();
 };
+if ($('#asOpenWorking')) $('#asOpenWorking').onclick = () => { const a = shellApi(); if (a) a.open_app_folder('working'); };
+if ($('#asOpenVanilla')) $('#asOpenVanilla').onclick = () => { const a = shellApi(); if (a) a.open_app_folder('vanilla'); };
 if ($('#asClose')) $('#asClose').onclick = () => {
   $('#appSetup').style.display = 'none';
 };
@@ -9793,6 +10349,22 @@ async function refreshDiscState() {
       pill.title = 'Another program holds the disc. Close it to edit.';
     }
     renderDiscPanel(d);
+    pendingRebuild = d.pending_rebuild || [];
+    renderBuildButton(d.build_waiting);
+    const play = $('#btnPlay');
+    if (play) {
+      if (pendingRebuild.length) {
+        play.textContent = 'Rebuild and play';
+        play.classList.add('rebuildplay');
+        play.title = 'These .dat files have changes waiting for more room. They are rebuilt (once each, with every '
+          + 'queued change), then PCSX2 starts:\n'
+          + pendingRebuild.map((p) => `${p.archive}: ${p.files.join(', ')}`).join('\n');
+      } else {
+        play.textContent = 'Play';
+        play.classList.remove('rebuildplay');
+        play.title = 'Start the game in PCSX2.';
+      }
+    }
   } catch (e) {
     // The Studio is restarting; the banner is already up and the next tick
     // will clear it. Say so on the pill too rather than leaving a stale one.
@@ -10175,7 +10747,9 @@ function renderDropPlan(arc) {
     let verdict;
     if (d.error && !d.mode) { verdict = d.error; blocked += 1; }
     else if (d.mode === 'replace') {
-      verdict = d.fits
+      verdict = d.rebuild
+        ? `Too big for its slot: ${arc} is rebuilt to make room on the next Rebuild and play. Undoable.`
+        : d.fits
         ? `Replaces the copy in ${arc}. Undoable.`
         : d.grow_possible && allowGrow
           ? `Replaces and grows the file. Undoable.`
@@ -10187,6 +10761,8 @@ function renderDropPlan(arc) {
       const why = (d.why || []).join('; ');
       verdict = why
         ? `Cannot add: ${why}`
+        : d.rebuild
+        ? `New file in ${arc}: no room as it stands, so it goes in when ${arc} is rebuilt on the next Rebuild and play. Adds cannot be undone.`
         : `New file in ${arc}. Adds cannot be undone.`;
       if (why) blocked += 1;
     }
@@ -10710,7 +11286,9 @@ async function initAnimTab() {
   if (!arcSel.options.length) {
     try {
       const arcs = await api('archives');
-      const list = (arcs.archives || arcs || []).map((a) => a.archive || a.name || a);
+      // banks.dat, pupshow.dat and the streams hold sound, cutscene and audio streams, never a clip: not offered
+      const list = (arcs.archives || arcs || []).map((a) => a.archive || a.name || a)
+        .filter((a) => !/^(BANKS|PUPSHOW|STREAMS?\d*)\.DAT$/i.test(String(a).split('/').pop()));
       // Animations live overwhelmingly in SWAT.DAT (the shared asset bundle),
       // so it is the sensible default; every archive is still selectable.
       list.sort((a, b) => (a === 'SWAT.DAT' ? -1 : b === 'SWAT.DAT' ? 1
@@ -10723,7 +11301,31 @@ async function initAnimTab() {
     } catch (e) { $('#animMsg').textContent = 'Could not list archives: ' + e.message; }
     arcSel.onchange = () => loadAnimList(arcSel.value);
     $('#animFilter').oninput = renderAnimList;
-    $('#animSkel').onchange = () => animCurrent && playAnim(animCurrent);
+    $('#animSkel').onchange = () => { animSkelPicked = true; if (animCurrent) playAnim(animCurrent); };
+    // Preferred skeleton / model: tried first on every clip (kept as rdr.* keys, so profiles carry them too)
+    for (const k of ['Skel', 'Model']) {
+      const inp = $('#animPref' + k);
+      if (!inp) continue;
+      inp.value = animPref(k);
+      const save = () => {
+        try { localStorage.setItem('rdr.anim.pref' + k, inp.value.trim()); } catch { /* private mode */ }
+        remember('animPref' + k, inp.value.trim());      // settings.json: kept across launches and in profiles
+        if (k === 'Model' && animPlayer && animRigModels.length) {
+          const hit = animPrefModel(animRigModels);
+          if (hit && $('#animModel').value !== hit) { $('#animModel').value = hit; applyAnimModel(); }
+        }
+        if (k === 'Skel' && animCurrent && animPrefSkel([...$('#animSkel').options].map((o) => o.value))
+            && animPrefSkel([...$('#animSkel').options].map((o) => o.value)) !== $('#animSkel').value) playAnim(animCurrent);
+      };
+      inp.onchange = save;
+      $('#animPref' + k + 'Set').onclick = () => {
+        const v = (k === 'Skel' ? $('#animSkel') : $('#animModel')).value;
+        if (!v) return toast('Pick a ' + (k === 'Skel' ? 'skeleton' : 'model') + ' above first.', 'bad');
+        inp.value = v;
+        save();
+        toast(`Preferred ${k === 'Skel' ? 'skeleton' : 'model'}: ${v}. It is tried first on every clip.`, 'good');
+      };
+    }
     // Changing the model does NOT reload the clip. The player keeps playing
     // and swaps the mesh onto the bones it already has, so comparing two
     // characters on one motion is a dropdown, not a round trip.
@@ -10761,6 +11363,7 @@ async function initAnimTab() {
       animPlayer.setFrame(+$('#animScrub').value);
     };
     $('#animExportBtn').onclick = exportCurrentAnim;
+    $('#animExportGlbBtn').onclick = exportAnimWithModel;
     $('#animImportBtn').onclick = () => {
       if (!animCurrent) return toast('Pick a clip first.');
       $('#animImportFile').click();
@@ -10803,6 +11406,28 @@ function animIoReport(html, tone) {
   box.style.borderColor = tone === 'bad' ? 'var(--bad)'
     : tone === 'good' ? 'var(--good)' : 'var(--line)';
   box.innerHTML = html;
+}
+
+async function exportAnimWithModel() {
+  if (!animPlayer || !animCurrent) return toast('Pick a clip first.');
+  if (!animPlayer.modelInfo) return toast('Pick a character model (Character model, above) first.', 'bad');
+  const btn = $('#animExportGlbBtn');
+  btn.disabled = true;
+  try {
+    const r = await animPlayer.exportGlb(animCurrent);
+    const stem = animCurrent.replace(/\.anim$/i, '') + '_' + String(animPlayer.modelInfo.stem || 'model').replace(/[^A-Za-z0-9_-]+/g, '_');
+    const href = URL.createObjectURL(new Blob([r.bytes], { type: 'model/gltf-binary' }));
+    const a = document.createElement('a');
+    a.href = href; a.download = stem + '.glb'; a.click();
+    setTimeout(() => URL.revokeObjectURL(href), 30000);
+    animIoReport(`Exported <b>${animEsc(stem)}.glb</b>: ${r.verts.toLocaleString()} vertices, ${r.bones} bones, `
+      + `${r.keys} keys, ${r.textures} texture${r.textures === 1 ? '' : 's'}.`
+      + '<br>Blender: File &gt; Import &gt; glTF 2.0 (.glb) — the model comes in posed and animated.', 'good');
+  } catch (e) {
+    toast('Could not export it: ' + e.message, 'bad');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function exportCurrentAnim() {
@@ -10908,11 +11533,11 @@ async function importAnimFile(file) {
   }
   if (dry.ok === false)
     return animIoReport(`<b>Will not fit.</b><br>${dry.error}`, 'bad');
-  if (dry.written === false && dry.identical)
+  if (dry.written === false)
     // The notes belong here most of all: "nothing to write" is usually the
     // RESULT of a flatten or a snap, and without them it reads as the tool
     // having ignored the file.
-    return animIoReport('That BVH decodes to exactly the bytes already on the '
+    return animIoReport('Every sample of that BVH is as it already is on the '
       + 'disc, so there is nothing to write.' + animImportNotesHtml(dry),
       'good');
 
@@ -10922,10 +11547,14 @@ async function importAnimFile(file) {
     `<b>${file.name}</b> → ${name}<br>`
     + `${dry.changed_samples.toLocaleString()} of `
     + `${dry.total_samples.toLocaleString()} samples change (${pct}%)<br>`
-    + `${dry.stored.toLocaleString()} of ${dry.slot.toLocaleString()} bytes `
-    + `(${dry.headroom.toLocaleString()} spare`
-    + `${dry.compressed ? ', measured compressed' : ''})`
+    + (dry.grows
+      ? `${dry.stored.toLocaleString()} bytes, more than its ${dry.slot.toLocaleString()}-byte slot: `
+        + `${animEsc(dry.archive)} is rebuilt to make room on the next Build (or Play)`
+      : `${dry.stored.toLocaleString()} of ${dry.slot.toLocaleString()} bytes `
+        + `(${dry.headroom.toLocaleString()} spare`
+        + `${dry.compressed ? ', measured compressed' : ''})`)
     + animImportNotesHtml(dry)
+    + ((dry.copies || []).length ? `<br>The same clip in ${dry.copies.map(animEsc).join(', ')} gets it too.` : '')
     + '<div class="muted" style="margin-top:5px">Nothing has been written '
     + 'yet.</div>');
 
@@ -10937,8 +11566,19 @@ async function importAnimFile(file) {
     try {
       const r = await post('anim_import', payload);
       if (!r.ok) return animIoReport(`<b>Refused.</b><br>${r.error}`, 'bad');
-      animIoReport(`Wrote <b>${name}</b> — ${r.used.toLocaleString()} of `
-        + `${r.slot.toLocaleString()} bytes. Ctrl+Z to undo.`, 'good');
+      if (!r.written) return animIoReport(r.note || 'Nothing to write.', 'good');
+      const also = (r.copies || []).length
+        ? `<br>Also written to the same clip in ${r.copies.map(animEsc).join(', ')} (a level plays the copy in its own archive).`
+        : '';
+      const left = (r.copies_left || []).length
+        ? `<br>Left alone (changed there on its own): ${r.copies_left.map(animEsc).join(', ')}.`
+        : '';
+      animIoReport(r.grows
+        ? `Wrote <b>${name}</b> — it grew past its slot, so ${animEsc(r.archive)} is rebuilt with it on the next `
+          + 'Build (or Play). Ctrl+Z to undo.'
+        : `Wrote <b>${name}</b> — ${r.used.toLocaleString()} of `
+          + `${r.slot.toLocaleString()} bytes. Ctrl+Z to undo.` + also + left, 'good');
+      if (r.grows) refreshDiscState();
       toast(`Imported ${file.name} into ${name}.`, 'good');
       refreshHistory();
       if (animCurrent === name) playAnim(name);   // watch it immediately
@@ -11047,6 +11687,28 @@ function inferModelStem(clip, skelName, models) {
   return models.length ? models[0].stem : '';
 }
 
+// The preferred skeleton / model (Animations panel), tried before anything else when it fits the clip.
+let animSkelPicked = false;          // the skeleton dropdown was just changed by hand: that pick wins once
+function animPref(k) {
+  try { return (localStorage.getItem('rdr.anim.pref' + k) || '').trim(); } catch { return ''; }
+}
+function animPrefSkel(candidates) {
+  const p = animPref('Skel').toLowerCase();
+  if (!p) return null;
+  const bare = (x) => x.toLowerCase().replace(/\.skel$/, '');
+  return candidates.find((c) => c.toLowerCase() === p)
+    || candidates.find((c) => bare(c) === bare(p)) || null;
+}
+function animPrefModel(models) {
+  const p = animPref('Model').toLowerCase().replace(/_lods\.rsc$/, '');
+  if (!p) return null;
+  const m = models.find((x) => String(x.stem).toLowerCase() === p);
+  return m ? m.stem : null;
+}
+
+let animModelLast = null;           // the model on screen: its rig payload and texture URLs
+let animSkelTextLast = '';          // the skeleton the clips are playing on, as text
+
 async function fillAnimModels(arc, boneCount, clip, skelName) {
   const sel = $('#animModel');
   const note = $('#animModelNote');
@@ -11058,7 +11720,7 @@ async function fillAnimModels(arc, boneCount, clip, skelName) {
   let d = null;
   try {
     d = await api(`character_rigs?archive=${encodeURIComponent(arc)}`
-      + `&bones=${boneCount}`);
+      + `&bones=${boneCount}&all=1&skel=${encodeURIComponent(skelName || '')}`);
   } catch { d = null; }
   // Character bundles live in level archives AND in SWAT.DAT -- all 310
   // distinct `*_lods.rsc` names are in SWAT.DAT, measured -- so an archive
@@ -11067,7 +11729,7 @@ async function fillAnimModels(arc, boneCount, clip, skelName) {
   // characters and not one of them is rigged to 53 bones.
   if ((!d || !d.models || !d.models.length) && arc !== 'SWAT.DAT') {
     try {
-      d = await api(`character_rigs?archive=SWAT.DAT&bones=${boneCount}`);
+      d = await api(`character_rigs?archive=SWAT.DAT&bones=${boneCount}&all=1&skel=${encodeURIComponent(skelName || '')}`);
     } catch { d = null; }
   }
   animRigArchive = d ? d.archive : null;
@@ -11076,10 +11738,18 @@ async function fillAnimModels(arc, boneCount, clip, skelName) {
   const none = el('option', null, 'None — skeleton only');
   none.value = '';
   sel.append(none);
+  let byNameHeader = false;
   for (const m of animRigModels) {
-    const o = el('option', null,
-      `${m.stem} — ${m.bone_count} bones, ${m.textures} texture`
-      + (m.textures === 1 ? '' : 's'));
+    if (m.by_name && !byNameHeader) {
+      // every other character: retargeted by bone name onto this clip
+      const h = el('option', null, '── matched by bone name ──');
+      h.disabled = true;
+      sel.append(h);
+      byNameHeader = true;
+    }
+    const o = el('option', null, m.by_name
+      ? `${m.stem} — ${m.fit}`
+      : `${m.stem} — ${m.bone_count} bones, ${m.textures} texture` + (m.textures === 1 ? '' : 's'));
     o.value = m.stem;
     sel.append(o);
   }
@@ -11087,8 +11757,8 @@ async function fillAnimModels(arc, boneCount, clip, skelName) {
     note.textContent = 'No model matches this rig. Skeleton only.';
     return;
   }
-  sel.value = animRigModels.some((m) => m.stem === keep)
-    ? keep : inferModelStem(clip, skelName, animRigModels);
+  sel.value = animPrefModel(animRigModels) || (animRigModels.some((m) => m.stem === keep)
+    ? keep : inferModelStem(clip, skelName, animRigModels));
   await applyAnimModel();
 }
 
@@ -11105,8 +11775,14 @@ async function applyAnimModel() {
   const arc = animRigArchive || 'SWAT.DAT';
   const file = stem + '_lods.rsc';
   note.textContent = 'Decoding ' + file + '…';
+  const row = animRigModels.find((m) => m.stem === stem) || {};
   let rig;
   try {
+    if (row.by_name) {
+      // on its OWN skeleton, driven bone by bone by name (anim3d.js retarget)
+      rig = await api(`character_rig?archive=${encodeURIComponent(arc)}`
+        + `&name=${encodeURIComponent(file)}&lod=0&skel=${encodeURIComponent(row.skel || (stem + '.skel'))}&skel_archive=`);
+    } else
     // Bind the mesh against the skeleton the CLIP is playing on, not the
     // model's own file. They are usually the same file; when they are not,
     // this is what keeps mesh and bones agreeing at every joint instead of
@@ -11127,12 +11803,15 @@ async function applyAnimModel() {
     + `&name=${encodeURIComponent(file)}&i=${slot}`;
   let mi;
   try {
-    mi = animPlayer.setModel(rig, texUrl);
+    mi = animPlayer.setModel(rig, texUrl, { retarget: !!row.by_name });
   } catch (e) {
     animPlayer.clearModel();
+    animModelLast = null;
     note.textContent = e.message;
     return;
   }
+  // kept for "Export all animations" with the current model (animexport.js, via window.RDR.animModelState)
+  animModelLast = { rig, texUrl, retarget: !!row.by_name, stem };
   animPlayer.setShow($('#animShow').value || 'model');
 
   // Say exactly what is skinned and what is not. The body IS skinned --
@@ -11153,7 +11832,10 @@ async function applyAnimModel() {
           + rigid.map((p) => p.name).join(', ')
           + ' attach rigidly to the head bone.'
         : '')
-    + (rig.own_skel === false
+    + (mi.retarget
+        ? `<br><span style="color:var(--warn)">On its own skeleton: ${mi.retarget.matched} of ${mi.retarget.total} `
+          + 'bones follow the clip by bone name; the rest stay at rest.</span>'
+        : rig.own_skel === false
         ? `<br><span style="color:var(--warn)">Posed on ${rig.skel}, `
           + 'the skeleton this clip drives.</span>'
         : '')
@@ -11236,7 +11918,11 @@ async function playAnim(clip) {
     }
     // Keep the user's choice across clips when it still fits, otherwise take
     // the server's first -- which is ranked to be the clip's OWN character.
-    skelSel.value = candidates.includes(keep) ? keep : (candidates[0] || '');
+    // ...unless a preferred skeleton fits: it comes first (a hand pick in the dropdown still wins that once).
+    const prefSkel = animPrefSkel(candidates);
+    skelSel.value = (animSkelPicked && candidates.includes(keep)) ? keep
+      : prefSkel || (candidates.includes(keep) ? keep : (candidates[0] || ''));
+    animSkelPicked = false;
     skelSel.disabled = candidates.length < 2;
 
     // The Export button knows before it is pressed. The only rig BVH cannot
@@ -11269,6 +11955,7 @@ async function playAnim(clip) {
         : Promise.resolve(''),
     ]);
 
+    animSkelTextLast = skelText || '';
     if (!skelText) {
       msg.innerHTML = 'No matching skeleton. Open it in Files for the curves.';
       $('#animModel').innerHTML = '';
@@ -11285,7 +11972,7 @@ async function playAnim(clip) {
         } });
 
     const i = animPlayer.info;
-    for (const id of ['#animPlay', '#animScrub', '#animEuler', '#animExportBtn'])
+    for (const id of ['#animPlay', '#animScrub', '#animEuler', '#animExportBtn', '#animExportGlbBtn'])
       $(id).disabled = false;
     $('#animScrub').max = i.keys - 1;
     $('#animScrub').value = 0;
@@ -11956,6 +12643,7 @@ async function initStreamsView() {
     streamSearchTimer = setTimeout(runStreamSearch, 220);
   };
   renderStreamGroups();
+  wireStreamAdd();
 
   const s = streamSummary;
   $('#strInfo').textContent =
@@ -11965,6 +12653,53 @@ async function initStreamsView() {
     + (s.looping ? ` · ${s.looping} that loop` : '');
   $('#strBody').innerHTML = '';
   $('#strBody').append(streamsWelcome());
+}
+
+// Add new streams: .stm as they are, .wav encoded to .stm (dataeditor_more.stream_add), into streams.dat's Data
+// Editor folder -- the next Build adds them to STREAMS.DAT.
+async function refreshStreamAdded() {
+  try {
+    const r = await api('de_x_stream_added');
+    $('#strAdded').textContent = r.files.length ? `${r.files.length} added, waiting for the next Build` : '';
+    $('#strAdded').title = r.files.join('\n');
+  } catch (e) { /* the Data Editor is not set up */ }
+}
+function wireStreamAdd() {
+  const b = $('#strAdd');
+  if (!b || b.dataset.wired) return;
+  b.dataset.wired = '1';
+  refreshStreamAdded();
+  const cr = $('#strCreate');
+  if (cr) cr.onclick = async () => {
+    const m = await import('./stmcreator.js');
+    m.openStmCreator({ post, toast, el, onSaved: refreshStreamAdded, stream: streamGroupKey ? '' : '' });
+  };
+  b.onclick = () => {
+    const inp = el('input');
+    inp.type = 'file'; inp.multiple = true; inp.accept = '.stm,.wav,audio/wav';
+    inp.onchange = async () => {
+      const files = [];
+      for (const f of inp.files) {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        files.push({ name: f.name, data: btoa(bin) });
+      }
+      if (!files.length) return;
+      b.disabled = true; b.textContent = 'Adding…';
+      try {
+        const r = await post('de_x_stream_add', { files });
+        if (r.ok === false) throw new Error(r.error_text || 'refused');
+        const lines = r.added.map((a) => `${a.name}: ${a.seconds} s, ${a.rate} Hz, ${a.channels === 2 ? 'stereo' : 'mono'}`
+          + (a.replaces ? ' (replaces the game\'s stream of that name)' : ' (new)'));
+        alert('Added to streams.dat\'s Data Editor folder; the next Build puts them in STREAMS.DAT:\n\n' + lines.join('\n')
+          + (r.added.some((a) => !a.replaces) ? '\n\nA new name plays only where something asks for it (a sound bank definition, a level). To hear one in place of a game stream, give it that stream\'s name.' : ''));
+        refreshStreamAdded();
+      } catch (e) { toast('Add failed: ' + e.message, 'bad'); }
+      b.disabled = false; b.textContent = 'Add .stm / .wav…';
+    };
+    inp.click();
+  };
 }
 
 // An empty state, not a landing page (DESIGN-REVIEW B6/A2).
@@ -11985,6 +12720,22 @@ function streamsWelcome() {
   return w;
 }
 
+// The groups organised as the banks are: by what they are -- Music, Cutscenes, Levels and ambience, Characters,
+// Story dialogue -- from the kinds of stream in them and the sound bank that claims them (label_source).
+const streamOpen = new Set();
+function streamSection(g) {
+  const src = g.label_source || '';
+  const kinds = g.kinds || [];
+  if (/^voice and unique sounds for/i.test(src)) return 'Characters';
+  if (/^music for/i.test(src)) return 'Music';
+  if (/level|lvl_|specific objects/i.test(src)) return 'Levels and ambience';
+  if (kinds.includes('music') && !kinds.includes('bark') && !kinds.includes('dialogue')) return 'Music';
+  if (kinds.includes('cutscene') || /^\d+_/.test(g.key)) return 'Cutscenes';
+  if (kinds.length && kinds.every((k) => k === 'ambience')) return 'Levels and ambience';
+  return 'Story dialogue';
+}
+const STREAM_SECTIONS = ['Music', 'Cutscenes', 'Levels and ambience', 'Characters', 'Story dialogue'];
+
 function renderStreamGroups() {
   const box = $('#strGroups');
   const kind = $('#strKind').value;
@@ -11999,26 +12750,44 @@ function renderStreamGroups() {
   });
   if (!shown.length)
     return box.append(el('div', 'pad muted', 'Nothing matches those filters.'));
-  for (const g of shown) {
-    const row = el('div', 'row' + (g.key === streamGroupKey ? ' sel' : ''));
-    row.style.cssText = 'display:block; padding:6px 10px';
-    const top = el('div');
-    top.append(el('b', '', g.label || g.key));
-    if (g.unreferenced) {
-      const b = el('span', 'chip', `${g.unreferenced} unused`);
-      b.style.marginLeft = '6px';
-      top.append(b);
+  const filtering = !!(kind || orphan || loopsOnly);
+  const label = (g) => {
+    const l = g.label || g.key;
+    // a lower-case label is the file prefix itself: give it a capital
+    return l === g.key ? l.replace(/^./, (c) => c.toUpperCase()).replace(/_/g, ' ') : l;
+  };
+  for (const sec of STREAM_SECTIONS) {
+    const groups = shown.filter((g) => streamSection(g) === sec).sort((x, y) => label(x).localeCompare(label(y)));
+    if (!groups.length) continue;
+    const open = filtering || streamOpen.has(sec) || groups.some((g) => g.key === streamGroupKey);
+    const mins = groups.reduce((t, g) => t + g.seconds, 0) / 60;
+    const head = el('div', 'row');
+    head.style.cssText = 'font-weight:600;cursor:pointer;padding:6px 10px';
+    head.textContent = `${open ? '▾' : '▸'} ${sec} (${groups.length} · ${mins >= 60 ? (mins / 60).toFixed(1) + ' h' : mins.toFixed(0) + ' min'})`;
+    head.onclick = () => { if (open) { streamOpen.delete(sec); if (groups.some((g) => g.key === streamGroupKey)) streamGroupKey = null; } else streamOpen.add(sec); renderStreamGroups(); };
+    box.append(head);
+    if (!open) continue;
+    for (const g of groups) {
+      const row = el('div', 'row' + (g.key === streamGroupKey ? ' sel' : ''));
+      row.style.cssText = 'display:block; padding:5px 10px 5px 20px';
+      const top = el('div');
+      top.append(el('b', '', label(g)));
+      if (g.unreferenced) {
+        const b = el('span', 'chip', `${g.unreferenced} unused`);
+        b.style.marginLeft = '6px';
+        top.append(b);
+      }
+      row.append(top);
+      row.append(el('div', 'muted',
+        `${g.key} · ${g.count} files · ${(g.seconds / 60).toFixed(1)} min`
+        + (g.looping ? ` · ${g.looping} loop` : '')));
+      // The label is chosen by how much of the group one sound bank claims, so
+      // it is an inference. The evidence goes in the tooltip rather than being
+      // dropped -- a wrong label with no provenance is worse than no label.
+      if (g.label_source) row.title = g.label_source;
+      row.onclick = () => showStreamGroup(g);
+      box.append(row);
     }
-    row.append(top);
-    row.append(el('div', 'muted',
-      `${g.key} · ${g.count} files · ${(g.seconds / 60).toFixed(1)} min`
-      + (g.looping ? ` · ${g.looping} loop` : '')));
-    // The label is chosen by how much of the group one sound bank claims, so
-    // it is an inference. The evidence goes in the tooltip rather than being
-    // dropped -- a wrong label with no provenance is worse than no label.
-    if (g.label_source) row.title = g.label_source;
-    row.onclick = () => showStreamGroup(g);
-    box.append(row);
   }
 }
 
@@ -12248,7 +13017,7 @@ for (const [sel, contSel, rowSel] of FILTERS) {
     if (!c.pcsx2_exists && $('#btnAppSetup')) {
       // FINAL PASS: a red "missing" with nowhere to go. Settings is the fix.
       p.textContent = 'PCSX2 not set — click to choose';
-      p.title = 'Play and Boot test need PCSX2. Click to point the Studio at it.';
+      p.title = 'Play needs PCSX2. Click to point the Studio at it.';
       p.style.cursor = 'pointer';
       p.onclick = () => $('#btnAppSetup').click();
     }
@@ -12376,6 +13145,28 @@ for (const [sel, contSel, rowSel] of FILTERS) {
     // The archive whose table of contents the Archives tab is showing, so a
     // module adding to that archive can default to what is on screen.
     get currentArchive() { return currentArc; },
+    // After the Data Editor writes the disc: new levels (new .dat files) and new
+    // characters show in the level list, Creatures and the character views.
+    async refreshLists() {
+      levelCatalog = [];
+      crData = null;
+      crChars = null;
+      try { await loadLevels(); } catch (e) { console.error('[refreshLists]', e); }
+      if (document.querySelector('#tab-creatures.on')) { try { await loadCreatures(); } catch (e) { console.error(e); } }
+    },
+    // Animations > Export all animations, with the current model: what is on screen.
+    animModelState() {
+      if (!animModelLast || !animPlayer || !animPlayer.modelInfo || !animSkelTextLast) return null;
+      return { ...animModelLast, skelText: animSkelTextLast, skelName: $('#animSkel').value,
+               order: $('#animEuler').value || 'YZX', archive: animLoadedArchive };
+    },
+    // Add Character (dataeditor.js) reloads the creature list and opens the new one.
+    async refreshCreatures(pick) {
+      crData = null;
+      await loadCreatures();
+      const row = pick && [...document.querySelectorAll('#crList .row')].find((n) => n.dataset.cr === pick);
+      if (row) { row.click(); row.scrollIntoView({ block: 'center' }); }
+    },
   };
   // ?nomods=1 boots the shipped product with none of the new modules, which
   // is the fastest way to answer "is this the new code or was it already
@@ -12384,7 +13175,7 @@ for (const [sel, contSel, rowSel] of FILTERS) {
   const mods = qs.has('nomods') ? []
     : qs.get('mods') ? qs.get('mods').split(',')
     : ['transfer', 'nav', 'controls', 'cast', 'attrs', 'logic',
-       'versions', 'codemods', 'export', 'arcadd', 'animexport',
+       'versions', 'codemods', 'export', 'arcadd', 'animexport', 'dataeditor',
        // Each of these drives one gated panel and the release build deletes
        // the file, so the name has to go with it -- an import() of a missing
        // module is caught and logged, which is a silence that reads exactly

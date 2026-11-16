@@ -1,10 +1,19 @@
-# RDR Modding Studio (source)
+# RDR Modding Studio 2.0 (source)
 
 A modding tool and 3D level editor for **Red Dead Revolver** (PlayStation 2, USA, SLUS-20500):
-levels, models, collision, textures, animations (BVH), game data tables, save files, audio,
-cutscenes, mod packs and executable "code mods". Windows desktop app (Python + pywebview).
+levels, models, collision, textures, animations (BVH and glTF), game data tables, save files, audio
+and streams, Flash menus, cutscenes, mod packs and executable "code mods". Windows desktop app
+(Python + pywebview).
 
-Ready-made builds: https://github.com/pop123321pop/rdr-modding-studio/releases
+**Download:** the ready-made app is on this repository's [Releases](../../releases) page
+(`RDR-Modding-Studio-2.0.0-full.zip`: unzip anywhere and run `RDR Modding Studio.exe`).
+
+This is a fork of [RDR Modding Studio 1.4.0](https://github.com/pop123321pop/rdr-modding-studio) by
+pop123321pop. It adds, among other things, the RDR Data Editor built in (a mods folder built into the
+disc, archives rebuilt when an edit needs more room, new levels and characters), Flash screen (`.pck`)
+viewing and editing with font fill, named and replaceable sounds, a stream (`.stm`) creator with a loop
+editor, a fixed Blender animation round trip, glTF export of a clip on its model, and profiles.
+Everything it changed, and the research behind it: [05_Docs/RESEARCH/FORK-CHANGES.md](05_Docs/RESEARCH/FORK-CHANGES.md).
 
 ## You need your own disc
 
@@ -34,7 +43,9 @@ cd 03_Tools
 py -3 build_app.py             # creates its own venv, freezes with PyInstaller, runs the self-checks
 ```
 
-Output: `03_Tools/packaging/dist/RDR-Modding-Studio-<version>.zip`. Details: `03_Tools/packaging/BUILDING.md`.
+`py -3 build_app.py --internal` builds the **Full** edition this fork ships
+(`03_Tools/packaging/dist/internal/`, zipped as `RDR-Modding-Studio-<version>-full.zip`); without `--internal`
+it builds the original's public edition, which hides 14 tools. Details: `03_Tools/packaging/BUILDING.md`.
 
 ## Tests
 
@@ -56,6 +67,8 @@ included here; they print SKIP without it (see CONTRIBUTING.md).
 
 ## Docs
 
+- `05_Docs/RESEARCH/FORK-CHANGES.md` - what this fork changed from 1.4.0, and the measurements behind it
+- `05_Docs/DATA-EDITOR.md` - the Data Editor tab, rebuilding archives, new levels and characters
 - `05_Docs/CAPABILITIES.md` - what each format can and cannot do, with the probe that settled it
 - `05_Docs/RESEARCH/UNKNOWNS.md` - every file type: decoded, partial or unknown
 - `05_Docs/RESEARCH/FIELDS.md`, `GLOSSARY.md`, `ANIM-ABBREV.md` - field and naming notes
@@ -63,7 +76,8 @@ included here; they print SKIP without it (see CONTRIBUTING.md).
 - `05_Docs/USER_GUIDE.md`, `MODDING_GUIDE.md`, `HOWTO-CUSTOM-MODELS.md` - user docs (also in the app)
 - `03_Tools/research/` - probes that reproduce each research finding across the whole disc
 
-Code-mod hooks build on community reverse-engineering research.
+Code-mod hooks build on community reverse-engineering research. The `.pck` Flash screen format reading
+builds on AlgumCorrupto's RAGE-SWF-research. Original Studio by pop123321pop.
 
 ## Contributing
 

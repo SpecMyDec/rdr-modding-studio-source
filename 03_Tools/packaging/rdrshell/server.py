@@ -48,6 +48,7 @@ class StudioServer:
         cfg.BACKUPS = settings["checkpoints_dir"]
         cfg.EXTRACTED = settings["exports_dir"]
         cfg.EXPORTS = settings["exports_dir"]
+        cfg.DATA_EDITOR = settings.get("data_editor_dir") or ""
         if settings.get("pcsx2_exe"):
             cfg.PCSX2_EXE = settings["pcsx2_exe"]
             cfg.PCSX2_DIR = os.path.dirname(settings["pcsx2_exe"])
