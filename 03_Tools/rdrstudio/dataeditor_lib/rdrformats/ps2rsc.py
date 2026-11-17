@@ -523,6 +523,7 @@ def encode_level_batch(v: _Vif, verts: list, base: int):
     """One level batch, as the shipped levels have them: verts [(position (world), color rgba (1.0 = 0x80), uv,
     skip)]; three qwords a vertex: st, color, float position."""
     n = len(verts)
+    start = len(v.b)
     v.mask(0x40404040)
     v.cmd(0x05, imm=0)
     v.cmd(0x01, imm=0x0103)
@@ -548,7 +549,13 @@ def encode_level_batch(v: _Vif, verts: list, base: int):
     v.data(struct.pack('<3f', 0.0, 0.0, 0.0))
     v.cmd(0x04, imm=base)  # ITOP
     v.cmd(0x14, imm=0)  # MSCAL 0
+    # the shipped levels pad each batch to end 8 bytes past 16 (as the stream is laid out for the DMA) and state its
+    # REAL length in word 3 of its first qword -- the game walks a mesh's batches by that length (0x3B05D8: the next
+    # batch's STMASK must be there). Writing a fixed 6n + 36 instead left even-sized batches 8 bytes short (the game
+    # hung reading vertices), and padding every batch to 6n + 36 to match put odd-sized ones 8 bytes out of step
+    # (the screen went black); both found on Coliseum, 2026-11-16
     v.pad(16, 8)
+    struct.pack_into('<H', v.b, start + 32, (len(v.b) - start) // 4)
 
 
 def _strip_batches(strips: list, limit: int) -> list:
@@ -576,7 +583,7 @@ def _strip_batches(strips: list, limit: int) -> list:
     return [b for b in batches if b]
 
 
-def mod0(materials: list, bones: int, level: bool = False) -> bytes:
+def mod0(materials: list, bones: int, level: bool = False, floats: bool = False, diffuse=None) -> bytes:
     """A PS2 MOD0. materials: [(TEX0 chunk number or 0, vertices, triangles)], vertices [(position (relative to its
     bone when bones), normal, uv, bone)], triangles [(i, j, k)] into them. bones: the skeleton's bone count (0: a
     rigid or attached mesh). level: a level mesh, lit by its vertex colors: each vertex's normal slot holds its
@@ -589,7 +596,8 @@ def mod0(materials: list, bones: int, level: bool = False) -> bytes:
     lo = [min(p[k] for p in allp) for k in range(3)]
     hi = [max(p[k] for p in allp) for k in range(3)]
     center = tuple(round((lo[k] + hi[k]) / 2 * 16) / 16 for k in range(3))
-    floats = any(abs(p[k] - center[k]) >= POS_RANGE for p in allp for k in range(3))
+    # float positions when they reach past 16 bits' range -- or asked for (a level's animated object: world space)
+    floats = floats or any(abs(p[k] - center[k]) >= POS_RANGE for p in allp for k in range(3))
     radius = max(sum((p[k] - center[k]) ** 2 for k in range(3)) ** 0.5 for p in allp)
     streams, counts = [], []
     for tex, verts, tris in materials:
@@ -623,7 +631,9 @@ def mod0(materials: list, bones: int, level: bool = False) -> bytes:
     rec_at = 0x10 + 4 * nm
     draw_at = rec_at + 8 * nm
     color_at = draw_at + 4 * nm
-    desc_at = color_at + 64 + 4
+    cols = [tuple(diffuse[k]) if diffuse else (1.0, 1.0, 1.0, 1.0) for k in range(nm)]
+    uniq = list(dict.fromkeys(cols))  # a colour block each (0x50 apart), the materials pointing at theirs
+    desc_at = color_at + 0x50 * (len(uniq) - 1) + 64 + 4
     start = (desc_at + 8 * nm + 15) & ~15
     head = bytearray(start)
     struct.pack_into('<BBHIII', head, 0, nm, 0 if level else min(bones, 255), 1, 0x10, draw_at, 0)
@@ -634,15 +644,16 @@ def mod0(materials: list, bones: int, level: bool = False) -> bytes:
         at += len(s)
     for k, (tex, _v, _t) in enumerate(materials):
         struct.pack_into('<I', head, 0x10 + 4 * k, rec_at + 8 * k)
-        struct.pack_into('<II', head, rec_at + 8 * k, tex, color_at)
+        struct.pack_into('<II', head, rec_at + 8 * k, tex, color_at + 0x50 * uniq.index(cols[k]))
         struct.pack_into('<I', head, draw_at + 4 * k, desc_at + 8 * k)
         struct.pack_into('<IHH', head, desc_at + 8 * k, offs[k], len(streams[k]) // 16, counts[k])
-    struct.pack_into('<4f', head, color_at, 1.0, 1.0, 1.0, 1.0)
-    struct.pack_into('<f', head, color_at + 60, 1.0)
+    for j, c in enumerate(uniq):
+        struct.pack_into('<4f', head, color_at + 0x50 * j, *c)
+        struct.pack_into('<f', head, color_at + 0x50 * j + 60, 1.0)
     return bytes(head) + b''.join(streams)
 
 
-def texture_chunks(name: str, rgba, pal_num: int, mip_num: int):
+def texture_chunks(name: str, rgba, pal_num: int, mip_num: int, level: bool = False):
     """MIP0, PAL0, TEX0 for an RGBA image (rows top first): 256 colors, swizzled (as most shipped character
     textures), one level. Sides must be powers of two, at least 16 x 16 for the swizzle."""
     import numpy as np
@@ -667,6 +678,8 @@ def texture_chunks(name: str, rgba, pal_num: int, mip_num: int):
     palc = bytes.fromhex('01000001010000000400000000000000') + stored.tobytes()
     t = bytearray(0xC0)
     struct.pack_into('<IHHHHIII', t, 0x84, 0xA0, w, h, 0, 6, pal_num, mip_num, 1)
+    if level:  # every shipped level texture has it (character textures: 0); without it they draw as noise
+        struct.pack_into('<I', t, 0x70, 0x00010000)
     raw = name.encode('latin-1')[:0xC0 - 0xA0 - 1]
     t[0xA0:0xA0 + len(raw)] = raw
     return [('MIP0', bytes(mip) + pixels.tobytes()), ('PAL0', palc), ('TEX0', bytes(t))]
@@ -751,11 +764,11 @@ def build_level(base: list, replace_meshes: dict, new_meshes: list, new_textures
         pal_num, mip_num = struct.unpack_from('<II', t, 0x90)
         raw = t[0xA0:]
         name = raw[:raw.index(b'\0')].decode('latin-1') if b'\0' in raw else ''
-        mip, pal, tex0 = texture_chunks(name, fit(rgba), pal_num, mip_num)
+        mip, pal, tex0 = texture_chunks(name, fit(rgba), pal_num, mip_num, level=True)
         chunks[mip_num - 1], chunks[pal_num - 1], chunks[num - 1] = mip, pal, tex0
     for name, rgba in new_textures:
         n = len(chunks)
-        chunks += texture_chunks(name, fit(rgba), pal_num=n + 2, mip_num=n + 1)
+        chunks += texture_chunks(name, fit(rgba), pal_num=n + 2, mip_num=n + 1, level=True)
         numbers[name.lower()] = n + 3
     for num, m in replace_meshes.items():
         chunks[num - 1] = ('MOD0', mod0(model_input(m, numbers, level=True)[0], 0, level=True))

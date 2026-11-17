@@ -461,6 +461,14 @@ class AppApi:
         paths.save(self.s)
         return {"ok": True, "path": p, "restart": True}
 
+    def pick_any_folder(self, start=""):
+        """A folder chosen in the system's dialog, nothing saved (the page decides what it is for: the Xbox recomp)."""
+        kw = {"directory": start} if start and os.path.isdir(start) else {}
+        res = self.window[0].create_file_dialog(webview.FOLDER_DIALOG, **kw)
+        if not res:
+            return None
+        return res[0] if isinstance(res, (list, tuple)) else res
+
     def reset_app_folder(self, key):
         """Back to the default location (applied on restart)."""
         if key not in {k for k, _l, _n in self.FOLDERS}:
@@ -779,10 +787,17 @@ def main(argv=None):
         # Normal launch. Create the window on a blank page, then swap it to the
         # Studio the moment the socket answers -- so the window appears
         # immediately instead of after the backend is up.
+        # RDR_WINDOW_POS="x,y": where the window opens (test runs put it on another screen); unset: Windows decides
+        pos = {}
+        try:
+            px, py = (int(v) for v in os.environ.get("RDR_WINDOW_POS", "").split(","))
+            pos = {"x": px, "y": py}
+        except ValueError:
+            pass
         win = webview.create_window(
             "RDR Modding Studio", html=_SPLASH,
             width=s["window"]["width"], height=s["window"]["height"],
-            min_size=(1100, 700),
+            min_size=(1100, 700), **pos,
             # The running Studio's line to the shell: native file dialogs and
             # disc/emulator re-pointing. See AppApi for why this cannot be an
             # HTTP route.

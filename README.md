@@ -1,4 +1,4 @@
-# RDR Modding Studio 2.0 (source)
+# RDR Modding Studio 2.1 (source)
 
 A modding tool and 3D level editor for **Red Dead Revolver** (PlayStation 2, USA, SLUS-20500):
 levels, models, collision, textures, animations (BVH and glTF), game data tables, save files, audio
@@ -6,13 +6,16 @@ and streams, Flash menus, cutscenes, mod packs and executable "code mods". Windo
 (Python + pywebview).
 
 **Download:** the ready-made app is on this repository's [Releases](../../releases) page
-(`RDR-Modding-Studio-2.0.0-full.zip`: unzip anywhere and run `RDR Modding Studio.exe`).
+(`RDR-Modding-Studio-2.1.0-full.zip`: unzip anywhere and run `RDR Modding Studio.exe`).
 
 This is a fork of [RDR Modding Studio 1.4.0](https://github.com/pop123321pop/rdr-modding-studio) by
 pop123321pop. It adds, among other things, the RDR Data Editor built in (a mods folder built into the
 disc, archives rebuilt when an edit needs more room, new levels and characters), Flash screen (`.pck`)
 viewing and editing with font fill, named and replaceable sounds, a stream (`.stm`) creator with a loop
 editor, a fixed Blender animation round trip, glTF export of a clip on its model, and profiles.
+2.1 adds the Xbox version alongside the PS2: one mod builds into either game (the Xbox side through the
+RDR XBE recomp's game files), the Script Hooks tab (the trainer with controller mapping, unlocks), Replace All
+Characters, weapon model .mod / .xmod import and export, and each level's enemy roster in Logic > Missions.
 Everything it changed, and the research behind it: [05_Docs/RESEARCH/FORK-CHANGES.md](05_Docs/RESEARCH/FORK-CHANGES.md).
 
 ## You need your own disc

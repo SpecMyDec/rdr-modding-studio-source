@@ -1,5 +1,5 @@
 """The rest of the per-character file family: .dam .sphs .ars .hot .tail .acc
-.armr .rep
+.armr .rep (and .swt, all its fields: see swt_read)
 
 `creature.py` reads a character's `.cr` and `swt.py` its `.swt`. Those two are
 the numbers. These eight are the body: what each limb takes, where its
@@ -850,6 +850,58 @@ def rep_set(text, changes):
 
 # --------------------------------------------------------------- the registry
 
+# ------------------------------------------------------------------- .swt
+#
+# The SWAT creature type (swt.py): one flat SwatCreatureType block of ~548 fields. The Creatures tab shows 40 of them;
+# here are all of them -- those 40 first in swt.py's groups, then the rest grouped by their first dotted name
+# (SixNumbersRH.pistol.HolsterOffset.x under SixNumbersRH, ...). Edited value by value through props' spans.
+
+_SWT_CONTROL = {"num": "float", "int": "int", "bool": "bool", "text": "text"}
+
+
+def swt_read(text):
+    from . import props, swt
+    have = {f.path: f for f in props.parse(text)}
+    sections, used = [], set()
+    for label, fields in swt.FIELD_GROUPS:
+        rows = []
+        for field, hint, kind in fields:
+            f = have.get(swt._path(field))
+            if f is None:
+                continue
+            used.add(f.path)
+            rows.append(_row(f.path, field, f.raw.strip(), _SWT_CONTROL.get(kind, "text"), hint))
+        if rows:
+            sections.append(dict(label=label, kind="SwatCreatureType", index=len(sections), rows=rows))
+    rest = {}
+    for f in have.values():
+        if f.path in used:
+            continue
+        key = f.path.split("/", 1)[-1]
+        rest.setdefault(key.split(".", 1)[0] if "." in key else "Other fields", []).append(f)
+    for label in sorted(rest, key=lambda k: (k == "Other fields", k.lower())):
+        rows = [_row(f.path, f.path.split("/", 1)[-1], f.raw.strip(),
+                     "float" if _NUM_TOKEN.match(f.raw.strip()) else "text", "")
+                for f in rest[label]]
+        sections.append(dict(label=label, kind="all fields", index=len(sections), rows=rows))
+    return dict(layout="form", sections=sections)
+
+
+def swt_set(text, changes):
+    from . import props
+    have = {f.path: f for f in props.parse(text)}
+    edits = []
+    for path, value in changes.items():
+        f = have.get(path)
+        if f is None:
+            raise Unknown("this .swt has no %s" % path)
+        if _NUM_TOKEN.match(f.raw.strip()):
+            edits.append((f.start, f.end, render_number(f.raw, value)))
+        else:
+            edits.append((f.start, f.end, str(value).strip()))
+    return edits
+
+
 KINDS = {
     "dam":  dict(title="Damage tables", reader=dam_read, editor=dam_set,
                  wants=(), blurb="What each limb takes."),
@@ -870,9 +922,12 @@ KINDS = {
                  wants=(), blurb="Shields and plates that soak damage."),
     "rep":  dict(title="Animation slots", reader=rep_read, editor=rep_set,
                  wants=("anims",), blurb="Which clip plays for which slot."),
+    "swt":  dict(title="Combat type (.swt)", reader=swt_read, editor=swt_set,
+                 wants=(), blurb="Every field of the SWAT creature type: the damage it deals and takes, "
+                                 "its weapon offsets, ..."),
 }
 
-ORDER = ("dam", "sphs", "ars", "hot", "tail", "acc", "armr", "rep")
+ORDER = ("dam", "sphs", "ars", "hot", "tail", "acc", "armr", "rep", "swt")
 
 
 def read(ext, data, **ctx):

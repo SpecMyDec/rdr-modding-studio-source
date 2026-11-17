@@ -51,7 +51,7 @@ PY = VENV_PY if os.path.isfile(VENV_PY) else sys.executable
 WEB = os.path.join(TOOLS, "web")
 MANIFEST = os.path.join(TOOLS, "features.json")
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 APPNAME = "RDR Modding Studio"
 
 EDITIONS = {

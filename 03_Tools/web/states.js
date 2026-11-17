@@ -122,7 +122,8 @@ async function loadTables(force) {
   listedFor = key;
 
   const stop = waiting(host, 'Reading the archive…');
-  const r = await call('behaviour_tables?archive=' + encodeURIComponent(arc)
+  // every table (SWAT.DAT has 2,705; the server's default page is 400)
+  const r = await call('behaviour_tables?archive=' + encodeURIComponent(arc) + '&limit=100000'
     + (filter ? '&q=' + encodeURIComponent(filter) : ''), 'GET');
   stop();
   host.innerHTML = '';

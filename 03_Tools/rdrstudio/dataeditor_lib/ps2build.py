@@ -28,6 +28,7 @@ takes seconds; rebuilding swat.dat takes about a minute.
 from __future__ import annotations
 
 import argparse
+import io
 import re
 import hashlib
 import json
@@ -421,8 +422,8 @@ def new_archive_order(p, folder, iso, dats, archives):
     clean archive of its folder sharing the most files (Ranch's for a Showdown map: the shared files and the
     template's own, its level name swapped), and for the files of another level's place (a story level's,
     lvl_<story>_...) that level's archive, in its order, where the template's own level files were.
-    {lower case name: sort key}."""
-    fresh = os.listdir(folder)
+    {lower case name: sort key}. folder: a folder, or the archive's files in memory {name: bytes}."""
+    fresh = [k for k in folder if '/' not in k] if isinstance(folder, dict) else os.listdir(folder)
     low = [f.lower() for f in fresh]
     stem = 'lvl_' + os.path.splitext(p.rsplit('/', 1)[-1])[0].lower()
     group = p.rsplit('/', 1)[0] + '/'
@@ -661,14 +662,36 @@ def load_index(a, iso):
     return index, dats, stamp, holders
 
 
+_ENTRY_CACHE = []  # [(archive bytes, names, {path: index}, {name: index})]: the last few archives read from
+
+
+def _entry_index(data):
+    """An archive's names and lookups, parsed once while it is among the last eight read (archive_info walks the
+    whole table: reading a few hundred files from swat.dat one by one took minutes)."""
+    for k, item in enumerate(_ENTRY_CACHE):
+        if item[0] is data:
+            if k:
+                _ENTRY_CACHE.insert(0, _ENTRY_CACHE.pop(k))
+            return item[1:]
+    names = archive_info(data)[0]
+    full, short = {}, {}
+    for i, n in enumerate(names):
+        low = n.lower()
+        full.setdefault(low, i)
+        short.setdefault(low.rsplit('/', 1)[-1], i)
+    _ENTRY_CACHE.insert(0, (data, names, full, short))
+    del _ENTRY_CACHE[8:]
+    return names, full, short
+
+
 def read_entry(data, name):
     """One file of a Dave/DAVE archive (its bytes) by its path or name (any case); None if it has none."""
     import zlib
-    names = archive_info(data)[0]
+    names, full_ix, short_ix = _entry_index(data)
     want = name.lower().replace('\\', '/')
-    hit = next((i for i, n in enumerate(names) if n.lower() == want), None)
+    hit = full_ix.get(want)
     if hit is None:
-        hit = next((i for i, n in enumerate(names) if n.lower().rsplit('/', 1)[-1] == want.rsplit('/', 1)[-1]), None)
+        hit = short_ix.get(want.rsplit('/', 1)[-1])
     if hit is None:
         return None, None
     _no, off, full, comp = struct.unpack_from('<4I', data, 0x800 + 16 * hit)
@@ -1196,11 +1219,12 @@ PICTURE_KINDS = {
     'mp_portrait': (128, 128, 'pa8', False, '010001000100'),   # mp_<code>.tex, the multiplayer portraits
     'level_sp': (128, 128, 'pa8', False, '010000000000'),      # img0_*.tex, the single player journal pictures
     'level_mp': (256, 128, 'pa4', False, '010001000100'),      # levelselect_*.tex, the Showdown map pictures
+    'mp_photo': (256, 128, 'pa8', False, '010001000100'),      # ui_mphoto_<code>.tex, the Showdown full-body photos
 }
 
 
 # The names the game gives each picture kind: book_red is one file; the others carry their prefix.
-PICTURE_PREFIX = {'mp_portrait': 'mp_', 'level_sp': 'img0_', 'level_mp': 'levelselect_'}
+PICTURE_PREFIX = {'mp_portrait': 'mp_', 'level_sp': 'img0_', 'level_mp': 'levelselect_', 'mp_photo': 'ui_mphoto_'}
 
 
 def picture_name(mode, src_name, wanted=None):
@@ -1243,6 +1267,16 @@ def mp_portrait(img, place=None):
     oa = ink + sq[..., 3] * (1 - ink)
     rgb = np.where(oa[..., None] > 0, (sq[..., :3] * (sq[..., 3] * (1 - ink))[..., None]) / np.maximum(oa, 1e-9)[..., None], 0)
     return np.clip(np.concatenate([rgb, oa[..., None]], -1) * 255 + 0.5, 0, 255).astype(np.uint8)
+
+
+def mp_photo(img, place=None):
+    """A Showdown full-body photo (ui_mphoto_<code>.tex), as the game's are: the picture in colour with its own
+    transparency, fitted upright on a 128 x 256 page and stored a quarter turn anticlockwise (head to the left) in a
+    256 x 128 texture -- the game turns it back. Checked on ui_mphoto_srd / _jck: turned clockwise they stand upright.
+    256x128 RGBA, rows top first."""
+    import numpy as np
+    page = _page(img, place, 128, 256)
+    return np.ascontiguousarray(np.rot90(page, 1))
 
 
 def level_picture(img, kind, place=None):
@@ -1364,12 +1398,24 @@ def check_view_rooms(folder):
     """The levels in a folder whose AI rooms do not match their view data: a level's _view bundle (RSV0) has a record
     per AIROOM box of its .lvl's box files, in order, and the game pairs them up when the level loads (true of all
     25 shipped levels with view data). A room deleted (in Blender) leaves a record with no room: the Xbox game
-    crashes loading the level (a null read in the view loader). Returns the warnings."""
+    crashes loading the level (a null read in the view loader). Returns the warnings. folder: a folder, or the
+    archive's files in memory {name: bytes}."""
     warnings = []
-    try:
-        files = {f.lower(): f for f in os.listdir(folder)}
-    except OSError:
-        return warnings
+    if isinstance(folder, dict):
+        mem = folder
+        files = {k.lower(): k for k in mem if '/' not in k}
+
+        def _open(name, *a, encoding=None):
+            b = mem[name]
+            return io.StringIO(b.decode(encoding)) if encoding else io.BytesIO(b)
+    else:
+        try:
+            files = {f.lower(): f for f in os.listdir(folder)}
+        except OSError:
+            return warnings
+
+        def _open(name, *a, encoding=None):
+            return open(os.path.join(folder, name), *a, encoding=encoding)
     for low, f in files.items():
         if not (low.startswith('lvl_') and low.endswith('.lvl')):
             continue
@@ -1378,17 +1424,17 @@ def check_view_rooms(folder):
         if not view:
             continue
         try:
-            data = open(os.path.join(folder, view), 'rb').read()
+            data = _open(view, 'rb').read()
             n, hs = struct.unpack_from('<II', data, 4)
             records = struct.unpack_from('<I', data, hs)[0]
-            lvl = open(os.path.join(folder, f), encoding='latin-1').read()
+            lvl = _open(f, encoding='latin-1').read()
         except (OSError, struct.error):
             continue
         rooms = 0
         for b in re.findall(r'(\S+\.bxes)', lvl):
             real = files.get(b.lower())
             if real:
-                rooms += len(re.findall(r'(?m)^Box\s+\S*AIROOM_', open(os.path.join(folder, real), encoding='latin-1').read()))
+                rooms += len(re.findall(r'(?m)^Box\s+\S*AIROOM_', _open(real, encoding='latin-1').read()))
         if rooms != records:
             warnings.append(f'WARNING {stem}: its view data has {records} records but its box files have {rooms} AI rooms '
                             f'(box_AIROOM_...): the game crashes loading this level. Was an AI room box deleted in '
@@ -1430,6 +1476,8 @@ def png_to_tex(a):
                 img = ink_plain(img, a.alpha == 'ink_white')
             elif a.alpha == 'mp_portrait':
                 img = mp_portrait(img, place)
+            elif a.alpha == 'mp_photo':
+                img = mp_photo(img, place)
             elif a.alpha in ('level_sp', 'level_mp'):
                 img = level_picture(img, a.alpha, place)
             else:

@@ -326,8 +326,10 @@ function control(f, cast, onChange) {
   return wrap;
 }
 
-async function buildCard(host, node) {
-  const lv = A.level;
+// `opts` (Logic > Missions): {lv: {archive, area, manifest}, onApplied, onDiscard} for a level the 3D editor has not
+// loaded; without it, the 3D editor's level and its reload / inspector.
+async function buildCard(host, node, opts) {
+  const lv = (opts && opts.lv) || A.level;
   if (!lv) return;
   const cast = await getCast(lv.archive, lv.area);
   if (!cast.ok) return renderProblem(host, cast.problem);
@@ -463,16 +465,22 @@ async function buildCard(host, node) {
     if (!r.ok) { renderProblem(planHost, r.problem); return; }
     if (r.plan) A.toast(r.plan.undo?.label || 'Applied.', 'good');
     for (const k of keys) delete changes[k];
-    await A.reloadLevel(true);
+    if (opts && opts.onApplied) await opts.onApplied();
+    else await A.reloadLevel(true);
     A.refreshHistory();
   };
   acts.append(applyBtn);
 
   const revert = el('button', '', 'Discard');
   revert.title = 'Throw away the pending changes and re-read the file.';
-  revert.onclick = () => A.renderInspector();
+  revert.onclick = () => (opts && opts.onDiscard ? opts.onDiscard() : A.renderInspector());
   acts.append(revert);
-  card.append(acts);
+  // Logic > Missions puts Apply / Discard in its bar, beside the enemy count
+  if (opts && opts.actionsHost) {
+    acts.style.marginTop = '0';
+    opts.actionsHost.innerHTML = '';
+    opts.actionsHost.append(acts);
+  } else card.append(acts);
 
   host.innerHTML = '';
   host.append(card);
@@ -1332,8 +1340,80 @@ function renderWarnings(host, warnings) {
   }
 }
 
+// Logic > Missions, the bottom half: the mission's level's enemy roster (.enm) -- every enemy listed, and the one
+// picked in the same card as the 3D editor's (character, behaviour .tbl, weapons, drops, skin and the rest).
+export async function missionEnemies(host, archive, wantFile) {
+  host.innerHTML = '';
+  if (!archive) { host.append(el('div', 'empty', 'This mission has no level archive.')); return; }
+  const stop = waiting(host, 'Reading the level\'s enemies…');
+  const load = (file) => call('mission_enemies?archive=' + encodeURIComponent(archive)
+    + (file ? '&file=' + encodeURIComponent(file) : ''), 'GET');
+  let r = await load(wantFile);
+  stop();
+  host.innerHTML = '';
+  if (!r.ok) { host.append(el('div', 'empty', r.error_text || (r.problem && r.problem.message) || 'Could not read it.')); return; }
+  if (!r.files.length) {
+    host.append(el('div', 'empty', 'This level keeps no enemy roster of its own (its enemies live in SWAT.DAT).'));
+    return;
+  }
+  const bar = el('div', 'bar');
+  bar.style.cssText = 'display:flex;gap:8px;align-items:center';
+  bar.append(el('b', null, 'Enemies (.enm)'));
+  const sel = el('select');
+  for (const f of r.files) sel.append(new Option(f, f));
+  sel.value = r.file;
+  const count = el('span', 'muted', '');
+  const actsHost = el('span');
+  actsHost.style.cssText = 'display:inline-flex;gap:6px;align-items:center';
+  bar.append(sel, count, actsHost);
+  const body = el('div');
+  body.style.cssText = 'display:flex;flex:1;min-height:0';
+  const list = el('div', 'scroll');
+  list.style.cssText = 'width:240px;flex:none;border-right:1px solid var(--line);overflow:auto';
+  const card = el('div', 'scroll pad');
+  card.style.cssText = 'flex:1;overflow:auto';
+  body.append(list, card);
+  host.append(bar, body);
+  let picked = null;
+  const lv = { archive, area: null, manifest: null };
+  const show = (r2) => {
+    r = r2;
+    list.innerHTML = '';
+    count.textContent = `${r.enemies.length} enem${r.enemies.length === 1 ? 'y' : 'ies'}`;
+    if (!r.enemies.length) { actsHost.innerHTML = ''; card.innerHTML = ''; card.append(el('div', 'empty', 'No enemies in this roster.')); return; }
+    for (const n of r.enemies) {
+      const p = n.props || {};
+      const row = el('div', 'row');
+      row.style.cssText = 'padding:4px 8px;cursor:pointer';
+      row.append(el('div', null, n.name));
+      const sub = el('div', 'muted', `${p.Type || '?'} · ${p.Table || '?'}`);
+      sub.style.fontSize = '11px';
+      row.append(sub);
+      row.onclick = () => open(n);
+      row.dataset.uid = String(n.uid);
+      if (picked === n.uid) row.classList.add('sel');
+      list.append(row);
+    }
+    const again = r.enemies.find((n) => n.uid === picked) || r.enemies[0];
+    open(again);
+  };
+  const open = (n) => {
+    picked = n.uid;
+    for (const x of list.children) x.classList.toggle('sel', x.dataset.uid === String(n.uid));
+    buildCard(card, n, {
+      lv,
+      actionsHost: actsHost,
+      onApplied: async () => { const r2 = await load(sel.value); if (r2.ok) show(r2); },
+      onDiscard: () => open(n),
+    });
+  };
+  sel.onchange = async () => { picked = null; const r2 = await load(sel.value); if (r2.ok) show(r2); };
+  show(r);
+}
+
 export function init(bridge) {
   A = bridge;
+  window.rdrMissionEnemies = missionEnemies;   // Logic > Missions, the bottom half (app.js openMission)
   // app.js owns the Creatures tab and tells us which creature is open. An
   // event, so this module failing to load costs the panel and nothing else.
   window.addEventListener('rdr:creature', (e) => loadSwapPanel(e.detail));

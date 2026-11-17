@@ -1516,6 +1516,76 @@ class Studio:
             self._levels[(archive, manifest, area)] = lvl
             self._levels[(archive, manifest, lvl.area)] = lvl
 
+    # A new level in the Data Editor's mods folder that is not on the working disc yet -- an imported Xbox level
+    # (Coliseum: the Xbox game has it, the PS2 disc not) or a New .dat map before its first Build: listed with the
+    # disc's levels and opened from its folder (packed in memory), to look at; a Build puts it on the disc, where
+    # it can be edited like the others. One mod for both games: on the Xbox side as on the PS2 side.
+    def _mods_level_folders(self):
+        """{ARCHIVE: folder} of the levels the working disc has not: the mods folder's new ones, then the Xbox game's
+        own the PS2 disc lacks (Coliseum), made the PS2's in the cache to show (rdrstudio/xboxmode.py)."""
+        out = {}
+        de = _data_editor_for(self)
+        if de is None:
+            return out
+        try:
+            from .xboxmode import xbox as _xbox
+            X = _xbox(de)
+            xlevels = X.xbox_level_archives()
+        except Exception:                                   # noqa: BLE001
+            X, xlevels = None, {}
+        self._xbox_levels = set(getattr(X, "shipped_levels", set())) if X is not None else set()
+        try:
+            src = self.game or self.vanilla
+            disc = {a.upper() for a in src.archives()} if src is not None else set()
+        except Exception:                                   # noqa: BLE001
+            disc = set()
+        for group in ("lvls_m2", "lvls_m4", "lvls_sng"):
+            top = os.path.join(de.mods, group)
+            if not os.path.isdir(top):
+                continue
+            for f in os.listdir(top):
+                folder = os.path.join(top, f)
+                stem = "lvl_" + f[:-4].lower()
+                if f.lower().endswith(".dat") and os.path.isdir(folder) and \
+                        any(n.lower() == stem + ".rsc" for n in os.listdir(folder)):
+                    out[("%s/%s" % (group, f)).upper()] = folder
+        self._mods_only = set(out)
+        for arc, path in sorted(xlevels.items()):
+            if arc in out or arc in disc:
+                continue
+            try:
+                out[arc] = X.converted_level(arc, path)
+            except Exception:                               # noqa: BLE001
+                continue
+        return out
+
+    def mods_levels(self, listed):
+        """Catalog entries for the mods folder's new levels the working disc does not have (see above)."""
+        from . import modes as _modes
+        out = []
+        folders = self._mods_level_folders()
+        native = getattr(self, "_xbox_levels", set())
+        for arc, _folder in sorted(folders.items()):
+            if arc in listed:
+                continue
+            group, fname = arc.split("/", 1)
+            name = fname[:-4].upper()                      # as the game's own are listed (RANCH2)
+            showdown = group in ("LVLS_M2", "LVLS_M4")
+            players = "2P" if group == "LVLS_M2" else "4P" if group == "LVLS_M4" else ""
+            if arc in native:
+                # one of the Xbox game's own (Coliseum): with the game's levels, as on the Xbox
+                mode = "showdown2" if group == "LVLS_M2" else "showdown4" if group == "LVLS_M4" else "bonus"
+                out.append(dict(archive=arc, name=name, group=group, base=name.upper(), mode=mode,
+                                mode_label=_modes.MODE_LABELS[mode],
+                                missions=[], players=players, from_mods=True, xbox_level=True))
+                continue
+            where = "Xbox" if arc not in getattr(self, "_mods_only", set()) else "mods folder"
+            out.append(dict(archive=arc, name=name + (" (M, %s)" % where if showdown else " (S, %s)" % where),
+                            group=group, base=name.upper(), mode="custom", mode_label="Custom levels",
+                            missions=[], kind="showdown" if showdown else "single", players=players,
+                            from_mods=True))
+        return out
+
     def level(self, archive, reload=False, manifest=None, area=None):
         with self.lock:
             self.ensure_open()
@@ -1545,6 +1615,14 @@ class Studio:
                 # locked by the emulator: browsing and inspecting still work,
                 # only writing is unavailable.
                 src = self.game or self.vanilla
+                try:
+                    on_disc = archive.upper() in {a.upper() for a in src.archives()}
+                except Exception:                           # noqa: BLE001
+                    on_disc = True
+                if not on_disc:
+                    folder = self._mods_level_folders().get(archive.upper())
+                    if folder:
+                        src = _FolderLevelGame(src, archive, folder)
                 lv = Level(src, archive, manifest, area=area)
                 lv.grow_by_rebuild = bool(src is self.game and self.rebuild_on_overflow)
                 # A level whose parse hit a READ error is short some objects,
@@ -2849,13 +2927,27 @@ class Handler(BaseHTTPRequestHandler):
             # back out from under a booting PCSX2.
             held = s.game is not None
             free = False if held else s.free_for_emulator()
+            # a build writing the working disc right now (Play waits for it: PCSX2 would read a half-written disc)
+            building = None
+            de = getattr(s, "_data_editor", None)
+            if de is not None and de.job.get("state") == "running":
+                building = de.job.get("label") or "Data Editor build"
+            elif (getattr(s, "_rebuild_job", None) or {}).get("state") == "running":
+                building = "Rebuilding .dat files"
+            else:
+                try:
+                    from . import codemods as _cm
+                    if _cm.job_status().get("state") == "running":
+                        building = "Code Mods build"
+                except Exception:                               # noqa: BLE001
+                    pass
             return self._send(200, dict(
                 studio_holds=held, free_for_emulator=(not held) and free,
                 locked_by_other=(not held) and not free,
                 handed_over=bool(getattr(s, "_handed_over", False)),
                 pending_rebuild=s.pending.summary(),
                 rebuild_job=getattr(s, "_rebuild_job", None),
-                build_waiting=_build_waiting(s)))
+                build_waiting=_build_waiting(s), building=building))
 
         if route in ("codemods", "codemods_status"):
             # Code Mods (the original research's noclip/freeze/camera-lock hooks). READ-ONLY: looks at the stock ISO,
@@ -2873,7 +2965,13 @@ class Handler(BaseHTTPRequestHandler):
             # mission list. On disc the three sit intermixed.
             from . import modes
             try:
-                return self._send(200, modes.catalog(s.disc, stock=s.vanilla))
+                cat = modes.catalog(s.disc, stock=s.vanilla)
+                cat += s.mods_levels({e["archive"].upper() for e in cat})
+                # the game's levels in their groups again (Coliseum among the Showdown maps)
+                order = {"campaign": 0, "bonus": 1, "showdown2": 2, "showdown4": 3, "frontend": 4, "custom": 5}
+                cat.sort(key=lambda e: (order.get(e["mode"], 9),
+                                        e["missions"][0]["number"] if e.get("missions") else 99, e["name"]))
+                return self._send(200, cat)
             except Exception:
                 out = []
                 for a in list_levels(s.disc):
@@ -4145,6 +4243,62 @@ class Handler(BaseHTTPRequestHandler):
                     range=round(p["range"], 2) if p else None))
             return self._send(200, dict(archive=arc, bundle=name, parts=rows))
 
+        if route == "mission_enemies":
+            # Logic > Missions, the bottom half: a level's enemy rosters (.enm) and the enemies in one -- the one
+            # for the mission's variation (lvl_<level>_var_<n>.enm) when asked. Each enemy as the 3D editor's
+            # inspector has it (uid, name, file, its fields as written), edited through GET enemy / POST enemy_set.
+            archive = one("archive")
+            if not archive:
+                return self._send(400, {"error": "need a level archive"})
+            try:
+                lvl = s.level(archive)
+            except Exception as ex:                             # noqa: BLE001
+                return self._send(200, {"ok": False, "error_text": "%s could not be opened: %s" % (archive, ex)})
+            files = lvl.enm_files()
+            want = (one("file") or "").lower()
+            pick = next((f for f in files if f.lower() == want), None) or (sorted(files)[0] if files else None)
+            enemies = []
+            for n in (lvl.enemy_nodes(pick) if pick else []):
+                try:
+                    pos = list(n.xyz())
+                except Exception:                               # noqa: BLE001
+                    pos = None
+                enemies.append(dict(uid=n.uid, name=n.props.get("Name") or n.name, source=n.source,
+                                    props=dict(n.props), pos=pos,
+                                    angle=(n.angle.value if getattr(n, "angle", None) else 0.0)))
+            return self._send(200, {"ok": True, "archive": archive, "files": sorted(files), "file": pick,
+                                    "enemies": enemies})
+
+        if route == "weapon_model_export":
+            # Stats > Weapons & stats > Weapon model: the weapon's model as the game has it, the PS2's .mod (as on
+            # the working disc) or converted to the Xbox's .xmod.
+            target = one("target")
+            fmt = (one("format", "mod") or "mod").lower()
+            if not target:
+                return self._send(400, {"error": "need the model, as `target`"})
+            arcs = s.disc.locate(target)
+            if not arcs:
+                return self._send(404, {"error": "the working disc has no %s" % target})
+            arc = next((a for a in arcs if a.upper() == "SWAT.DAT"), arcs[0])
+            data = s.disc.read(arc, target)
+            stem = target.rsplit(".", 1)[0]
+            if fmt == "xmod":
+                try:
+                    data, _notes = _weapon_model_convert(s.disc, data, target, True)
+                except Exception as ex:                         # noqa: BLE001
+                    return self._send(200, {"ok": False, "problem": {
+                        "message": "the model could not be made the Xbox's: %s" % ex}})
+                fname = stem + ".xmod"
+            else:
+                fname = stem + ".mod"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname)
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if route == "level_export":
             # A WHOLE level as one OBJ + MTL + textures, zipped.
             #
@@ -4178,6 +4332,46 @@ class Handler(BaseHTTPRequestHandler):
             lay = "native" if one("layout", "auto") == "native" else "auto"
             # Comma-separated area bundle names or stems; empty means all.
             want_areas = [a for a in one("areas", "").split(",") if a.strip()]
+            fmt = one("format", "model")
+            if fmt in ("rsc", "xrsc"):
+                # the level's own files, as the game reads them: for the PS2 (.rsc, .znes ...) or made the Xbox's
+                # (.xrsc, .xznes ...), zipped -- for another mod, Blender's importer, or the other game
+                try:
+                    stem = "lvl_" + arc.rsplit("/", 1)[-1][:-4].lower()
+                    files = {}
+                    folder = s._mods_level_folders().get(arc.upper()) if arc.upper() not in {
+                        a.upper() for a in (s.game or s.vanilla).archives()} else None
+                    if folder:
+                        for f in os.listdir(folder):
+                            p = os.path.join(folder, f)
+                            if os.path.isfile(p) and f.lower().startswith(stem) and not f.lower().endswith(
+                                    (".xrsc", ".xrnt", ".xznes", ".xtex", ".xmod", ".xalpha", ".xbd", ".xhd")):
+                                files[f] = open(p, "rb").read()
+                    else:
+                        from .game import Game as _Game
+                        g = _Game(s.modded_path, writable=False)
+                        try:
+                            a = g.archive(arc)
+                            for e in a:
+                                n = e.name.rsplit("/", 1)[-1]
+                                if not e.name.endswith("/") and n.lower().startswith(stem):
+                                    files[n] = a.read(e)
+                        finally:
+                            g.close()
+                    if not files:
+                        return self._send(400, {"error": "%s has no level files (%s...)" % (arc, stem)})
+                    from .xboxmode import xbox as _xbox
+                    out = _xbox(_data_editor(s)).level_files(arc, files, fmt == "xrsc")
+                except Exception as ex:                    # noqa: BLE001
+                    return self._send(400, {"error": "export failed: %s" % ex})
+                buf = _io.BytesIO()
+                with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED, compresslevel=6) as z:
+                    for n in sorted(out):
+                        z.writestr(n, out[n])
+                s.note("exported %s's level files for the %s: %d files"
+                       % (arc, "Xbox" if fmt == "xrsc" else "PS2", len(out)))
+                self._send(200, buf.getvalue(), "application/zip")
+                return
             tmp = tempfile.mkdtemp(prefix="rdrlvl")
             try:
                 # A FRESH read-only handle on the same working file, not the
@@ -4801,13 +4995,21 @@ class Handler(BaseHTTPRequestHandler):
                                         "this computer, not over the network."))
         try:
             if route == "de_add":
-                return self._send(200, dict(added=de.add_files(body.get("folder", ""), body.get("files") or [])))
+                # Xbox files (.xtex, .xmod, .xrsc + .xrnt) made the PS2's on the way in; an Xbox level's refused
+                from .dataeditor_more import more as _more
+                files, notes = _more(de).xbox_payload(body.get("files") or [], body.get("alpha") or None,
+                                                      body.get("resize", True) is not False)
+                return self._send(200, dict(added=de.add_files(body.get("folder", ""), files), notes=notes))
+            if route == "de_dat_place":
+                return self._send(200, de.dat_place(body.get("name", ""), body.get("into", "")))
             if route == "de_import":
-                notes = [de.import_archive(f["name"], base64.b64decode(f["data"]), body.get("into", ""))
+                notes = [de.import_archive(f["name"], base64.b64decode(f["data"]), body.get("into", ""),
+                                           bool(body.get("replace")))
                          for f in body.get("files") or []]
                 return self._send(200, dict(results=notes))
             if route == "de_delete":
-                return self._send(200, dict(deleted=de.delete_files(body.get("keys") or [])))
+                return self._send(200, dict(deleted=de.delete_files(body.get("keys") or [],
+                                                                    bool(body.get("permanent")))))
             if route == "de_save":
                 base = de.workbench if body.get("in") == "workbench" else None
                 de.save_text(body.get("key", ""), body.get("text", ""), base)
@@ -4820,6 +5022,8 @@ class Handler(BaseHTTPRequestHandler):
                                                                 to=body.get("to") or None), to=body.get("to") or "dat"))
             if route == "de_adopt":
                 return self._send(200, dict(ok=de.adopt(body.get("archive", ""))))
+            if route == "de_cancel":
+                return self._send(200, de.cancel())
             if route in ("de_build", "de_restore", "de_newdat"):
                 de.check_pcsx2()          # refused at once, with the reason, instead of from inside the job
             if route == "de_build":
@@ -4894,6 +5098,155 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("de_"):
             return self._de_post(route, body)
 
+        if route == "character_rsc_import_all":
+            # Creatures > Replace All Characters: ONE character bundle (.rsc + .rnt, or the Xbox's .xrsc + .xrnt) over
+            # the model of every humanoid character -- every character whose skeleton has the bone count the model is
+            # rigged to (the others, animals and the like, would crash on it and are left as they are). Each target's
+            # copy has its meshes named for that character (<render>_lod_01 ...); an Xbox bundle is made the PS2's
+            # with each target's skeleton. Every copy of every bundle on the disc, as ONE undo step; an archive with no
+            # room is rebuilt on the next Build or Play. `dry` lists what it would do.
+            import base64 as _b64
+            import re as _re
+            import sys as _sys
+            from . import dataeditor as _dem
+            if _dem._LIB not in _sys.path:
+                _sys.path.insert(0, _dem._LIB)
+            rsc_in = _b64.b64decode(body.get("rsc_b64") or "")
+            rnt_in = _b64.b64decode(body.get("rnt_b64") or "") if body.get("rnt_b64") else None
+            xbox_in = (body.get("rsc_name") or "").lower().endswith(".xrsc")
+            if rnt_in is None:
+                return self._send(200, dict(ok=False, error_text=(
+                    "Pick the names file too: the .rnt with the .rsc (or the .xrnt with the .xrsc)")))
+            import modconvert as _MC
+            # the bone count the model is rigged to
+            try:
+                if xbox_in:
+                    _tex, meshes = _MC.read_bundle(rsc_in, rnt_in, True)
+                    want = max([(m.header_totals or (0, 0, 0))[2] for _n, m in meshes] or [0])
+                else:
+                    if rsc_in[:4] != b"RSC0":
+                        return self._send(200, dict(ok=False, error_text=(
+                            "That is not a compiled bundle (.rsc): it does not start with RSC0")))
+                    from .rsc import Rsc as _Rsc
+                    r0 = _Rsc(rsc_in, "model_lods.rsc")
+                    want = max([r0.bone_count(c.index) for c in r0.chunks if c.tag == "MOD0"] or [0])
+            except Exception as ex:                             # noqa: BLE001
+                return self._send(200, dict(ok=False, error_text="The bundle could not be read: %s" % ex))
+            if not want:
+                return self._send(200, dict(ok=False, error_text="The bundle has no rigged model in it"))
+            # every character: its .cr's model bundle and skeleton
+            # humanoid = a skeleton with at least that many bones whose first ones are the same joints as the model's
+            # rig (the 52 of the standard humanoid skeleton: gbw's 59, Black's 62, Red's 53 add tails and coattails
+            # after them; ani, ct2 and dar order theirs differently, and the animals have fewer)
+            from . import skeleton as _SK
+            swat = s.disc.archive("SWAT.DAT")
+            names_of = {}
+
+            def _bone_names(skel):
+                if skel not in names_of:
+                    try:
+                        names_of[skel] = [x.name for x in _SK.parse(swat.read(skel + ".skel"))[2]]
+                    except Exception:                           # noqa: BLE001
+                        names_of[skel] = None
+                return names_of[skel]
+            chars = []
+            for e in swat:
+                if not e.name.lower().endswith(".cr"):
+                    continue
+                code = e.name.lower()[:-3]
+                try:
+                    crt = swat.read(e.name).decode("latin-1")
+                except Exception:                               # noqa: BLE001
+                    continue
+                mr = _re.search(r"^\s*FileNameRender\s+(\S+)", crt, _re.M)
+                ms = _re.search(r"^\s*FileNameSkel\s+(\S+)", crt, _re.M)
+                render = (mr.group(1) if mr else code).lower()
+                skel = (ms.group(1) if ms else code).lower()
+                if s.disc.locate(render + "_lods.rsc"):
+                    chars.append((code, render, skel))
+            # the model's rig: the joints of the skeleton most characters with exactly that many bones play on
+            from collections import Counter as _Counter
+            exact = _Counter(sk for _c, _r, sk in chars if len(_bone_names(sk) or ()) == want)
+            ref_skel = exact.most_common(1)[0][0] if exact else None
+            ref = (_bone_names(ref_skel) or [])[:want] if ref_skel else None
+            by_render, skipped = {}, {}
+            for code, render, skel in chars:
+                nm = _bone_names(skel)
+                if not nm or not ref or len(nm) < want or nm[:want] != ref:
+                    skipped.setdefault(render, (code, skel, len(nm or ())))
+                    continue
+                t = by_render.setdefault(render, dict(render=render, skel=skel, codes=[]))
+                t["codes"].append(code)
+            for r in by_render:
+                skipped.pop(r, None)
+            if not by_render:
+                return self._send(200, dict(ok=False, error_text=(
+                    "No character's skeleton matches the %d bones this model is rigged to" % want)))
+            # each target's bundle: converted per skeleton (Xbox), then its meshes named for the target
+            disc = s.disc
+
+            class _Disc:
+                def find(self, fname, prefer=()):
+                    for a in disc.locate(fname):
+                        try:
+                            return a, disc.read(a, fname)
+                        except Exception:                       # noqa: BLE001
+                            continue
+                    return None, None
+            per_skel, notes, plan, bad = {}, [], [], []
+            for render, t in sorted(by_render.items()):
+                if xbox_in:
+                    # the dry run sizes every copy with ONE conversion (they differ only in bone positions): the
+                    # real run converts once per skeleton, which takes a while for a hundred of them
+                    key = "_dry" if body.get("dry") else t["skel"]
+                    if key not in per_skel:
+                        nn = []
+                        try:
+                            per_skel[key] = _MC.convert_bundle(rsc_in, rnt_in, t["skel"] + "_lods", False, {},
+                                                               [_Disc()], nn)
+                        except Exception as ex:                 # noqa: BLE001
+                            per_skel[key] = None
+                            nn.append("%s: %s" % (t["skel"], ex))
+                        notes.extend(nn)
+                    got = per_skel[key]
+                    if not got:
+                        bad.append(render)
+                        continue
+                    rsc, rnt = got
+                else:
+                    rsc, rnt = rsc_in, rnt_in
+                try:
+                    rsc, rnt = _dem.DataEditor._own_bundle(rsc, rnt, render)
+                except ValueError as ex:
+                    return self._send(200, dict(ok=False, error_text=str(ex)))
+                name = render + "_lods.rsc"
+                copies = []
+                for a in s.disc.locate(name):
+                    fit = s.disc.archive(a).would_fit(name, rsc)
+                    copies.append(dict(archive=a, fits=fit["fits"]))
+                plan.append(dict(render=render, codes=t["codes"], name=name, rsc=rsc, rnt=rnt, copies=copies))
+            summary = dict(want=want, characters=sum(len(p["codes"]) for p in plan), models=len(plan),
+                           copies=sum(len(p["copies"]) for p in plan),
+                           rebuilds=len({c["archive"] for p in plan for c in p["copies"] if not c["fits"]}),
+                           skipped=len(skipped), skipped_some=sorted(skipped)[:12], failed=bad, notes=notes[:10],
+                           models_list=[dict(render=p["render"], codes=p["codes"], copies=len(p["copies"])) for p in plan])
+            if body.get("dry"):
+                return self._send(200, dict(ok=True, dry=True, **summary))
+            group = s.journal.new_group()
+            for p in plan:
+                stem = p["render"] + "_lods"
+                for c in p["copies"]:
+                    a = c["archive"]
+                    s.write(a, p["name"], p["rsc"], "replace all characters: %s" % p["name"], group)
+                    try:
+                        s.disc.archive(a).find(stem + ".rnt")
+                    except KeyError:
+                        continue
+                    s.write(a, stem + ".rnt", p["rnt"], "replace all characters: %s" % p["name"], group)
+            s.note("Replace All Characters: %d models (%d characters) replaced in %d archive copies"
+                   % (summary["models"], summary["characters"], summary["copies"]))
+            return self._send(200, dict(ok=True, dry=False, **summary))
+
         if route == "character_rsc_import":
             # A character bundle exported by the RDR Blender add-on (.rsc, and
             # its .rnt) over every copy of that bundle on the disc, as ONE undo
@@ -4903,6 +5256,26 @@ class Handler(BaseHTTPRequestHandler):
             name = (body.get("name") or "").lower()
             rsc = _b64.b64decode(body.get("rsc_b64") or "")
             rnt = _b64.b64decode(body.get("rnt_b64") or "") if body.get("rnt_b64") else None
+            stem0 = name.rsplit(".", 1)[0]
+            code0 = stem0[:-5] if stem0.endswith("_lods") else stem0
+            notes = []
+            if (body.get("rsc_name") or "").lower().endswith(".xrsc"):
+                # the Xbox's bundle: made the PS2's, its meshes moved with THIS character's skeleton
+                if rnt is None:
+                    return self._send(200, dict(ok=False, error_text="Pick the .xrnt with the .xrsc (both)"))
+                from .dataeditor_more import more as _more
+                got, notes = _more(_data_editor(s)).xbox_to_ps2({stem0 + ".xrsc": rsc, stem0 + ".xrnt": rnt})
+                if (stem0 + ".rsc") not in got:
+                    return self._send(200, dict(ok=False, error_text="; ".join(n.replace("LEVEL ", "") for n in notes)
+                                                or "the .xrsc could not be converted"))
+                rsc, rnt = got[stem0 + ".rsc"], got[stem0 + ".rnt"]
+            if rnt is not None and rnt[:4] == b"RNT0":
+                # meshes named for another character (a model made as gbw, put on srd): renamed to this one's, as Add
+                # Character does -- the game finds a character's meshes as <code>_lod_01 ...
+                try:
+                    rsc, rnt = _dem.DataEditor._own_bundle(rsc, rnt, code0)
+                except ValueError as ex:
+                    return self._send(200, dict(ok=False, error_text=str(ex)))
             if rsc[:4] != b"RSC0":
                 return self._send(200, dict(ok=False, error_text="That is not a compiled bundle (.rsc): it does not start with RSC0"))
             stem = name.rsplit(".", 1)[0]
@@ -4922,12 +5295,33 @@ class Handler(BaseHTTPRequestHandler):
             copies = [a for a in copies if a]
             if not copies:
                 return self._send(200, dict(ok=False, error_text="No archive on the disc has %s" % name))
+            # the model and the skeleton the character plays it on must agree on the bone count, or it crashes
+            try:
+                from .rsc import Rsc as _Rsc
+                want = max([_Rsc(rsc, name).bone_count(c.index) for c in _Rsc(rsc, name).chunks if c.tag == "MOD0"] or [0])
+                skel = None
+                for a in ("SWAT.DAT",) + tuple(copies):
+                    try:
+                        crt = s.disc.archive(a).read(code0 + ".cr").decode("latin-1")
+                        import re as _re
+                        m = _re.search(r"^\s*FileNameSkel\s+(\S+)", crt, _re.M)
+                        skel = m.group(1).lower() if m else None
+                        break
+                    except Exception:                          # noqa: BLE001
+                        continue
+                have = s.skeleton_index("SWAT.DAT").get((skel or code0) + ".skel")
+                if want and have and want != have:
+                    return self._send(200, dict(ok=False, error_text=(
+                        "That model is rigged to %d bones and %s plays on %s.skel, which has %d: it would crash. Export it "
+                        "on %s's skeleton (or a character with %d bones)." % (want, code0, skel or code0, have, code0, have))))
+            except Exception:                                  # noqa: BLE001
+                pass
             plan = []
             for a in copies:
                 fit = s.disc.archive(a).would_fit(name, rsc)
                 plan.append(dict(archive=a, stored=fit["stored"], slot=fit["slot"], fits=fit["fits"]))
             if body.get("dry"):
-                return self._send(200, dict(dry=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"])))
+                return self._send(200, dict(dry=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"]), notes=notes))
             group = s.journal.new_group()
             for a in copies:
                 s.write(a, name, rsc, "character bundle %s" % name, group)
@@ -4938,7 +5332,21 @@ class Handler(BaseHTTPRequestHandler):
                         continue  # this copy of the bundle has no names file beside it
                     s.write(a, stem + ".rnt", rnt, "character bundle %s" % name, group)
             s.note("%s replaced in %d archive(s) from a .rsc import" % (name, len(copies)))
-            return self._send(200, dict(ok=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"])))
+            return self._send(200, dict(ok=True, copies=plan, rebuilds=sum(1 for p in plan if not p["fits"]), notes=notes))
+
+        if route == "creature_bundle":
+            # the model bundle a character draws (its .cr's FileNameRender), for Replace model in Creatures
+            code = (body.get("code") or "").lower().removesuffix(".cr")
+            try:
+                crt = s.disc.archive("SWAT.DAT").read(code + ".cr").decode("latin-1")
+            except Exception:                                  # noqa: BLE001
+                return self._send(200, dict(ok=False, error_text="SWAT.DAT has no %s.cr" % code))
+            import re as _re
+            m = _re.search(r"^\s*FileNameRender\s+(\S+)", crt, _re.M)
+            render = m.group(1).lower() if m else code
+            file = render + "_lods.rsc"
+            return self._send(200, dict(ok=True, code=code, render=render, file=file, archive="SWAT.DAT",
+                                        copies=len(s.disc.locate(file))))
 
         if route == "creature_delete":
             # BALANCE > Creatures > Delete Character: custom characters only
@@ -4969,11 +5377,36 @@ class Handler(BaseHTTPRequestHandler):
                 skl = _b64c.b64decode(body["skel_b64"]) if body.get("skel_b64") else None
                 extra = {f["name"]: _b64c.b64decode(f["data"]) for f in (body.get("extra") or [])
                          if f.get("name") and f.get("data")}
+                # an Xbox model (.xrsc + .xrnt) and Xbox textures / models among the files: made the PS2's first
+                from .dataeditor_more import more as _more
+                xb = {}
+                if rsc is not None and (body.get("rsc_name") or "").lower().endswith(".xrsc"):
+                    stem = body["rsc_name"][:-5]
+                    xb[stem + ".xrsc"], xb[stem + ".xrnt"] = rsc, rnt
+                for n in list(extra):
+                    if n.lower().endswith((".xtex", ".xmod", ".skel")):
+                        xb[n] = extra[n] if not n.lower().endswith((".xtex", ".xmod")) else extra.pop(n)
+                if skl is not None:
+                    xb.setdefault((body.get("code") or "x") + ".skel", skl)
+                xnotes = []
+                if any(k.lower().endswith((".xrsc", ".xtex", ".xmod")) for k in xb):
+                    got, xnotes = _more(_data_editor(s)).xbox_to_ps2(xb)
+                    lvl = [n for n in xnotes if n.startswith("LEVEL ")]
+                    if lvl:
+                        raise ValueError(lvl[0][6:])
+                    for n, d in got.items():
+                        if n.lower().endswith(".rsc"):
+                            rsc = d
+                        elif n.lower().endswith(".rnt"):
+                            rnt = d
+                        elif not n.lower().endswith(".skel"):
+                            extra[n] = d
                 added = _data_editor(s).add_character(body.get("source", ""), body.get("code", ""), rsc, rnt, skl, extra,
                                                       body.get("copy"))
             except (_dem.Busy, ValueError) as ex:
                 return self._send(200, dict(ok=False, error_text=str(ex)))
-            return self._send(200, dict(ok=True, added=added, name=(body.get("code") or "").strip().lower() + ".cr"))
+            return self._send(200, dict(ok=True, added=added, name=(body.get("code") or "").strip().lower() + ".cr",
+                                        notes=locals().get("xnotes") or []))
 
         if route == "codemods_build":
             # Builds a NEW file, 02_Modded/RDR_CODEMODS.iso, from the stock or the working ISO.
@@ -6848,6 +7281,75 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, dict(ok=True, applied=True, plan=plan,
                                         used=used, slot=slot))
 
+        if route == "weapon_model_import":
+            # Stats > Weapons & stats > Weapon model: a .mod (the PS2's) or .xmod (the Xbox's, made the PS2's) put
+            # over the weapon's model, in EVERY archive copy (as weapon_import below): each slot is checked first and
+            # nothing is written unless it fits them all. `dry` defaults to TRUE, as weapon_import's.
+            import base64 as _b64
+            import sys as _sys
+            from .dataeditor import _LIB
+            if _LIB not in _sys.path:
+                _sys.path.insert(0, _LIB)
+            from rdrformats import mod as _modfmt
+            target = body.get("target")
+            fname = (body.get("filename") or "").strip()
+            dry = body.get("dry", True)
+            if not target or not body.get("data"):
+                return self._send(200, dict(ok=False, dry=bool(dry), written=False, problem=dict(
+                    message="this needs the weapon's model and a .mod or .xmod file.",
+                    fix="Pick a weapon, then Import .mod / .xmod.")))
+            try:
+                data = _b64.b64decode(body["data"])
+            except Exception:                                   # noqa: BLE001
+                return self._send(400, {"error": "the file did not arrive whole"})
+            notes = []
+            if fname.lower().endswith(".xmod"):
+                try:
+                    data, notes = _weapon_model_convert(s.disc, data, target, False)
+                except Exception as ex:                         # noqa: BLE001
+                    return self._send(200, dict(ok=False, dry=bool(dry), written=False, problem=dict(
+                        message="%s could not be made the PS2's: %s" % (fname, ex),
+                        fix="Is it an Xbox .xmod (a model, not a bundle .xrsc)?")))
+            try:
+                m = _modfmt.read(data)
+                tris = sum(len(prim.triangles()) for pk in m.packets() for prim in pk.primitives)
+            except Exception as ex:                             # noqa: BLE001
+                return self._send(200, dict(ok=False, dry=bool(dry), written=False, problem=dict(
+                    message="%s is not a model the Studio can read: %s" % (fname or "the file", ex),
+                    fix="Export a .mod or .xmod from the Blender add-on or another weapon.")))
+            copies = list(s.disc.locate(target))
+            if not copies:
+                return self._send(200, dict(ok=False, dry=bool(dry), written=False, problem=dict(
+                    message="the working disc has no %s." % target, fix="Pick another weapon.")))
+            from . import modimport as _mi
+            too_small, stored = [], None
+            for ca in copies:
+                ce = s.disc.archive(ca).find(target)
+                need = _mi.stored_size(data, compressed=ce.compressed)
+                stored = need if stored is None else max(stored, need)
+                if need > ce.slot:
+                    too_small.append((ca, ce.slot, need))
+            plan = dict(target=target, copies=len(copies), bytes=len(data), stored=stored,
+                        slot=min(s.disc.archive(ca).find(target).slot for ca in copies), notes=notes,
+                        triangles=tris)
+            if too_small:
+                ca, cslot, need = min(too_small, key=lambda t: t[1])
+                return self._send(200, dict(ok=False, dry=bool(dry), written=False, plan=plan, problem=dict(
+                    code="slot_overflow",
+                    message="this model needs %d bytes but the copy in %s only has %d." % (need, ca, cslot),
+                    fix="Use a smaller model (fewer triangles), or a New weapon with its own model.")))
+            if dry:
+                return self._send(200, dict(ok=True, dry=True, written=False, plan=plan))
+            grp = s.journal.new_group()
+            with s.journal.batch():
+                for ca in copies:
+                    used, slot = s.write(ca, target, data, "import weapon model %s (%s)" % (target, fname), grp)
+            s.note("imported %s over %s in %d archive copies" % (fname, target, len(copies)))
+            return self._send(200, dict(ok=True, dry=False, written=True, plan=plan,
+                                        message="%s is now %s, in all %d copies on the working disc." % (
+                                            target, fname, len(copies)),
+                                        next="Press Play to see it (Build (Xbox) for the Xbox game). Ctrl+Z undoes it."))
+
         if route == "weapon_import":
             # M15: an OBJ becomes a weapon model. Plans and refuses here; the
             # repoint half is REQ-045 and is not in this build.
@@ -7283,3 +7785,56 @@ def serve(studio, port=8731, open_browser=True, host="127.0.0.1"):
     finally:
         httpd.server_close()
         studio.close()
+
+
+class _FolderLevelGame:
+    """The game, with one level archive more: a mods folder level packed in memory (Studio.level)."""
+
+    def __init__(self, game, archive, folder):
+        from . import dave as D
+        from .dataeditor import DataEditor, _Bytes
+        self._game = game
+        self._name = archive.upper()
+        self._dave = D.Dave(_Bytes(D.create(DataEditor.pack_folder(folder))), archive)
+
+    def archive(self, name):
+        if name.upper() == self._name:
+            return self._dave
+        return self._game.archive(name)
+
+    def archives(self):
+        return list(self._game.archives()) + [self._name]
+
+    def __getattr__(self, attr):
+        return getattr(self._game, attr)
+
+
+def _data_editor_for(studio):
+    """The Data Editor of this Studio (its mods folder), or None."""
+    try:
+        return _data_editor(studio)
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _weapon_model_convert(disc, data, name, to_xbox):
+    """A weapon model between the PS2's .mod and the Xbox's .xmod (dataeditor_lib/modconvert.convert_model: a skinned
+    model is bone relative on the PS2 and model space on the Xbox, moved with its .skel read from the working disc; a
+    one bone prop is the same on both). -> (bytes, notes)."""
+    import sys as _sys
+    from .dataeditor import _LIB
+    if _LIB not in _sys.path:
+        _sys.path.insert(0, _LIB)
+    import modconvert as MC
+
+    class _Disc:
+        def find(self, fname, prefer=()):
+            for a in disc.locate(fname):
+                try:
+                    return a, disc.read(a, fname)
+                except Exception:                               # noqa: BLE001
+                    continue
+            return None, None
+    notes = []
+    out = MC.convert_model(data, name, to_xbox, {}, [_Disc()], notes)
+    return out, notes

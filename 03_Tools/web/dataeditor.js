@@ -44,7 +44,11 @@ async function post(route, body) {
 }
 
 function toast(msg, kind) { (A && A.toast) ? A.toast(msg, kind) : console.log(msg); }
-function status(msg) { $('#deStatus').textContent = msg || ''; $('#deStatus').title = msg || ''; }
+function status(msg, done) {
+  const s = $('#deStatus');
+  s.textContent = msg || ''; s.title = msg || '';
+  s.style.color = done ? 'var(--grn)' : ''; s.style.fontWeight = done ? '600' : '';
+}
 
 const kb = (n) => (n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 const when = (t) => { if (!t) return ''; const d = new Date(t * 1000); return d.toLocaleDateString() + ' ' + d.toTimeString().slice(0, 5); };
@@ -157,6 +161,9 @@ async function startJob(route, body, label) {
     await post(route, body);
   } catch (e) { problem(label + ': not started', e.message); return false; }
   lastJobLog = [label + '…'];
+  // Play waits for the build (the header's disc poll keeps it so until the job ends)
+  const pb = document.querySelector('#btnPlay');
+  if (pb) { pb.disabled = true; pb.style.opacity = '.45'; pb.title = label + ' in progress: Play is available when it finishes.'; }
   setBusy(true);
   status(label + '…');
   return new Promise((res) => { jobDone = res; poll(); });
@@ -170,14 +177,28 @@ async function poll() {
   lastJobLog = j.log || [];
   const logBox = document.querySelector('#deLogText');
   if (logBox) { logBox.textContent = lastJobLog.join('\n'); logBox.scrollTop = 1e9; }
+  const cb = document.querySelector('#deCancel');
   if (j.state === 'running') {
-    status(j.label + '…  ' + (lastJobLog[lastJobLog.length - 1] || ''));
+    status('Building: ' + j.label + '…  ' + (lastJobLog[lastJobLog.length - 1] || ''));
+    if (cb) {
+      cb.style.display = '';
+      cb.disabled = !j.cancellable || !!j.cancel;
+      cb.textContent = j.cancel ? 'Cancelling…' : 'Cancel';
+      cb.title = !j.cancellable ? 'It is writing the working disc now: it finishes first (stopping half way would leave the disc broken)'
+        : 'Stop at the next safe point: nothing is written to the working disc';
+    }
     pollTimer = setTimeout(poll, 800);
     return;
   }
+  if (cb) cb.style.display = 'none';
   setBusy(false);
-  status(j.state === 'done' ? (j.label + ': done' + (j.seconds != null ? ' in ' + j.seconds + ' s' : '') + '.  ' + (lastJobLog[lastJobLog.length - 1] || ''))
-    : j.state === 'refused' ? (j.label + ': refused (see the Log)') : j.state === 'error' ? (j.label + ': stopped (see the Log)') : '');
+  if (j.state === 'done') {
+    status('Done!  ' + j.label + (j.seconds != null ? ' in ' + j.seconds + ' s' : '') + '.  ' + (lastJobLog[lastJobLog.length - 1] || ''), true);
+  } else {
+    status(j.state === 'refused' ? (j.label + ': refused (see the Log)') : j.state === 'error' ? (j.label + ': stopped (see the Log)')
+      : j.state === 'cancelled' ? (j.label + ': cancelled, nothing written to the disc') : '');
+  }
+  if (j.state === 'cancelled') toast(j.label + ' cancelled: the working disc is as it was', 'good');
   if (j.state === 'done' && /Build|Restore/.test(j.label || '')) {
     toast(j.label + ' finished', 'good');
     if (A && A.refreshLists) A.refreshLists();  // new levels and characters show in the other tabs
@@ -194,6 +215,7 @@ async function poll() {
 function setBusy(on) {
   for (const b of document.querySelectorAll('#tab-dataeditor button[data-write]')) b.disabled = on;
   $('#tab-dataeditor').classList.toggle('de-busy', on);
+  document.body.classList.toggle('building', on);   // look around, change nothing (xboxmode.js)
 }
 
 function logDialog() {
@@ -345,7 +367,7 @@ function renderFiles() {
       e.preventDefault();
       if (!selected.has(f.key)) { selected = new Set([f.key]); renderFiles(); }
       menu(e.clientX, e.clientY, [
-        { label: 'Delete (to the Recycle Bin)', run: deleteSelected },
+        { label: 'Delete…', run: deleteSelected },
         { label: 'Open its folder', run: () => openFolder('mods', f.key) },
         { label: 'Copy to the Workbench', run: () => transfer('mods', [...selected], 'workbench', wbFolder(), false) },
         '-',
@@ -501,6 +523,60 @@ async function dropOnFolder(e, into) {
   dropFiles(ents.map((x) => x.file), into);
 }
 
+// Where an imported .dat goes: a name ending in 2 / 4 (colseum2.dat, mymap_m4.dat) is asked about -- the Showdown
+// maps' folders lvls_m2 / lvls_m4 -- else (or when declined) the folder it was dropped on. null: cancelled.
+function datInto(name, into) {
+  const m = name.match(/(?:^|[_\-.])m?([24])\.dat$/i) || name.match(/([24])\.dat$/i);
+  if (!m) return into;
+  const g = 'lvls_m' + m[1];
+  if (into && String(into).toLowerCase().startsWith(g)) return into;
+  const yes = confirm(`${name} ends in ${m[1]}: is it a Showdown map's ${m[1]}-player half?\n\nOK: put it in ${g} (where the game reads it)\nCancel: put it in ${into && String(into).startsWith('lvls_') ? into : 'lvls_sng'}`);
+  return yes ? g : (into && String(into).startsWith('lvls_') ? into : 'lvls_sng');
+}
+
+function askReplace(name, place) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; res(v); } };
+    const title = name + ' is in the mods folder already';
+    dialog(title, (b) => {
+      b.append(el('p', null, `The mods folder has ${place.archive} already (${place.files} file(s)).`),
+        el('p', 'muted', 'Replace: its old files go to the Recycle Bin and the new .dat’s are put in. '
+          + 'Merge: the old files stay and the new .dat’s files go over them (files only the old one has are kept).'));
+    }, [{ label: 'Cancel', run: () => { fin(null); } },
+        { label: 'Merge', run: () => { fin('merge'); } },
+        { label: 'Replace', cls: 'primary', run: () => { fin('replace'); } }]);
+    // Escape closes it with no button: cancelled
+    const obs = new MutationObserver(() => {
+      if (done) { obs.disconnect(); return; }
+      if (![...document.querySelectorAll('div')].some((x) => x.textContent === title)) { obs.disconnect(); fin(null); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
+async function importDats(list, into) {
+  const out = [];
+  for (const f of list) {
+    const where = datInto(f.name, into);
+    if (where === null) continue;
+    let replace = false;
+    try {
+      const place = await post('de_dat_place', { name: f.name, into: where });
+      if (place.exists) {
+        const how = await askReplace(f.name, place);
+        if (!how) continue;
+        replace = how === 'replace';
+      }
+    } catch (e) { /* an older server: imported as before */ }
+    status('Importing ' + f.name + '…');
+    const r = await post('de_import', { files: [{ name: f.name, data: await readAsB64(f) }], into: where, replace });
+    for (const n of r.results) { toast(n.note, 'good'); out.push(n); if ((n.converted || []).length) showNotes(n.converted); }
+  }
+  if (out.length) folder = out[out.length - 1].archive;
+  return out;
+}
+
 async function dropFiles(list, into) {
   const files = [...list];
   if (!files.length) return;
@@ -511,19 +587,17 @@ async function dropFiles(list, into) {
   const dats = files.filter((f) => /\.dat$/i.test(f.name));
   const rest = files.filter((f) => !/\.dat$/i.test(f.name) && !/\.zip$/i.test(f.name));
   try {
-    if (dats.length) {
-      status('Importing ' + dats.length + ' .dat file(s)…');
+    if (dats.length) await importDats(dats, into);
+    const ps2 = rest.length ? await convertXbox(rest) : [];
+    if (ps2 === null) { status(''); return; }
+    const fitted = ps2.length ? await fitTextures(into, ps2) : [];
+    if (fitted.length) {
       const payload = [];
-      for (const f of dats) payload.push({ name: f.name, data: await readAsB64(f) });
-      const r = await post('de_import', { files: payload, into });
-      for (const n of r.results) toast(n.note, 'good');
-      if (r.results.length) folder = r.results[r.results.length - 1].archive;
-    }
-    if (rest.length) {
-      const payload = [];
-      for (const f of rest) payload.push({ name: f.name, data: await readAsB64(f) });
+      for (const f of fitted) payload.push({ name: f.name, data: await readAsB64(f) });
       const r = await post('de_add', { folder: into, files: payload });
+      showNotes(r.notes);
       toast(r.added.length + ' file(s) added to ' + (into === 'master' ? 'Master' : into), 'good');
+      if (into === 'swat.dat' && fitted.some((f) => /\.(cr|rsc|xrsc)$/i.test(f.name))) { status(''); refresh(); offerShowdown(fitted.map((f) => f.name)); return; }
     }
   } catch (e) { toast(e.message, 'bad'); }
   status('');
@@ -532,38 +606,219 @@ async function dropFiles(list, into) {
 
 async function transfer(from, paths, toWhere, to, move) {
   if (!paths.length) return;
+  if (from === 'workbench' && toWhere === 'mods' && paths.some((p) => /\.dat$/i.test(p))) {
+    const keep = [], files = [];
+    for (const p of paths) {
+      if (!/\.dat$/i.test(p)) { keep.push(p); continue; }
+      try {
+        const res = await fetch('/api/de_x_download?where=workbench&key=' + encodeURIComponent(p));
+        if (!res.ok) throw new Error('a folder');
+        files.push(new File([await res.blob()], p.split('/').pop()));
+      } catch { keep.push(p); }                               // a .dat folder (its files): copied as it is
+    }
+    if (files.length) {
+      try { await importDats(files, to === 'Master' ? '' : to); } catch (e) { toast(e.message, 'bad'); }
+      status('');
+    }
+    paths = keep;
+    if (!paths.length) { selected.clear(); refresh(); return; }
+  }
+  if (from === 'workbench' && toWhere === 'mods' && paths.some((p) => /\.tex$/i.test(p))) {
+    // a texture over one of the game's of another size goes through the crop window first
+    const keep = [];
+    for (const p of paths) {
+      if (!/\.tex$/i.test(p)) { keep.push(p); continue; }
+      let f;
+      try {
+        const blob = await (await fetch('/api/de_x_download?where=workbench&key=' + encodeURIComponent(p))).blob();
+        f = new File([blob], p.split('/').pop());
+      } catch { keep.push(p); continue; }
+      const got = await fitTextures(to, [f]);
+      if (!got.length) continue;                              // cancelled
+      if (got[0] === f) { keep.push(p); continue; }           // the same size, or kept as it is
+      try {
+        await post('de_add', { folder: to === 'Master' ? 'master' : to, files: [{ name: f.name, data: await readAsB64(got[0]) }] });
+        toast(f.name + ' fitted and put in ' + to, 'good');
+      } catch (e) { toast(e.message, 'bad'); }
+    }
+    paths = keep;
+    if (!paths.length) { selected.clear(); refresh(); return; }
+  }
   try {
     const r = await post('de_x_transfer', { from, paths, to_where: toWhere, to, move });
     toast(`${r.done.length} item(s) ${move ? 'moved' : 'copied'} to ${toWhere === 'workbench' ? 'the Workbench' : (to === 'Master' ? 'Master' : to)}`, 'good');
+    if (toWhere === 'mods') { try { showNotes((await post('de_x_transfer_notes', {})).notes); } catch { /* older server */ } }
+    if (toWhere === 'mods' && to === 'swat.dat') setTimeout(() => offerShowdown(paths), 100);
   } catch (e) { toast(e.message, 'bad'); }
   if (from === 'mods' || toWhere === 'mods') { selected.clear(); refresh(); }
   if (from === 'workbench' || toWhere === 'workbench') loadWorkbench();
 }
 
+// The game's streams (streams.dat), searched by name or by what is said (the Audio tab's search), heard, one picked.
+// -> its name (no .stm) or null.
+function pickStream(start) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; res(v); } };
+    const title = 'Pick a stream';
+    const d = dialog(title, (b) => {
+      const q = el('input'); q.placeholder = 'search: a name (red_, mp_line ...) or words said'; q.style.width = '100%';
+      q.value = start || '';
+      const player = el('audio'); player.controls = true; player.style.cssText = 'width:100%;margin:6px 0';
+      const info = el('div', 'muted', ''); info.style.fontSize = '11px';
+      const list = el('div'); list.style.cssText = 'height:46vh;overflow:auto;border:1px solid var(--line);margin-top:6px';
+      b.append(q, player, info, list);
+      let timer = null;
+      const run = async () => {
+        const text = q.value.trim();
+        list.innerHTML = '';
+        if (!text) { list.append(el('div', 'pad muted', 'Type to search the game\'s streams.')); return; }
+        list.append(el('div', 'pad muted', 'Searching…'));
+        let r;
+        try { r = await (await fetch('/api/streams_search?q=' + encodeURIComponent(text))).json(); }
+        catch (e) { list.innerHTML = ''; list.append(el('div', 'pad muted', 'Search failed: ' + e.message)); return; }
+        list.innerHTML = '';
+        const hits = (r && r.hits) || [];
+        info.textContent = (r && r.count != null ? r.count : hits.length) + ' found' + (r && r.truncated ? ' (the first 400 shown)' : '');
+        if (!hits.length) { list.append(el('div', 'pad muted', 'Nothing found.')); return; }
+        for (const st of hits) {
+          const name = String(st.name || '').replace(/\.stm$/i, '');
+          const row = el('div'); row.style.cssText = 'display:flex;gap:6px;align-items:center;padding:3px 6px;border-bottom:1px solid var(--line)';
+          const play = el('button', null, '▶'); play.style.cssText = 'padding:0 7px;font-size:11px';
+          play.onclick = () => {
+            info.textContent = 'decoding ' + name + '…';
+            player.src = '/api/streams_wav?name=' + encodeURIComponent(st.name);
+            player.oncanplay = () => { info.textContent = name; };
+            player.onerror = () => { info.textContent = 'could not decode ' + name; };
+            player.play().catch(() => {});
+          };
+          const txt = el('div'); txt.style.cssText = 'flex:1;min-width:0';
+          const words = st.caption || st.phrase;
+          if (words) txt.append(el('div', null, '“' + words + '”'));
+          const fn = el('div', 'muted', name); fn.style.cssText = 'font:var(--t-mono);font-size:11px';
+          txt.append(fn);
+          const use = el('button', 'primary', 'Use');
+          use.onclick = () => { fin(name); player.pause(); d.close(); };
+          row.append(play, txt, use);
+          list.append(row);
+        }
+      };
+      q.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+      setTimeout(() => { q.focus(); run(); }, 0);
+    }, [{ label: 'Cancel', run: () => fin(null) }], 760);
+    const obs = new MutationObserver(() => {
+      if (done) { obs.disconnect(); return; }
+      if (![...document.querySelectorAll('div')].some((x) => x.textContent === title)) { obs.disconnect(); fin(null); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
+// The full portrait's frame (128 x 256, upright, as it stands on the select screen): the picture dragged into place
+// and sized with the mouse wheel. -> an upright 128 x 256 PNG (base64), or null.
+function placePhoto(src, title) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; res(v); } };
+    const im = new Image();
+    im.onload = () => {
+      const t = title || 'Place the full portrait in its frame';
+      const W = 128, H = 256, Z = 2;                         // shown twice its size
+      const cv = el('canvas'); cv.width = W * Z; cv.height = H * Z;
+      cv.style.cssText = 'display:block;margin:0 auto;border:1px solid var(--line);cursor:grab;'
+        + 'background:repeating-conic-gradient(#3a3a3a 0 25%, #2c2c2c 0 50%) 0 0/16px 16px';
+      let sc = Math.min(W / im.width, H / im.height);       // the whole picture in the frame
+      let ox = (W - im.width * sc) / 2, oy = H - im.height * sc;
+      const draw = () => {
+        const g = cv.getContext('2d');
+        g.clearRect(0, 0, cv.width, cv.height);
+        g.drawImage(im, ox * Z, oy * Z, im.width * sc * Z, im.height * sc * Z);
+        g.strokeStyle = 'rgba(255,211,107,.8)'; g.setLineDash([4, 3]); g.strokeRect(.5, .5, cv.width - 1, cv.height - 1);
+      };
+      let drag = null;
+      cv.onmousedown = (e) => {
+        drag = { x: e.clientX, y: e.clientY, ox, oy }; cv.style.cursor = 'grabbing';
+        const move = (ev) => { ox = drag.ox + (ev.clientX - drag.x) / Z; oy = drag.oy + (ev.clientY - drag.y) / Z; draw(); };
+        const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); cv.style.cursor = 'grab'; };
+        document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+      };
+      cv.onwheel = (e) => {
+        e.preventDefault();
+        const r = cv.getBoundingClientRect();
+        const px = (e.clientX - r.left) / Z, py = (e.clientY - r.top) / Z;
+        const k = e.deltaY < 0 ? 1.06 : 1 / 1.06;
+        ox = px - (px - ox) * k; oy = py - (py - oy) * k; sc *= k; draw();
+      };
+      dialog(t, (b) => {
+        b.append(el('p', 'muted', 'Drag the picture to place it in the frame; the mouse wheel sizes it. The dashed box is the '
+          + 'photo as it stands on the select screen (leave room above the head for the back rows, as the game\'s photos do).'), cv);
+        draw();
+      }, [{ label: 'Cancel', run: () => fin(null) }, { label: 'Use this', cls: 'primary', run: () => {
+        const out = document.createElement('canvas'); out.width = W; out.height = H;
+        out.getContext('2d').drawImage(im, ox, oy, im.width * sc, im.height * sc);
+        fin(out.toDataURL('image/png').split(',')[1]);
+      } }], 360);
+      const obs = new MutationObserver(() => {
+        if (done) { obs.disconnect(); return; }
+        if (![...document.querySelectorAll('div')].some((x) => x.textContent === t)) { obs.disconnect(); fin(null); }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+    };
+    im.onerror = () => fin(null);
+    im.src = src;
+  });
+}
+
+// Recycle Bin or gone for good: every delete the user starts asks which. -> 'recycle' | 'permanent' | null (cancel)
+function askDelete(title, names, note) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; res(v); } };
+    dialog(title, (b) => {
+      const l = el('div', null, names.slice(0, 14).join('\n') + (names.length > 14 ? '\n…' : ''));
+      l.style.cssText = 'white-space:pre;font:var(--t-mono);color:var(--dim-ink)';
+      b.append(l);
+      if (note) b.append(el('p', 'muted', note));
+      b.append(el('p', 'muted', 'Recycle Bin: you can get them back from there. Delete permanently: they are gone at once.'));
+    }, [{ label: 'Cancel', run: () => fin(null) },
+        { label: 'Delete permanently', cls: 'danger', run: () => fin('permanent') },
+        { label: 'Recycle Bin', cls: 'primary', run: () => fin('recycle') }]);
+    // Escape closes it with no button: cancelled
+    const obs = new MutationObserver(() => {
+      if (done) { obs.disconnect(); return; }
+      if (![...document.querySelectorAll('div')].some((x) => x.textContent === title)) { obs.disconnect(); fin(null); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
 async function deleteSelected() {
   const keys = [...selected];
   if (!keys.length) { toast('Select the files to delete first (Ctrl+click picks several)', 'bad'); return; }
-  dialog('Delete ' + keys.length + ' file(s)?', (b) => {
-    const l = el('div', null, keys.slice(0, 14).join('\n') + (keys.length > 14 ? '\n…' : ''));
-    l.style.cssText = 'white-space:pre;font:var(--t-mono);color:var(--dim-ink)';
-    b.append(l, el('p', 'muted', 'They go to the Recycle Bin. The game\'s own files come back at the next Build.'));
-  }, [{ label: 'Cancel' }, { label: 'Delete', cls: 'danger', run: async () => {
-    try {
-      await post('de_x_remove', { where: 'mods', paths: keys });
-      selected.clear();
-      if (viewing && keys.includes(viewing.key)) clearViewer();
-      refresh();
-    } catch (e) { toast(e.message, 'bad'); }
-  } }]);
+  const how = await askDelete('Delete ' + keys.length + ' file(s)?', keys,
+    'The game\'s own files come back at the next Build.');
+  if (!how) return;
+  try {
+    await post('de_x_remove', { where: 'mods', paths: keys, permanent: how === 'permanent' });
+    selected.clear();
+    if (viewing && keys.includes(viewing.key)) clearViewer();
+    toast(keys.length + (how === 'permanent' ? ' file(s) deleted permanently' : ' file(s) to the Recycle Bin'), 'good');
+    refresh();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 async function deleteNewFiles() {
   if (folderKind(folder) !== 'archive') return toast('Select one of the game\'s .dat folders first', 'bad');
   const fresh = data.files.filter((f) => f.folder === folder && f.new_to_archive);
   if (!fresh.length) return toast(folder + ' has no files new to the archive', 'good');
-  if (!confirm(`Delete the ${fresh.length} file(s) in ${folder} that the archive has no file of the name of?\n\n`
-    + fresh.slice(0, 12).map((f) => f.name).join('\n') + (fresh.length > 12 ? '\n…' : '') + '\n\nThey go to the Recycle Bin.')) return;
-  try { const r = await post('de_x_delete_new', { folder }); toast(r.deleted.length + ' file(s) to the Recycle Bin', 'good'); refresh(); } catch (e) { toast(e.message, 'bad'); }
+  const how = await askDelete(`Delete the ${fresh.length} file(s) new to ${folder}?`, fresh.map((f) => f.name),
+    'The archive has no file of these names.');
+  if (!how) return;
+  try {
+    const r = await post('de_x_delete_new', { folder, permanent: how === 'permanent' });
+    toast(r.deleted.length + (how === 'permanent' ? ' file(s) deleted permanently' : ' file(s) to the Recycle Bin'), 'good');
+    refresh();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 async function openFolder(where, rel) {
@@ -572,7 +827,9 @@ async function openFolder(where, rel) {
 
 // ------------------------------------------------------------------ dialogs of the working disc page
 
-function restoreDialog() {
+async function restoreDialog() {
+  // the record as it is now, not the page's last copy (a build, import or reset since left the list empty)
+  try { const fresh = await get('de_overview'); if (fresh && fresh.injected) data = fresh; } catch (e) { /* the last copy */ }
   const inj = Object.keys((data && data.injected) || {});
   const checks = [];
   let recyc;
@@ -717,6 +974,7 @@ async function importDatFolder(files) {
     for (const f of list) payload.push({ name: (f.webkitRelativePath || f.name).split('/').slice(1).join('/') || f.name, data: await readAsB64(f) });
     try {
       const r = await post('de_x_import_dir', { name: top, marker: mark ? await mark.text() : null, files: payload });
+      showNotes(r.notes);
       toast(`${r.added.length} file(s) into ${r.folder} (${r.why})`, 'good');
       folder = r.folder;
     } catch (e) { toast(e.message, 'bad'); }
@@ -743,6 +1001,7 @@ async function importZips(list) {
   for (const f of list) {
     try {
       const r = await post('de_x_import_zip', { name: f.name, data: await readAsB64(f) });
+      showNotes(r.notes);
       toast(`${f.name}: ${r.files} file(s) into ${r.folder} (${r.why})`, 'good');
       folder = r.folder;
     } catch (e) { toast(f.name + ': ' + e.message, 'bad'); }
@@ -960,7 +1219,216 @@ const PICTURE_PAGES = {
   mp_portrait: { w: 128, h: 128, title: 'Fit the character on the team square' },
   level_sp: { w: 128, h: 128, title: 'Fit the picture on the journal page' },
   level_mp: { w: 256, h: 128, title: 'Fit the picture in the map picture' },
+  // shown upright, as the game shows it; stored on its side (ps2build.mp_photo)
+  mp_photo: { w: 128, h: 256, title: 'Fit the character in the photo (shown upright, as in the game)' },
 };
+
+// ------------------------------------------------------------------ the crop window
+//
+// Drag the box to move it, drag a corner to resize it; `aspect` (width / height) locks its shape, as a texture of a
+// set size needs. Resolves {x, y, w, h} in the picture's pixels (rows top first), 'keep' (opts.keepLabel), or null.
+function cropDialog(src, opts = {}) {
+  return new Promise((resolve) => {
+    let result;
+    const done = (v) => { result = v; };
+    const d = dialog(opts.title || 'Crop the picture', (b) => {
+      if (opts.text) b.append(el('p', 'muted', opts.text));
+      const cv = el('canvas');
+      cv.style.cssText = 'display:block;margin:0 auto;background:#3a3a3a;cursor:move;max-width:100%';
+      const info = el('div', 'muted');
+      info.style.cssText = 'text-align:center;margin-top:6px;font:var(--t-mono)';
+      const row = el('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:center;margin-top:6px';
+      const whole = el('button', 'ghost', 'Whole picture');
+      const fit = el('button', 'ghost', 'Largest fit');
+      row.append(fit, whole);
+      b.append(cv, info, row);
+      const im = new Image();
+      im.onload = () => {
+        const W = im.width, H = im.height;
+        const k = Math.min(620 / W, 420 / H, 4);
+        cv.width = Math.max(1, Math.round(W * k)); cv.height = Math.max(1, Math.round(H * k));
+        const A = opts.aspect || 0;
+        const largest = () => {
+          if (!A) return { x: 0, y: 0, w: W, h: H };
+          let w = W, h = W / A;
+          if (h > H) { h = H; w = H * A; }
+          return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+        };
+        let box = opts.initial ? { ...opts.initial } : largest();
+        const clamp = () => {
+          box.w = Math.max(4, Math.min(box.w, W)); box.h = Math.max(4, Math.min(box.h, H));
+          if (A) { if (box.w / box.h > A) box.w = box.h * A; else box.h = box.w / A; }
+          box.x = Math.max(0, Math.min(box.x, W - box.w)); box.y = Math.max(0, Math.min(box.y, H - box.h));
+        };
+        const draw = () => {
+          const g = cv.getContext('2d');
+          g.clearRect(0, 0, cv.width, cv.height);
+          g.drawImage(im, 0, 0, cv.width, cv.height);
+          g.fillStyle = 'rgba(0,0,0,.55)';
+          const bx = box.x * k, by = box.y * k, bw = box.w * k, bh = box.h * k;
+          g.fillRect(0, 0, cv.width, by); g.fillRect(0, by + bh, cv.width, cv.height - by - bh);
+          g.fillRect(0, by, bx, bh); g.fillRect(bx + bw, by, cv.width - bx - bw, bh);
+          g.strokeStyle = '#ffd36b'; g.lineWidth = 2; g.strokeRect(bx, by, bw, bh);
+          g.fillStyle = '#ffd36b';
+          for (const [cx, cy] of [[bx, by], [bx + bw, by], [bx, by + bh], [bx + bw, by + bh]]) g.fillRect(cx - 5, cy - 5, 10, 10);
+          info.textContent = `${Math.round(box.w)} x ${Math.round(box.h)} of ${W} x ${H}`
+            + (opts.target ? `  ->  ${opts.target}` : '');
+        };
+        let drag = null;
+        cv.onmousedown = (e) => {
+          const r = cv.getBoundingClientRect(), sx = cv.width / r.width;
+          const mx = (e.clientX - r.left) * sx / k, my = (e.clientY - r.top) * sx / k;
+          const near = (x, y) => Math.abs(mx - x) * k < 10 && Math.abs(my - y) * k < 10;
+          const c = [[box.x, box.y, 1, 1], [box.x + box.w, box.y, 0, 1], [box.x, box.y + box.h, 1, 0], [box.x + box.w, box.y + box.h, 0, 0]]
+            .find(([x, y]) => near(x, y));
+          // a corner: resized from the opposite one; inside: moved
+          drag = c ? { kind: 'size', ax: c[2] ? box.x + box.w : box.x, ay: c[3] ? box.y + box.h : box.y }
+            : { kind: 'move', ox: mx - box.x, oy: my - box.y };
+          const move = (ev) => {
+            const nx = (ev.clientX - r.left) * sx / k, ny = (ev.clientY - r.top) * sx / k;
+            if (drag.kind === 'move') { box.x = nx - drag.ox; box.y = ny - drag.oy; }
+            else {
+              let w = Math.abs(nx - drag.ax), h = Math.abs(ny - drag.ay);
+              if (A) { if (w / h > A) h = w / A; else w = h * A; }
+              box = { x: nx < drag.ax ? drag.ax - w : drag.ax, y: ny < drag.ay ? drag.ay - h : drag.ay, w, h };
+            }
+            clamp(); draw();
+          };
+          const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+          document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+        };
+        cv.onwheel = (e) => {
+          e.preventDefault();
+          const f = e.deltaY < 0 ? 1 / 1.06 : 1.06, cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+          box.w *= f; box.h *= f; box.x = cx - box.w / 2; box.y = cy - box.h / 2; clamp(); draw();
+        };
+        whole.onclick = () => { box = { x: 0, y: 0, w: W, h: H }; if (A) box = largest(); clamp(); draw(); };
+        fit.onclick = () => { box = largest(); clamp(); draw(); };
+        whole.style.display = A ? 'none' : '';
+        clamp(); draw();
+        b._box = () => ({ x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.h) });
+      };
+      im.onerror = () => { info.textContent = 'The picture would not open.'; };
+      im.src = src;
+    }, [{ label: 'Cancel' }].concat(opts.keepLabel ? [{ label: opts.keepLabel, run: () => { done('keep'); } }] : [])
+      .concat([{ label: opts.okLabel || 'Use this crop', cls: 'primary', run: (b) => { if (b._box) done(b._box()); } }]), 700);
+    const watch = setInterval(() => {
+      if (!d.box.isConnected) { clearInterval(watch); resolve(result === undefined ? null : result); }
+    }, 200);
+  });
+}
+
+// A .tex going over one of the game's that has another size, format or mip count: the crop window, then the
+// picture made the game's size and format (de_x_tex_fit), so the texture is what the game reads. -> the files to add
+// (a fitted copy, the original if kept as it is, none if cancelled).
+async function fitTextures(into, list) {
+  const out = [];
+  for (const f of list) {
+    if (!/\.tex$/i.test(f.name)) { out.push(f); continue; }
+    let t = null;
+    try { t = (await post('de_x_tex_target', { folder: into === 'Master' ? 'master' : into, name: f.name })).target; } catch { t = null; }
+    const head = new DataView(await f.slice(0, 8).arrayBuffer());
+    const w = head.getUint16(0, true), h = head.getUint16(2, true), fm = head.getUint16(4, true), lv = head.getUint16(6, true);
+    if (!t || (t.w === w && t.h === h && t.format === fm && t.levels === lv)) { out.push(f); continue; }
+    const b64 = await readAsB64(f);
+    let png;
+    try { png = (await post('de_x_tex_to_png', { data: b64 })).png; } catch (e) { toast(f.name + ': ' + e.message, 'bad'); out.push(f); continue; }
+    const pick = await cropDialog('data:image/png;base64,' + png, {
+      title: 'Fit ' + f.name + ' to the game\'s texture', aspect: t.w / t.h, keepLabel: 'Keep it as it is',
+      okLabel: 'Crop and convert', target: `${t.w} x ${t.h}, ${t.levels} level${t.levels === 1 ? '' : 's'}`,
+      text: `${f.name} is ${w} x ${h} (${lv} level${lv === 1 ? '' : 's'}); the game's (${t.archive}) is ${t.w} x ${t.h} `
+        + `(${t.levels} level${t.levels === 1 ? '' : 's'}). The game reads it by that layout, so pick the part to keep: it is `
+        + 'made that size and format. Drag the box, drag a corner, or use the mouse wheel.' });
+    if (pick === 'keep') { out.push(f); continue; }
+    if (!pick) continue;
+    try {
+      const r = await post('de_x_tex_fit', { data: b64, crop: pick, target: t });
+      const bytes = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
+      out.push(new File([bytes], f.name));
+      toast(`${f.name}: ${r.w} x ${r.h}, ${r.levels} level(s)` + (r.note ? ' (' + r.note + ')' : ''), 'good');
+    } catch (e) { toast(f.name + ': not converted: ' + e.message, 'bad'); }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ Xbox files, imported as the PS2's
+//
+// .xtex / .xmod / .xrsc + .xrnt are the Xbox game's own formats for .tex / .mod / .rsc + .rnt: imported anywhere,
+// they are converted (the Data Editor's converter, de_x_xbox_convert). Textures (and a bundle's) get the image
+// converter's transparency choices first, since the Xbox draws some see-through textures without an alpha. An Xbox
+// level's files are not converted here: refused, with the way to do it (Blender's level export).
+const XBOX_RE = /\.(xtex|xmod|xrsc|xrnt|xznes|xshadows|xlsh|xfilm|xhud|xmmb|xrain|xflares|xalpha)$/i;
+const ALPHA_CHOICES = [['auto', 'Auto (as the game\'s own texture of that name)'], ['keep', 'The image\'s own'],
+  ['dark', 'Dark background clear'], ['key', 'One colour clear'], ['mask', 'Brightness is the shape, white'],
+  ['ink_black', 'Ink transparency, black ink'], ['ink_white', 'Ink transparency, white ink']];
+
+function showNotes(notes) {
+  for (const n of notes || []) {
+    if (n.startsWith('LEVEL ')) { toast(n.slice(6), 'bad'); alert(n.slice(6)); } else toast(n, 'good');
+  }
+}
+
+// -> the transparency picked for each Xbox texture / bundle ({name: {alpha, key, tolerance}}), or null (cancelled)
+function xboxDialog(files) {
+  return new Promise((resolve) => {
+    let result = null;
+    const pics = files.filter((f) => /\.(xtex|xrsc)$/i.test(f.name) && !/^lvl_/i.test(f.name));
+    const d = dialog('Xbox files to PS2', (b) => {
+      b.append(el('p', 'muted', 'These are the Xbox game\'s files; the PS2 game reads its own formats, so they are converted: '
+        + 'textures (.xtex -> .tex, in the format the PS2 game\'s texture of that name has), models (.xmod -> .mod) and '
+        + 'character bundles (.xrsc + .xrnt -> .rsc + .rnt). Pick how each texture\'s transparency is made (the Xbox draws '
+        + 'some see-through textures with no alpha that the PS2\'s keep in their alpha).'));
+      const rows = el('div');
+      rows.style.cssText = 'display:grid;grid-template-columns:72px 1fr 1fr;gap:8px;align-items:center';
+      const opts = {};
+      for (const f of pics) {
+        const th = el('canvas'); th.width = 64; th.height = 64; th.style.cssText = 'background:#5a544a;border:1px solid var(--line)';
+        const nm = el('div', null, f.name + (/\.xrsc$/i.test(f.name) ? ' (its textures)' : ''));
+        nm.style.cssText = 'font:var(--t-mono);word-break:break-all';
+        const sel = el('select');
+        for (const [v, l] of ALPHA_CHOICES) sel.append(new Option(l, v));
+        const key = el('input'); key.type = 'color'; key.value = '#000000';
+        const tol = el('input'); tol.type = 'number'; tol.value = 16; tol.min = 0; tol.max = 255; tol.style.width = '56px';
+        const keyRow = el('span'); keyRow.style.cssText = 'display:none;gap:4px;align-items:center;margin-left:6px';
+        keyRow.append(key, el('span', 'muted', 'tolerance'), tol);
+        sel.onchange = () => { keyRow.style.display = sel.value === 'key' ? 'inline-flex' : 'none'; };
+        const cell = el('div'); cell.append(sel, keyRow);
+        rows.append(th, nm, cell);
+        opts[f.name] = () => ({ alpha: sel.value, key: key.value.slice(1), tolerance: +tol.value });
+        if (/\.xtex$/i.test(f.name)) {
+          readAsB64(f).then((b64) => post('de_x_tex_to_png', { data: b64 })).then((r) => {
+            const im = new Image();
+            im.onload = () => { const k = Math.min(64 / im.width, 64 / im.height); th.getContext('2d').drawImage(im, (64 - im.width * k) / 2, (64 - im.height * k) / 2, im.width * k, im.height * k); };
+            im.src = 'data:image/png;base64,' + r.png;
+          }).catch(() => {});
+        }
+      }
+      if (!pics.length) rows.append(el('span'), el('span', 'muted', 'No textures to choose for: models are converted as they are.'), el('span'));
+      b.append(rows);
+      b._get = () => Object.fromEntries(Object.entries(opts).map(([k, fn]) => [k, fn()]));
+    }, [{ label: 'Cancel' }, { label: 'Convert and add', cls: 'primary', run: (b) => { result = b._get(); } }], 760);
+    const w = setInterval(() => { if (!d.box.isConnected) { clearInterval(w); resolve(result); } }, 200);
+  });
+}
+
+// Xbox files among `list` converted (after the transparency window); an Xbox level's refused with its note.
+// -> the list as the PS2 game reads it, or null when cancelled.
+async function convertXbox(list) {
+  if (!list.some((f) => XBOX_RE.test(f.name))) return list;
+  const xb = list.filter((f) => XBOX_RE.test(f.name));
+  const rest = list.filter((f) => !XBOX_RE.test(f.name));
+  const alpha = await xboxDialog(xb);
+  if (!alpha) return null;
+  const payload = [];
+  for (const f of xb.concat(rest.filter((f) => /\.skel$/i.test(f.name)))) payload.push({ name: f.name, data: await readAsB64(f) });
+  let r;
+  try { r = await post('de_x_xbox_convert', { files: payload, alpha, resize: false }); } catch (e) { toast('Not converted: ' + e.message, 'bad'); return null; }
+  showNotes(r.notes);
+  const conv = (r.files || []).filter((f) => !/\.skel$/i.test(f.name))
+    .map((f) => new File([Uint8Array.from(atob(f.data), (c) => c.charCodeAt(0))], f.name.split('/').pop()));
+  return rest.concat(conv);
+}
 
 function convertDialog() {
   let files = [];
@@ -983,11 +1451,11 @@ function convertDialog() {
       + '<option value="dark">Dark background clear (menu portraits, ui_mphoto_*)</option>'
       + '<option value="key">One colour clear</option>'
       + '<option value="mask">Brightness is the shape, white (dust, smoke, shadows)</option>'
-      + '<option value="ink_black">Ink transparency, no template: greyscale, dark parts solid black ink, light parts clear (its own size)</option>'
-      + '<option value="ink_white">Ink transparency, no template: greyscale, dark parts solid white ink, light parts clear (its own size)</option>'
+      + '<option value="ink">Ink transparency, no template: greyscale, dark parts solid ink, light parts clear (its own size)</option>'
       + '<option value="level_sp">level.tex image: single player journal page (img0_*.tex, 128x128, black ink)</option>'
       + '<option value="level_mp">level.tex image: multiplayer level select (levelselect_*.tex, 256x128, white ink)</option>'
       + '<option value="mp_portrait">mp portrait: multiplayer character portrait (mp_&lt;code&gt;.tex, your mp template)</option>'
+      + '<option value="mp_photo">mp photo: Showdown full-body photo (ui_mphoto_&lt;code&gt;.tex, 256x128, in colour)</option>'
       + '<option value="book_red">book_red picture: your picture in the book_red frame and paper (your GIMP template)</option>'
       + '<option value="book">Weapon book page: greyscale, dark ink solid and white see-through (book_w*)</option>';
     const keyRow = el('div');
@@ -996,6 +1464,11 @@ function convertDialog() {
     const tol = el('input'); tol.type = 'number'; tol.value = 16; tol.min = 0; tol.max = 255; tol.style.width = '64px';
     const soft = el('input'); soft.type = 'number'; soft.value = 48; soft.min = 0; soft.max = 255; soft.style.width = '64px';
     keyRow.append(el('span', 'muted', 'Colour'), key, el('span', 'muted', 'Tolerance:'), tol, el('span', 'muted', 'Softness:'), soft);
+    const inkCol = el('select');
+    inkCol.append(new Option('Black ink', 'black'), new Option('White ink', 'white'));
+    const inkRow = el('div'); inkRow.style.cssText = 'display:flex;gap:6px;align-items:center';
+    inkRow.append(el('span', 'muted', 'Ink colour'), inkCol);
+    const alphaWanted = () => (alpha.value === 'ink' ? (inkCol.value === 'white' ? 'ink_white' : 'ink_black') : alpha.value);
     const fmt = el('select');
     fmt.innerHTML = '<option value="auto">Auto (256 colours; with alpha 256 colours + alpha; book: 16 + alpha)</option>'
       + '<option value="p8">256 colours</option><option value="pa8">256 colours + alpha</option>'
@@ -1026,7 +1499,7 @@ function convertDialog() {
     };
     const sideTitle = el('b', null, '');
     // Save as: the texture's name, with the prefix its kind has in the game (book_red is always book_red.tex)
-    const PREFIX = { mp_portrait: 'mp_', level_sp: 'img0_', level_mp: 'levelselect_' };
+    const PREFIX = { mp_portrait: 'mp_', level_sp: 'img0_', level_mp: 'levelselect_', mp_photo: 'ui_mphoto_' };
     const outNames = {};
     const nameRow = el('div');
     nameRow.style.cssText = 'display:flex;align-items:center;gap:4px';
@@ -1057,9 +1530,11 @@ function convertDialog() {
     const zoom = el('input'); zoom.type = 'range'; zoom.min = '0.3'; zoom.max = '3'; zoom.step = '0.01'; zoom.value = '1';
     const zLab = el('span', 'muted', 'Zoom 100%');
     const reset = el('button', 'ghost', 'Reset (fill the page)');
+    const cropBtn = el('button', 'ghost', 'Crop…');
+    const cropNote = el('span', 'muted', '');
     const nameBox = el('div');
     nameBox.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
-    nameBox.append(which, nameRow);
+    nameBox.append(which, nameRow, cropBtn, cropNote);
     nameRow.style.flex = '1';
     side.append(sideTitle, el('span', 'muted', 'Drag the picture to move it; the mouse wheel or the slider zooms.'),
                 zLab, zoom, reset,
@@ -1071,19 +1546,46 @@ function convertDialog() {
                  loadImg('/api/de_x_asset?name=mp_square.png')])
       .then(([sh, bg, sq]) => { layers.shadow = sh; layers.page = bg; layers.square = sq; draw(); });
     const pictures = {};
-    async function picture(f) {
+    const crops = {};                                          // {file name: {x, y, w, h}} from the crop window
+    async function rawPicture(f) {
       if (!pictures[f.name]) pictures[f.name] = await loadImg(URL.createObjectURL(f));
       return pictures[f.name];
     }
+    // the picture as the converter gets it: cropped when a crop was picked
+    async function picture(f) {
+      const im = await rawPicture(f);
+      const c = crops[f.name];
+      if (!im || !c) return im;
+      const cc = document.createElement('canvas'); cc.width = c.w; cc.height = c.h;
+      cc.getContext('2d').drawImage(im, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
+      return cc;
+    }
+    const showCrop = () => {
+      const c = previewFile && crops[previewFile.name];
+      cropNote.textContent = c ? `cropped to ${c.w} x ${c.h}` : '';
+      cropBtn.disabled = !previewFile;
+    };
+    cropBtn.onclick = async () => {
+      if (!previewFile) return;
+      const pg = PICTURE_PAGES[alpha.value];
+      const pick = await cropDialog(URL.createObjectURL(previewFile), {
+        title: 'Crop ' + previewFile.name, aspect: pg ? pg.w / pg.h : 0, initial: crops[previewFile.name],
+        keepLabel: crops[previewFile.name] ? 'No crop' : null,
+        text: pg ? `Locked to the ${pg.w} x ${pg.h} page's shape; the placement below still applies.` : 'Any shape; the part kept is what gets converted.' });
+      if (pick === 'keep') delete crops[previewFile.name];
+      else if (pick) crops[previewFile.name] = pick;
+      showCrop(); draw();
+    };
     function fillPreviewList() {
       which.innerHTML = '';
       for (const f of files) which.append(new Option(f.name, f.name));
       which.style.display = files.length > 1 ? '' : 'none';
       previewFile = files[0] || null;
       syncZoom();
+      showCrop();
       draw();
     }
-    which.onchange = () => { previewFile = files.find((f) => f.name === which.value) || null; syncZoom(); draw(); };
+    which.onchange = () => { previewFile = files.find((f) => f.name === which.value) || null; syncZoom(); showCrop(); draw(); };
     const placeKey = (f) => alpha.value + '|' + f.name;
     const placeOf = (f) => (bookPlace[placeKey(f)] = bookPlace[placeKey(f)] || { s: 1, dx: 0, dy: 0 });
     function syncZoom() {
@@ -1093,7 +1595,7 @@ function convertDialog() {
     zoom.oninput = () => { if (!previewFile) return; placeOf(previewFile).s = +zoom.value; syncZoom(); draw(); };
     reset.onclick = () => { if (!previewFile) return; bookPlace[placeKey(previewFile)] = { s: 1, dx: 0, dy: 0 }; syncZoom(); draw(); };
     // the picture, placed on a page of this size, greyscaled
-    async function placedGrey(W, H) {
+    async function placedGrey(W, H, colour) {
       const pc = document.createElement('canvas'); pc.width = W; pc.height = H;
       if (!previewFile) return pc;
       const im = await picture(previewFile);
@@ -1102,7 +1604,7 @@ function convertDialog() {
       const k = Math.max(W / im.width, H / im.height) * p.s;
       const nw = im.width * k, nh = im.height * k;
       const g2 = pc.getContext('2d');
-      g2.filter = 'grayscale(1)';
+      g2.filter = colour ? 'none' : 'grayscale(1)';
       g2.drawImage(im, (W - nw) / 2 + p.dx, (H - nh) / 2 + p.dy, nw, nh);
       g2.filter = 'none';
       return pc;
@@ -1121,6 +1623,13 @@ function convertDialog() {
     async function drawOther(mode) {
       const { w: W, h: H } = PICTURE_PAGES[mode];
       const g = cv.getContext('2d');
+      if (mode === 'mp_photo') {
+        // the photo in its own colours and transparency, over a mid ground
+        const pcc = await placedGrey(W, H, true);
+        g.fillStyle = '#5a544a'; g.fillRect(0, 0, W, H);
+        g.drawImage(pcc, 0, 0);
+        return;
+      }
       const pc = await placedGrey(W, H);
       const pd = pc.getContext('2d').getImageData(0, 0, W, H).data;
       if (mode === 'mp_portrait') {
@@ -1208,14 +1717,15 @@ function convertDialog() {
       syncZoom(); draw();
     };
     grid.append(el('span', 'muted', 'Images (.png)'), pickWrap, el('span', 'muted', 'Save as'), nameBox, el('span', 'muted', 'Output'), toBox, el('span', 'muted', 'Transparency'), alpha,
-                el('span', 'muted', 'Clear colour'), keyRow, el('span', 'muted', 'Format'), fmt, el('span', 'muted', 'Options'), opt);
+                el('span', 'muted', 'Clear colour'), keyRow, el('span', 'muted', ''), inkRow, el('span', 'muted', 'Format'), fmt, el('span', 'muted', 'Options'), opt);
     b.append(grid, prevBox, out);
     const showKey = () => {
       keyRow.style.opacity = /^(key|book)$/.test(alpha.value) ? '1' : '.45';
+      inkRow.style.display = alpha.value === 'ink' ? 'flex' : 'none';
       cropLab.style.display = alpha.value === 'book_red' ? '' : 'none';
       prevBox.style.display = PICTURE_PAGES[alpha.value] ? 'flex' : 'none';
       // the shipped textures of these kinds have no mipmaps and an exact size: set for them, not asked
-      const preset = ['mp_portrait', 'level_sp', 'level_mp'].includes(alpha.value);
+      const preset = ['mp_portrait', 'level_sp', 'level_mp', 'mp_photo'].includes(alpha.value);
       l1.style.display = l2.style.display = preset ? 'none' : '';
       syncZoom();
       draw();
@@ -1231,7 +1741,8 @@ function convertDialog() {
         const payload = [];
         for (const f of files) payload.push({ name: f.name, data: await readAsB64(f) });
         const r = await post('de_x_convert_images', { files: payload, opts: {
-          to: toWb.checked ? 'workbench' : folder, alpha: alpha.value, key: key.value.slice(1), tolerance: +tol.value,
+          to: toWb.checked ? 'workbench' : folder, alpha: alphaWanted(), key: key.value.slice(1), tolerance: +tol.value,
+          crops: Object.fromEntries(files.filter((f) => crops[f.name]).map((f) => [f.name, crops[f.name]])),
           soft: +soft.value, format: fmt.value, mips: mips.checked, resize: res.checked, crop: crop.checked,
           place: Object.fromEntries(files.filter((f) => bookPlace[alpha.value + '|' + f.name]).map((f) => [f.name, bookPlace[alpha.value + '|' + f.name]])),
           names: Object.fromEntries(files.filter((f) => outNames[alpha.value + '|' + f.name]).map((f) => [f.name, outNames[alpha.value + '|' + f.name]])) } });
@@ -1327,7 +1838,7 @@ function wbMenu(x, y) {
   menu(x, y, [
     { label: 'Add New Folder', run: wbNewFolder },
     { label: 'Rename', disabled: wb.sel.size !== 1, run: wbRename },
-    { label: 'Remove (to the Recycle Bin)', disabled: !wb.sel.size, run: wbRemove },
+    { label: 'Remove…', disabled: !wb.sel.size, run: wbRemove },
     '-',
     { label: 'Copy to the selected .dat folder (' + (folder === 'master' ? 'Master' : folder) + ')', disabled: !wb.sel.size, run: wbToDat },
     { label: 'Open in Explorer', run: () => openFolder('workbench', wb.sel.size === 1 ? [...wb.sel][0] : '') },
@@ -1375,8 +1886,9 @@ async function wbRename() {
 async function wbRemove() {
   const ps = [...wb.sel];
   if (!ps.length) return toast('Select what to remove', 'bad');
-  if (!confirm(`Move ${ps.length} item(s) from the Workbench to the Recycle Bin?\n\n` + ps.slice(0, 10).join('\n') + (ps.length > 10 ? '\n…' : ''))) return;
-  try { await post('de_x_remove', { where: 'workbench', paths: ps }); wb.sel.clear(); if (viewing && viewing.where === 'workbench' && ps.includes(viewing.key)) clearViewer(); loadWorkbench(); }
+  const how = await askDelete(`Remove ${ps.length} item(s) from the Workbench?`, ps);
+  if (!how) return;
+  try { await post('de_x_remove', { where: 'workbench', paths: ps, permanent: how === 'permanent' }); wb.sel.clear(); if (viewing && viewing.where === 'workbench' && ps.includes(viewing.key)) clearViewer(); loadWorkbench(); }
   catch (e) { toast(e.message, 'bad'); }
 }
 
@@ -1445,8 +1957,13 @@ async function deleteMod() {
   const box = $('#deModBox');
   const n = box.value || box._current;
   if (!n) return toast('Pick a saved Mod in the Mod box first', 'bad');
-  if (!confirm('Delete the saved Mod ' + n + '? It goes to the Recycle Bin (your mods folder and Workbench stay as they are).')) return;
-  try { await post('de_x_mod_delete', { name: n }); toast(n + ' deleted', 'good'); loadSaved(); } catch (e) { toast(e.message, 'bad'); }
+  const how = await askDelete('Delete the saved Mod ' + n + '?', [n], 'Your mods folder and Workbench stay as they are.');
+  if (!how) return;
+  try {
+    await post('de_x_mod_delete', { name: n, permanent: how === 'permanent' });
+    toast(n + (how === 'permanent' ? ' deleted permanently' : ' to the Recycle Bin'), 'good');
+    loadSaved();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 async function exportMod() {
@@ -1556,6 +2073,42 @@ async function settingsView() {
   c = card('Building', 'Archives are laid out as the game\'s own: every file 32 bytes after the last but never across a 2048 byte sector, '
     + 'in the original\'s load order, each file compressed or stored as the original, names compressed. That is what keeps '
     + 'loading as fast as the unedited game, so there are no compression switches here: the original\'s settings are always used.');
+  c = card('Xbox game (for Xbox mods)', 'Folders of the UNEDITED Xbox game: its .dat files, or its archives extracted to folders. '
+    + 'An imported file that is one of the Xbox game\u2019s own unedited files is then recognised: the PS2 game\u2019s own copy is used, '
+    + 'and only what the mod changed is converted. Without it, every Xbox file is converted.');
+  const xr = s.xbox_reference || [];
+  if (!xr.length) c.append(el('div', 'muted', 'No folder set.'));
+  xr.forEach((f, i) => row(c, 'Folder ' + (i + 1), f, true, [['Remove', async () => {
+    try { await post('de_x_xbox_ref', { folders: xr.filter((_x, j) => j !== i) }); } catch (e) { return toast(e.message, 'bad'); }
+    settingsView(); }]]));
+  const addX = el('button', 'ghost', 'Add a folder…');
+  addX.onclick = async () => {
+    const f = prompt('A folder of the unedited Xbox game (its .dat files, or an extracted archive):');
+    if (!f) return;
+    toast('Reading the Xbox game\u2019s files (once)…');
+    try { const r = await post('de_x_xbox_ref', { folders: xr.concat([f]) }); toast(r.files + ' Xbox file names known.', 'good'); }
+    catch (e) { return toast(e.message, 'bad'); }
+    settingsView();
+  };
+  c.append(addX);
+  try {
+    const X = await post('de_x_xbox_state', {});
+    c = card('Xbox working disc', 'The Xbox side\'s game files: the recomp\'s assets folder (its game, as it plays). The Studio '
+      + 'reads the Xbox game\'s levels the PS2 disc has not (Coliseum) from here, and with Game: Xbox, Build writes the mod for '
+      + 'it into the recomp\'s mods folder.');
+    row(c, 'Game files', X.assets || '(none)', !!X.assets_ok, [['Change…', async () => {
+      const f = prompt('The recomp\'s game files (its assets folder):', X.assets || '');
+      if (f === null) return;
+      try { await post('de_x_xbox_set', { assets: f }); toast('Xbox working disc set.', 'good'); } catch (e) { return toast(e.message, 'bad'); }
+      settingsView();
+    }]]);
+    row(c, 'Recomp', X.exe || '(none)', !!X.exe_ok, [['Change…', async () => {
+      const f = prompt('The recomp\'s RDR.exe (its folder or the file):', X.exe || '');
+      if (f === null) return;
+      try { await post('de_x_xbox_set', { exe: f }); toast('Recomp set.', 'good'); } catch (e) { return toast(e.message, 'bad'); }
+      settingsView();
+    }]]);
+  } catch (e) { /* an older server: no Xbox side */ }
   c = card('Waiting for a rebuild', 'Studio edits that needed more room than their old space. They go in at the next Rebuild and play (the Play button), all at once.');
   if (!s.pending.length) c.append(el('div', 'muted', 'Nothing waiting.'));
   for (const p of s.pending) c.append(el('div', 'mono', `${p.archive}: ${p.files.join(', ')}`));
@@ -1594,7 +2147,10 @@ function wire() {
   $('#dePgMain').onclick = () => setPage('main');
   $('#dePgManual').onclick = () => setPage('manual');
   $('#dePgSettings').onclick = () => setPage('settings');
-  $('#deBuild').onclick = () => startJob('de_build', {}, 'Build into the working disc');
+  // the PS2 / Xbox switch (xboxmode.js) picks where Build puts the mod
+  $('#deBuild').onclick = () => (window.rdrPlatform && window.rdrPlatform() === 'xbox'
+    ? startJob('de_x_xbox_build', {}, 'Build into the Xbox game')
+    : startJob('de_build', {}, 'Build into the working disc'));
   $('#deRestore').onclick = restoreDialog;
   $('#deNewDat').onclick = newDatDialog;
   $('#deFromGame').onclick = fromGameDialog;
@@ -1602,6 +2158,10 @@ function wire() {
   $('#deDelNew').onclick = deleteNewFiles;
   $('#deOpenFolder').onclick = () => openFolder('mods', folderRel(folder));
   $('#deConvert').onclick = convertDialog;
+  $('#deCancel').onclick = async () => {
+    const b = $('#deCancel'); b.disabled = true; b.textContent = 'Cancelling…';
+    try { const r = await post('de_cancel', {}); if (!r.cancel && r.why) toast('Not now: ' + r.why, 'bad'); } catch (e) { toast(e.message, 'bad'); }
+  };
   $('#deHud').onclick = () => hudDialog(null);
   $('#deExportDat').onclick = exportDat;
   $('#deAllReplace').onclick = () => setModes(data.files.filter((f) => f.folder === 'master' && f.game_file).map((f) => f.name), 'replace');
@@ -1674,7 +2234,7 @@ function wire() {
 
 // ------------------------------------------------------------------ BALANCE > Creatures > Add Character
 
-async function addCharacterDialog() {
+async function addCharacterDialog(opts = {}) {
   let list = [];
   try { list = (await get('creatures')).creatures.map((c) => c.name); } catch (e) { toast(e.message, 'bad'); return; }
   const current = (document.querySelector('#crList .row.sel') || {}).dataset?.cr || 'srd.cr';
@@ -1700,7 +2260,7 @@ async function addCharacterDialog() {
     const KINDS = [['cr', 'tuning (.cr)'], ['skel', 'skeleton'], ['dam', 'damage'], ['hot', 'hit spots'], ['msd', 'motion'],
                    ['rep', 'rep'], ['sphs', 'spheres'], ['swt', 'collision'], ['ars', 'ars'], ['tail', 'tail'], ['acc', 'accessories']];
     const pick = el('input'); pick.type = 'file'; pick.multiple = true;
-    pick.accept = '.rsc,.rnt,.tex,' + KINDS.map(([k]) => '.' + k).join(',');
+    pick.accept = '.rsc,.rnt,.tex,.xrsc,.xrnt,.xtex,.xmod,' + KINDS.map(([k]) => '.' + k).join(',');
     const picked = el('div', 'muted', 'Pick the .rsc and its .rnt; also the .skel it was made on, its .tex textures, and any character files of your own (Ctrl+click)');
     const pickWrap = el('div'); pickWrap.append(pick, picked);
     const fileLabel = el('span', 'muted', 'Your files');
@@ -1724,7 +2284,9 @@ async function addCharacterDialog() {
       }
     };
     pick.onchange = () => { files = [...pick.files]; picked.textContent = files.map((f) => f.name).join(', ') || 'Pick the .rsc and .rnt (and your other files)'; mark(); };
-    grid.append(srcLabel, src, fileLabel, pickWrap, copyLabel, copyBox, el('span', 'muted', 'New code'), code);
+    const mpBox = el('input'); mpBox.type = 'checkbox'; mpBox.checked = !!opts.mp;
+    const mpLab = el('label'); mpLab.append(mpBox, el('span', null, ' Then make it a Showdown character (its roster entry, name and portraits, named as the game names them)'));
+    grid.append(srcLabel, src, fileLabel, pickWrap, copyLabel, copyBox, el('span', 'muted', 'New code'), code, el('span', 'muted', 'Showdown'), mpLab);
     b.append(grid);
     const note = el('p', 'muted');
     b.append(note);
@@ -1743,7 +2305,7 @@ async function addCharacterDialog() {
           + 'bundle). SWAT.DAT is rebuilt to make room (a few minutes). Not undoable with Ctrl+Z; Reset to stock removes it.';
     };
     rCopy.onchange = rOwn.onchange = upd; upd();
-    b._get = () => ({ own: rOwn.checked, source: src.value, code: code.value.trim().toLowerCase(),
+    b._get = () => ({ own: rOwn.checked, source: src.value, code: code.value.trim().toLowerCase(), mp: mpBox.checked,
                       copy: KINDS.map(([k]) => k).filter((k) => copyChecks[k].c.checked && !copyChecks[k].c.disabled) });
   }, [{ label: 'Cancel' }, { label: 'Add Character', cls: 'primary', run: async (b, btn) => {
     const v = b._get();
@@ -1751,11 +2313,14 @@ async function addCharacterDialog() {
     const body = { source: v.source, code: v.code };
     if (v.own) body.copy = v.copy;
     if (v.own) {
-      const rsc = files.find((f) => /\.rsc$/i.test(f.name));
-      const rnt = files.find((f) => /\.rnt$/i.test(f.name));
-      if (!rsc || !rnt) { toast('Pick your model\'s .rsc and its .rnt (both)', 'bad'); return true; }
+      // the PS2's .rsc + .rnt, or the Xbox's .xrsc + .xrnt (converted on the server)
+      const rsc = files.find((f) => /\.x?rsc$/i.test(f.name));
+      const rnt = files.find((f) => /\.x?rnt$/i.test(f.name));
+      if (!rsc || !rnt) { toast('Pick your model\'s .rsc and its .rnt (both; the Xbox .xrsc + .xrnt work too)', 'bad'); return true; }
+      if (/^lvl_/i.test(rsc.name)) { toast('That is a level bundle, not a character', 'bad'); return true; }
       body.rsc_b64 = await readAsB64(rsc);
       body.rnt_b64 = await readAsB64(rnt);
+      body.rsc_name = rsc.name;
       const sk = files.find((f) => /\.skel$/i.test(f.name));
       if (sk) body.skel_b64 = await readAsB64(sk);
       // the rest: character files of yours (used instead of the copies) and its .tex textures (kept in the Workbench)
@@ -1765,11 +2330,1042 @@ async function addCharacterDialog() {
     btn.disabled = true; btn.textContent = 'Rebuilding SWAT.DAT…';
     try {
       const r = await post('creature_add', body);
+      showNotes(r.notes);
       toast('New character ' + v.code + ': ' + r.added.length + ' files added to SWAT.DAT' + (v.own ? ' (your model)' : '') + '; all its files are in the Workbench (' + v.code + ')', 'good');
       if (A && A.refreshLists) await A.refreshLists();
       if (A && A.refreshCreatures) await A.refreshCreatures(r.name);
+      if (v.mp) setTimeout(() => showdownDialog(v.code), 50);
     } catch (e) { toast('Not added: ' + e.message, 'bad'); btn.disabled = false; btn.textContent = 'Add Character'; return true; }
   } }], 660);
+}
+
+// ------------------------------------------------------------------ Showdown: make a character playable in versus
+
+// A character dropped into swat.dat that is not a Showdown character yet: offered at once, as a fresh entry with
+// a place on the select screen already picked (front row), so one click makes it playable.
+async function offerShowdown(names) {
+  let r;
+  try { r = await post('de_x_mp_candidates', { names }); } catch { return; }
+  const codes = r.codes || [];
+  if ((r.xbox || []).length)
+    toast('These are Xbox files, which the PS2 game does not read: ' + r.xbox.join(', ')
+      + '. Export again from Blender with Platform: PS2 (.rsc / .rnt / .mod / .tex).', 'warn');
+  // a model with no character: made one first (the rest copied from a character on the same skeleton)
+  for (const b of r.bundles || []) {
+    const made = await characterFromBundle(b);
+    if (made && !codes.includes(b.code)) codes.push(b.code);
+  }
+  for (const c of codes) {
+    toast(c + ' is a new character: make it a Showdown character (one click, or place it first).', 'good');
+    await showdownDialog(c, { auto: true });
+  }
+}
+
+function characterFromBundle(b) {
+  return new Promise((resolve) => {
+    let done = false;
+    const d = dialog('Make ' + b.code + ' a character', (box) => {
+      box.append(el('p', null, b.code + '_lods.rsc is a model with no character files yet (no ' + b.code + '.cr). To play it, '
+        + 'the rest of a character (its tuning, skeleton, damage, hit spots, motion ...) is copied from a character on a '
+        + 'skeleton of the same size (' + (b.bones || '?') + ' bones), as Add Character does with your own .rsc; your model '
+        + 'stays the look. Then it is made a Showdown character.'));
+      const sel = el('select');
+      for (const s of b.sources) sel.append(new Option(s, s + '.cr'));
+      if (!b.sources.length) sel.append(new Option('(no character has ' + b.bones + ' bones: use Add Character)', ''));
+      const row = el('div'); row.style.cssText = 'display:flex;gap:8px;align-items:center';
+      row.append(el('span', 'muted', 'Copy the rest from'), sel);
+      box.append(row, el('p', 'muted', 'SWAT.DAT is rebuilt to add it (a few minutes). All its files are copied to the Workbench.'));
+      box._src = () => sel.value;
+    }, [{ label: 'Not now' }, { label: 'Make it a character', cls: 'primary', run: async (box, btn) => {
+      const src = box._src();
+      if (!src) { toast('No character has a skeleton of that size: use Add Character', 'bad'); return true; }
+      btn.disabled = true; btn.textContent = 'Rebuilding SWAT.DAT…';
+      try {
+        const r = await post('de_x_mp_make_character', { code: b.code, source: src });
+        toast(b.code + ' is a character now (' + r.added.length + ' files, the rest from ' + src.replace(/\.cr$/, '') + ')', 'good');
+        done = true;
+        if (A && A.refreshCreatures) A.refreshCreatures();
+      } catch (e) { toast('Not made: ' + e.message, 'bad'); btn.disabled = false; btn.textContent = 'Make it a character'; return true; }
+    } }], 620);
+    const w = setInterval(() => { if (!d.box.isConnected) { clearInterval(w); resolve(done); } }, 300);
+  });
+}
+
+async function showdownDialog(code, opts = {}) {
+  const cr = code || selectedCreature();
+  if (!cr) return toast('Select the character first', 'bad');
+  let info;
+  try { info = await post('de_x_mp_info', { code: cr }); } catch (e) { return toast(e.message, 'bad'); }
+  let portrait = null;
+  let closedResolve;
+  const closed = new Promise((res) => { closedResolve = res; });
+  const dlg = dialog('Make ' + info.code + ' a Showdown character', (b) => {
+    b.append(el('p', 'muted', 'The game\'s naming is filled in for you: roster code ' + info.mcode + ' (m + its code), its own '
+      + info.mcode + '.cr, its name and portraits by ' + info.code + ' (mp_' + info.code + '.tex, ui_mphoto_' + info.code
+      + '.tex), and its place on the select screen (hotspot_' + info.code + '). Everything goes into the Data Editor\'s '
+      + 'mods folder; Build puts it on the disc.'));
+    const grid = el('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:170px 1fr;gap:8px;align-items:center';
+    const modeBox = el('div'); modeBox.style.cssText = 'display:flex;gap:14px;flex-wrap:wrap';
+    const mk = (v, label, on) => {
+      const l = el('label'); const r = el('input'); r.type = 'radio'; r.name = 'mpMode'; r.value = v; r.checked = on;
+      l.append(r, el('span', null, ' ' + label)); modeBox.append(l); return r;
+    };
+    const rNew = mk('new', 'A fresh entry (all 48 stay)', opts.auto || !info.in_roster);
+    const rRep = mk('replace', 'In place of a roster entry', !opts.auto && info.in_roster);
+    // the name the menu shows, on one line or two stacked (the game's own: "Pig" over Josh -- a line break in it)
+    const nameLines = String(info.name || '').split(/\r?\n/);
+    const name = el('input'); name.value = nameLines[0] || ''; name.placeholder = 'the name the menu shows';
+    const name2 = el('input'); name2.value = nameLines.slice(1).join(' '); name2.placeholder = 'second line (optional): stacked under the first';
+    name.style.width = name2.style.width = '100%';
+    const nameBox = el('div'); nameBox.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+    nameBox.append(name, name2);
+    const nameValue = () => [name.value.trim(), name2.value.trim()].filter(Boolean).join('\n');
+    const slot = el('select');
+    for (const r of info.roster) slot.append(new Option(r.code + (r.name ? ' — ' + r.name : ''), r.code));
+    slot.value = info.slot;
+    const slotLab = el('span', 'muted', 'Takes the place of');
+    const bounty = el('input'); bounty.type = 'number'; bounty.value = 500; bounty.min = 0; bounty.style.width = '110px';
+    const bountyLab = el('span', 'muted', 'Bounty');
+    const tpl = el('select');
+    // every Showdown character, alphabetical; one on another skeleton is marked (its moves may not match)
+    for (const t of info.templates) {
+      tpl.append(new Option((t.name ? t.name.replace(/\s+/g, ' ') + ' — ' : '') + t.code
+        + (t.fits === false ? '  (another skeleton: ' + (t.skeleton || '?') + ')' : ''), t.code));
+    }
+    if (info.template) tpl.value = info.template;
+    tpl.append(new Option('The slot\'s own (may not fit this skeleton)', ''));
+    tpl.value = info.template || '';
+    const unl = el('input'); unl.type = 'checkbox'; unl.checked = true;
+    const unlLab = el('label'); unlLab.append(unl, el('span', null, ' Unlocked from the start'));
+    const pPick = el('input'); pPick.type = 'file'; pPick.accept = '.png,.tex,.xtex,.jpg';
+    // the portrait: cropped square first, so the face fills the 128 x 128 portrait as the game's do
+    pPick.onchange = async () => {
+      const f = pPick.files[0];
+      portrait = null;
+      if (!f) return;
+      let src = URL.createObjectURL(f);
+      if (/\.x?tex$/i.test(f.name)) {
+        try { src = 'data:image/png;base64,' + (await post('de_x_tex_to_png', { data: await readAsB64(f) })).png; } catch (e) { return toast(e.message, 'bad'); }
+      }
+      const pick = await cropDialog(src, { title: 'Fit the portrait in its texture (mp_' + info.code + '.tex)', aspect: 1,
+        target: '128 x 128 portrait', keepLabel: 'Use it whole', okLabel: 'Use this crop',
+        text: 'Pick the part to keep: it becomes the 128 x 128 portrait (as the game\'s, the face filling most of it). '
+          + 'Drag the box, drag a corner, or use the mouse wheel.' });
+      if (pick === null) { pPick.value = ''; return; }
+      const im = await loadImg(src);
+      if (!im) return;
+      const c = document.createElement('canvas');
+      const r = pick === 'keep' ? { x: 0, y: 0, w: im.width, h: im.height } : pick;
+      c.width = r.w; c.height = r.h;
+      c.getContext('2d').drawImage(im, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      portrait = { name: info.code + '_portrait.png', data: c.toDataURL('image/png').split(',')[1] };
+      toast('Portrait ready (' + r.w + ' x ' + r.h + ' -> 128 x 128)', 'good');
+    };
+    const fPick = el('input'); fPick.type = 'file'; fPick.accept = '.png,.jpg,.tex,.xtex';
+    // transparency, as Convert images makes it (the portrait's own recipe first: the team square and ink)
+    const alphaRow = (withRecipe) => {
+      const sel = el('select');
+      if (withRecipe) sel.append(new Option('mp portrait recipe (team square, ink), as the game\'s', 'recipe'));
+      for (const [v, l] of ALPHA_CHOICES) if (v !== 'auto') sel.append(new Option(l, v));
+      const key = el('input'); key.type = 'color'; key.value = '#000000';
+      const tol = el('input'); tol.type = 'number'; tol.value = 16; tol.min = 0; tol.max = 255; tol.style.width = '56px';
+      const keyBox = el('span'); keyBox.style.cssText = 'display:none;gap:4px;align-items:center;margin-left:6px';
+      keyBox.append(key, el('span', 'muted', 'tolerance'), tol);
+      // the game's look: the colour ramp and contrast of the shipped photos (portraits), learnt from the disc
+      const tone = el('input'); tone.type = 'checkbox';
+      const toneLab = el('label', 'muted'); toneLab.style.cssText = 'display:inline-flex;gap:4px;align-items:center;margin-left:6px';
+      toneLab.title = 'Recolours the picture with the colour gradient of the game\'s own ' + (withRecipe ? 'portraits' : 'select screen photos')
+        + ' (each brightness its sepia colour, the same contrast), so it sits with the others. Its transparency is kept.';
+      toneLab.append(tone, document.createTextNode('Colour like the other ' + (withRecipe ? 'portraits' : 'photos')));
+      const row = el('div'); row.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+      row.append(sel, keyBox);
+      if (!withRecipe) row.append(toneLab);                    // the photo only: no recolouring of the portrait
+      return { row, sel, key, tol, keyBox, tone, opt: () => ({ alpha: sel.value, key: key.value.slice(1), tolerance: +tol.value,
+        tone: tone.checked ? (withRecipe ? 'portrait' : 'photo') : '' }) };
+    };
+    const pA = alphaRow(true), fA = alphaRow(false);
+    const fAlpha = fA.sel, fKey = fA.keyBox, fKeyC = fA.key, fKeyT = fA.tol, fAlphaOpt = fA.opt;
+    fA.tone.onchange = () => photoSource(false);
+    pA.sel.onchange = () => { pA.keyBox.style.display = pA.sel.value === 'key' ? 'inline-flex' : 'none'; };
+    grid.append(el('span', 'muted', 'Roster'), modeBox, el('span', 'muted', 'Name shown (one or two lines)'), nameBox, slotLab, slot, bountyLab, bounty,
+                el('span', 'muted', 'Versus tuning from'), tpl, el('span', 'muted', ''), unlLab,
+                el('span', 'muted', 'Mugshot (mp_, 128x128)'), pPick, el('span', 'muted', 'Mugshot transparency'), pA.row,
+                el('span', 'muted', 'Full portrait (ui_mphoto_, upright)'), fPick, el('span', 'muted', 'Full portrait transparency'), fA.row);
+    // the voice line it says on the select screen (snd_98.csv: a stream, numbered by its place in the list)
+    const vMode = el('select');
+    vMode.append(new Option('Keep what it has (none for a new one)', 'keep'), new Option('None', 'none'),
+      new Option('Same as the versus tuning character\'s', 'template'), new Option('A stream of the game\'s', 'stream'),
+      new Option('Your own (.wav 16-bit PCM, or .stm)', 'file'));
+    const vStream = el('input'); vStream.placeholder = 'stream name, e.g. red_NEWmp_line'; vStream.style.width = '220px';
+    const vList = el('datalist'); vList.id = 'mpVoiceList' + Date.now(); vStream.setAttribute('list', vList.id);
+    const vFile = el('input'); vFile.type = 'file'; vFile.accept = '.wav,.stm';
+    // the game's streams, searched and heard as in Audio > Voices & music, one picked
+    const vBrowse = el('button', null, 'Browse streams…');
+    vBrowse.title = 'Search the game\'s streams (by name or by what is said), listen, and pick one';
+    vBrowse.onclick = async () => {
+      const got = await pickStream(vStream.value.trim());
+      if (got) vStream.value = got;
+    };
+    const vRow = el('div'); vRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+    vRow.append(vMode, vStream, vBrowse, vList, vFile);
+    const vShow = () => {
+      vStream.style.display = vBrowse.style.display = vMode.value === 'stream' ? '' : 'none';
+      vFile.style.display = vMode.value === 'file' ? '' : 'none';
+    };
+    vMode.onchange = vShow; vShow();
+    post('de_x_voice_lines', {}).then((r) => {
+      for (const v of r.lines || []) vList.append(new Option(v.name, v.stream));
+      const mine = (r.lines || []).find((v) => v.code === info.code);
+      if (mine) vMode.options[0].text = 'Keep its own (' + mine.stream + ')';
+    }).catch(() => {});
+    grid.append(el('span', 'muted', 'Voice line (select screen)'), vRow);
+    // its in-match sounds (the .swt's CreatureSoundSet: voice, injuries, deaths ...) and footsteps (StepType)
+    const sMode = el('select');
+    sMode.append(new Option('Keep what it has', 'keep'), new Option('Same as…', 'same'),
+      new Option('A new sound bank copied from… (its own, to change in the Sound tab)', 'new'));
+    const sSrc = el('select'); sSrc.style.maxWidth = '220px';
+    const sStep = el('select');
+    sStep.append(new Option('Footsteps: keep', 'keep'), new Option('Footsteps: like that character', 'source'),
+      new Option('Footsteps: type 1 (most characters)', '1'), new Option('Footsteps: type 3', '3'));
+    const sRow = el('div'); sRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+    const sNote = el('span', 'muted', '');
+    sRow.append(sMode, sSrc, sStep, sNote);
+    const sShow = () => { sSrc.style.display = sMode.value === 'keep' && sStep.value !== 'source' ? 'none' : ''; };
+    sMode.onchange = sStep.onchange = sShow; sShow();
+    post('de_x_sound_sets', {}).then((r) => {
+      for (const x of r.sets || []) sSrc.append(new Option(`${x.name} (${x.code}) · set ${x.set}, steps ${x.step}`, x.code));
+      const mine = (r.sets || []).find((x) => x.code === info.code);
+      if (mine) sNote.textContent = `now: sound set ${mine.set}, footsteps ${mine.step}`;
+    }).catch(() => {});
+    grid.append(el('span', 'muted', 'In-match sounds'), sRow);
+    b._sounds = () => ({ mode: sMode.value, source: sSrc.value, step: sStep.value });
+    b.append(grid);
+    b._voice = async () => {
+      const m = vMode.value;
+      if (m === 'stream') return { mode: m, stream: vStream.value.trim() };
+      if (m === 'file') {
+        const f = vFile.files[0];
+        if (!f) throw new Error('pick the voice line\'s .wav or .stm');
+        return { mode: m, file: { name: f.name, data: await readAsB64(f) } };
+      }
+      return { mode: m };
+    };
+
+    // ---- the select screen: drag the photo into place, click the face to put the pointer
+    const head = el('div', 'muted', 'The select screen, drawn from the game\'s own files. Drag ' + info.code + '\'s photo left / right '
+      + 'to place it; drag up / down or use the mouse wheel to size the figure in its frame; click the face to put the pointer '
+      + '(the gold cross). Gold dots: everyone else\'s pointers.');
+    head.style.cssText = 'margin:10px 0 4px;font-size:12px';
+    const cv = el('canvas'); cv.width = 1024; cv.height = 256;
+    cv.style.cssText = 'width:100%;border:1px solid var(--line);background:#222;cursor:grab;display:block';
+    const ctl = el('div'); ctl.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:12px';
+    // The layer: the game draws the photos in the order of the select screen's list (later over earlier, back row
+    // first), so the photo's place in that order decides who it covers and who covers it.
+    const layer = el('input'); layer.type = 'range'; layer.min = 0; layer.max = 0; layer.step = 1; layer.style.width = '220px';
+    const toBack = el('button', 'btn', 'Behind all'), toFront = el('button', 'btn', 'In front of all');
+    const layLab = el('span', 'muted', '');
+    const pos = el('span', 'mono', '');
+    ctl.append(el('span', 'muted', 'Layer'), toBack, layer, toFront, layLab, pos);
+    // Which lineup: lineup 2 is the second page of the select screen (L1 / R1 pan between them in the game; the
+    // build adds that code mod by itself while a character is on lineup 2). Its background can be changed once it
+    // has a character; lineup 1's any time.
+    const lineRow = el('div'); lineRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px';
+    const lineSel = el('select'); lineSel.append(new Option('Lineup 1 (the game\'s)', '0'), new Option('Lineup 2 (second page: L1 / R1)', '1'));
+    const bgPick = el('input'); bgPick.type = 'file'; bgPick.accept = '.png,.jpg,.jpeg,.tex'; bgPick.style.display = 'none';
+    const bgBtn = el('button', 'btn', 'Change background…'), bgReset = el('button', 'btn', 'Reset background');
+    const bgNote = el('span', 'muted', '');
+    lineRow.append(el('span', 'muted', 'Lineup'), lineSel, bgBtn, bgReset, bgPick, bgNote);
+    b.append(head, lineRow, cv, ctl);
+    const st = { bg: null, stack: [], spots: [], fig: null, x: 448, fs: 0.9, fy: null, sx: 64, sy: 40, placed: false, layer: null,
+                 lineup: null, info: null };
+    function bgShow() {
+      const ln = +lineSel.value, i = st.info || { counts: [48, 0] };
+      const can = ln === 0 || i.counts[1] > 0;              // lineup 2's background: once it has a character
+      bgBtn.style.display = can ? '' : 'none';
+      bgReset.style.display = can && (ln === 0 ? i.bg1_changed : i.own_bg2) ? '' : 'none';
+      bgNote.textContent = ln === 1 ? (i.counts[1] ? `${i.counts[1]} on lineup 2` + (i.own_bg2 ? ', its own background' : ', lineup 1\'s background')
+        : 'Lineup 2 is empty: its background can be changed once a character is on it (it uses lineup 1\'s).') : '';
+    }
+    lineSel.onchange = () => { st.lineup = +lineSel.value; st.layer = null; loadLineup(); };
+    bgBtn.onclick = () => bgPick.click();
+    bgPick.onchange = async () => {
+      const f = bgPick.files[0]; bgPick.value = '';
+      if (!f) return;
+      const data = await readAsB64(f);
+      let src;
+      try { src = 'data:image/png;base64,' + (await post('de_x_alpha_png', { data, alpha: { alpha: 'keep' } })).png; }
+      catch (e) { return toast(f.name + ': ' + e.message, 'bad'); }
+      const pick = await cropDialog(src, { title: 'Lineup ' + (+lineSel.value + 1) + ' background', aspect: 4,
+        target: '1024 x 256 (two 512 x 256 halves, 24-bit)', keepLabel: 'Fit it whole', okLabel: 'Use this crop',
+        text: 'Pick the part to use as the lineup\'s background: it fills the 1024 x 256 picture the characters stand in front of.' });
+      if (pick === null) return;
+      try {
+        await post('de_x_lineup_bg', { lineup: +lineSel.value, data, crop: pick === 'keep' ? null : pick });
+        toast('Lineup ' + (+lineSel.value + 1) + '\'s background is in the mods folder. Build to put it on the disc.', 'good');
+      } catch (e) { return toast(e.message, 'bad'); }
+      loadLineup();
+    };
+    bgReset.onclick = async () => {
+      try { await post('de_x_lineup_bg', { lineup: +lineSel.value, reset: true }); } catch (e) { return toast(e.message, 'bad'); }
+      toast(+lineSel.value ? 'Lineup 2 uses lineup 1\'s background again' : 'Lineup 1 has the game\'s background again', 'good');
+      loadLineup();
+    };
+    const frame = document.createElement('canvas'); frame.width = 128; frame.height = 256;
+    const loadImg = (src) => new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = src; });
+    function drawFrame() {
+      const g = frame.getContext('2d'); g.clearRect(0, 0, 128, 256);
+      if (!st.fig) return;
+      const h = 256 * st.fs, w = h * st.fig.width / st.fig.height;
+      if (st.fy === null) st.fy = 256 - h;
+      g.drawImage(st.fig, (128 - w) / 2, st.fy, w, h);
+    }
+    function draw() {
+      const g = cv.getContext('2d');
+      g.clearRect(0, 0, 1024, 256);
+      if (st.bg) g.drawImage(st.bg, 0, 0);
+      drawFrame();
+      const n = st.stack.length, k = st.layer === null ? n : Math.max(0, Math.min(n, st.layer));
+      for (let i = 0; i <= n; i++) {
+        if (i === k) g.drawImage(frame, st.x, 0);             // its photo, at its layer
+        if (i < n && st.stack[i].img) g.drawImage(st.stack[i].img, st.stack[i].x, 0);
+      }
+      g.fillStyle = 'rgba(255,211,107,.85)';
+      for (const p of st.spots) { g.beginPath(); g.arc(p.x + p.sx, p.sy, 2.5, 0, 7); g.fill(); }
+      layer.max = n; layer.value = k;
+      const up = (c) => (c || '').toUpperCase();
+      layLab.textContent = n ? (k === 0 ? 'behind everyone' : k === n ? 'in front of everyone'
+        : `in front of ${up(st.stack[k - 1].code)}, behind ${up(st.stack[k].code)} (${k} of ${n} behind it)`) : '';
+      g.strokeStyle = 'rgba(255,255,255,.6)'; g.setLineDash([4, 3]); g.strokeRect(st.x + .5, .5, 127, 255); g.setLineDash([]);
+      const px = st.x + st.sx, py = st.sy;
+      g.strokeStyle = '#ffd36b'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(px - 8, py); g.lineTo(px + 8, py); g.moveTo(px, py - 8); g.lineTo(px, py + 8); g.stroke();
+      pos.textContent = `photo at x ${Math.round(st.x)} · pointer ${Math.round(st.x + st.sx)}, ${Math.round(st.sy)}`
+        + (st.placed ? '' : ' (click the face to place it)');
+    }
+    async function loadLineup() {
+      const ex = [info.code];
+      if (rRep.checked) ex.push(slot.value);
+      let L;
+      try {
+        L = await post('de_x_mp_lineup', { exclude: ex, lineup: st.lineup || 0 });
+        if (st.lineup === null) {
+          // first look: the lineup it is on now (replacing: the slot's), and that one drawn
+          const on = L.on || {};
+          const want = on[info.code] !== undefined ? on[info.code] : (rRep.checked && on[slot.value.slice(1)] !== undefined ? on[slot.value.slice(1)] : 0);
+          st.lineup = want ? 1 : 0;
+          lineSel.value = String(st.lineup);
+          if (st.lineup) L = await post('de_x_mp_lineup', { exclude: ex, lineup: 1 });
+        }
+      } catch (e) { head.textContent = 'The select screen could not be drawn: ' + e.message; return; }
+      st.info = L.info || st.info;
+      bgShow();
+      st.bg = await loadImg('data:image/png;base64,' + L.png);
+      st.stack = await Promise.all((L.stack || []).map(async (s) => ({ ...s, img: await loadImg('data:image/png;base64,' + s.png) })));
+      st.spots = L.hotspots;
+      // its layer: where it is drawn now, else (replacing) where the slot is, else in front of everyone
+      const lay = L.layer || {};
+      st.layer = lay[info.code] !== undefined ? lay[info.code]
+        : (rRep.checked && lay[slot.value.slice(1)] !== undefined) ? lay[slot.value.slice(1)] : st.stack.length;
+      // its own photo and pointer if it has them; replacing: start where the slot's were
+      const mineCode = info.code, slotBase = slot.value.slice(1);
+      if (!fPick.files[0] && L.photos[mineCode]) { st.fig = await loadImg('data:image/png;base64,' + L.photos[mineCode]); st.fs = 1; st.fy = 0; }
+      // start from its own pointer if it has one, else (replacing) the slot's
+      const start = (L.own || {})[mineCode] || (rRep.checked ? (L.own || {})[slotBase] : null);
+      if (start && !st.placed) { st.x = start.x; st.sx = start.sx; st.sy = start.sy; st.placed = true; }
+      if (!st.placed && rNew.checked) {
+        // a first place, as the front row stands: the right end, the figure ~175 px tall with its head ~100 px down,
+        // the pointer on the head -- ready to use, and draggable
+        st.x = 880; st.sx = 64; st.sy = 114; st.placed = true;
+        if (st.fig) { st.fs = 175 / 256; st.fy = 100; }
+      }
+      if (rRep.checked && !st.fig && L.photos[slotBase]) {
+        st.fig = await loadImg('data:image/png;base64,' + L.photos[slotBase]); st.fs = 1; st.fy = 0;
+      }
+      draw();
+    }
+    let photoFile = null, photoCrop = null;
+    async function photoSource(askCrop) {
+      const f = photoFile;
+      if (!f) return;
+      let src;
+      try {
+        src = 'data:image/png;base64,' + (await post('de_x_alpha_png', { data: await readAsB64(f), alpha: fAlphaOpt() })).png;
+      } catch (e) { return toast(f.name + ': ' + e.message, 'bad'); }
+      let im = await loadImg(src);
+      if (!im) return toast(f.name + ' would not open', 'bad');
+      // a stored (sideways) ui_mphoto texture is turned upright first
+      if (im.width > im.height && /\.x?tex$/i.test(f.name)) {
+        const c = document.createElement('canvas'); c.width = im.height; c.height = im.width;
+        const g = c.getContext('2d'); g.translate(c.width, 0); g.rotate(Math.PI / 2); g.drawImage(im, 0, 0);
+        src = c.toDataURL('image/png');
+        im = await loadImg(src);
+      }
+      if (askCrop) {
+        // the crop window, locked to the photo's frame (128 x 256): what is kept fills the frame exactly
+        const pick = await cropDialog(src, { title: 'Fit the photo in its texture (ui_mphoto_' + info.code + '.tex)', aspect: 0.5,
+          target: '128 x 256 photo (stored on its side, 256 x 128)', keepLabel: 'Fit it whole', okLabel: 'Use this crop',
+          text: 'Pick the part to keep: it fills the 128 x 256 photo frame, as it stands on the select screen (the dashed '
+            + 'box). Leave room above the head for the back rows to show, as the game\'s photos do. "Fit it whole" keeps '
+            + 'the picture as it is and lets you size it in the frame.' });
+        if (pick === null) { fPick.value = ''; photoFile = null; return; }
+        photoCrop = pick;
+      }
+      if (photoCrop === 'keep' || !photoCrop) {
+        st.fig = im; if (askCrop) { st.fs = 0.9; st.fy = null; }
+      } else {
+        const c = document.createElement('canvas'); c.width = photoCrop.w; c.height = photoCrop.h;
+        c.getContext('2d').drawImage(im, photoCrop.x, photoCrop.y, photoCrop.w, photoCrop.h, 0, 0, photoCrop.w, photoCrop.h);
+        st.fig = c; if (askCrop) { st.fs = 1; st.fy = 0; }
+      }
+      draw();
+    }
+    fPick.onchange = () => { photoFile = fPick.files[0] || null; photoCrop = null; photoSource(true); };
+    fAlpha.onchange = () => { fKey.style.display = fAlpha.value === 'key' ? 'inline-flex' : 'none'; photoSource(false); };
+    fKeyC.onchange = fKeyT.onchange = () => photoSource(false);
+    let drag = null;
+    const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * 1024 / r.width, (e.clientY - r.top) * 256 / r.height]; };
+    cv.onmousedown = (e) => {
+      const [mx, my] = at(e);
+      drag = { mx, my, x: st.x, fy: st.fy === null ? 0 : st.fy, moved: false };
+      const move = (ev) => {
+        const [nx, ny] = at(ev);
+        if (Math.abs(nx - drag.mx) + Math.abs(ny - drag.my) > 3) drag.moved = true;
+        if (!drag.moved) return;
+        st.x = Math.max(-64, Math.min(1024 - 64, drag.x + nx - drag.mx));
+        if (st.fig) st.fy = drag.fy + ny - drag.my;
+        draw();
+      };
+      const up = (ev) => {
+        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+        if (!drag.moved) {
+          // a click: the pointer goes here (kept inside its photo)
+          const [cx, cy] = at(ev);
+          st.sx = Math.max(0, Math.min(127, cx - st.x)); st.sy = Math.max(0, Math.min(255, cy)); st.placed = true;
+        }
+        drag = null; draw();
+      };
+      document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+    };
+    cv.onwheel = (e) => {
+      e.preventDefault(); if (!st.fig) return;
+      const k = e.deltaY < 0 ? 1.04 : 1 / 1.04, bottom = (st.fy === null ? 0 : st.fy) + 256 * st.fs;
+      st.fs = Math.max(0.2, Math.min(1.6, st.fs * k)); st.fy = bottom - 256 * st.fs; draw();
+    };
+    layer.oninput = () => { st.layer = +layer.value; draw(); };
+    toBack.onclick = () => { st.layer = 0; draw(); };
+    toFront.onclick = () => { st.layer = st.stack.length; draw(); };
+    const upd = () => {
+      const rep = rRep.checked;
+      slotLab.style.display = slot.style.display = rep ? '' : 'none';
+      bountyLab.style.display = bounty.style.display = rep ? 'none' : '';
+      loadLineup();
+    };
+    rNew.onchange = rRep.onchange = upd; slot.onchange = () => { st.placed = false; loadLineup(); };
+    upd();
+    b._pAlpha = pA.opt;
+    b._get = () => {
+      drawFrame();
+      return { code: info.code, name: nameValue(), slot: slot.value, template: tpl.value || null, unlocked: unl.checked,
+               mode: rNew.checked ? 'new' : 'replace', bounty: bounty.value,
+               layer: st.layer === null ? st.stack.length : st.layer, on_lineup: st.lineup || 0,
+               lineup: (st.placed || rNew.checked) ? { x: Math.round(st.x), sx: Math.round(st.sx), sy: Math.round(st.sy) } : null,
+               photo_upright: st.fig ? frame.toDataURL('image/png').split(',')[1] : null, placed: st.placed };
+    };
+  }, [{ label: opts.auto ? 'Not now' : 'Cancel' },
+      // a Showdown character already: its stats, pictures, looks and place in the Showdown editor
+      ...(info.in_roster ? [{ label: 'Edit…', run: () => { showdownEditor(info.code); } }] : []),
+      { label: 'Add to Showdown', cls: 'primary', run: async (b, btn) => {
+    const v = b._get();
+    if (v.mode === 'new' && !v.placed) { toast('Click ' + info.code + '\'s face on the select screen to put the pointer', 'bad'); return true; }
+    let voice;
+    try { voice = await b._voice(); } catch (e) { toast(e.message, 'bad'); return true; }
+    btn.disabled = true; btn.textContent = 'Writing…';
+    try {
+      const r = await post('de_x_mp_add', { ...v, voice, portrait: portrait ? { ...portrait, alpha: b._pAlpha() } : null });
+      toast(`${r.mcode} "${r.name}" is in the Showdown roster ${v.mode === 'new' ? 'as a new entry' : 'in place of ' + r.slot}, with its place on the select screen; ${r.wrote.length} files in the mods folder. Build to put it on the disc.`, 'good');
+      for (const n of r.notes) toast(n, 'warn');
+      const snd = b._sounds();
+      if (snd.mode !== 'keep' || snd.step !== 'keep') {
+        try {
+          const s = await post('de_x_mp_sounds', { code: info.code, ...snd });
+          toast(`In-match sounds: sound set ${s.set}${snd.mode === 'new' ? ' (its own bank: change its sounds in the Sound tab)' : ''}, footsteps type ${s.step}.`, 'good');
+        } catch (e) { toast('Its sounds were not changed: ' + e.message, 'bad'); }
+      }
+      refresh();
+    } catch (e) { toast('Not added: ' + e.message, 'bad'); btn.disabled = false; btn.textContent = 'Add to Showdown'; return true; }
+  } }], 1100);
+  const watch = setInterval(() => { if (!dlg.box.isConnected) { clearInterval(watch); closedResolve(); } }, 300);
+  return closed;
+}
+
+// Creatures > Replace All Characters: every humanoid character made a copy of one character -- every file of it (its
+// .cr, model, skeleton, hit spots, damage ...), the way Add Character copies one (dataeditor.replace_all_characters).
+// Written to the mods folder: the next Build puts it in the PS2 game, Build (Xbox) in the Xbox game.
+async function replaceAllCharactersDialog() {
+  let hum;
+  try { hum = await post('de_x_humanoids', {}); } catch (e) { return toast(e.message, 'bad'); }
+  const codes = (hum.characters || []).slice().sort();
+  if (!codes.length) return toast('No humanoid characters found', 'bad');
+  const sel0 = (selectedCreature() || '').toLowerCase().replace(/\.cr$/, '');
+  dialog('Replace All Characters', (b, close) => {
+    const p = el('p', 'muted', 'Every humanoid character becomes a copy of the character you pick. Each one plays its model, '
+      + 'face and skeleton (its .cr points at them even with .cr unticked), wears its skins and Showdown pictures, and '
+      + 'takes the other files you tick. Animals and characters rigged differently are left as they are. It goes in the '
+      + 'mods folder (the files of an earlier Replace All are taken out first): Build puts it in the game.');
+    const row = el('div'); row.style.cssText = 'display:flex;gap:8px;align-items:center;margin:8px 0';
+    const pick = el('select');
+    for (const c of codes) pick.append(new Option(c, c));
+    pick.value = codes.includes(sel0) ? sel0 : (codes.includes('pgj') ? 'pgj' : codes[0]);
+    row.append(el('span', null, 'Copy'), pick, el('span', null, 'over every humanoid character'));
+    // which of its files: every kind ticked to start with; an unticked kind stays each character's own
+    const kindsBox = el('div');
+    kindsBox.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 14px;font-size:12px;margin:4px 0 8px';
+    const boxes = [];
+    for (const k of hum.kinds || []) {
+      const lab = el('label'); lab.style.cssText = 'display:flex;gap:6px;align-items:center;cursor:pointer';
+      const cb = el('input'); cb.type = 'checkbox'; cb.checked = true; cb.dataset.key = k.key;
+      lab.append(cb, el('span', null, k.label));
+      kindsBox.append(lab);
+      boxes.push(cb);
+    }
+    const kinds = () => boxes.filter((c) => c.checked).map((c) => c.dataset.key);
+    const out = el('div', 'muted'); out.style.cssText = 'min-height:40px;font-size:12px;white-space:pre-wrap';
+    const go = el('button', 'primary', 'Replace all');
+    const cancel = el('button', 'btn', 'Cancel');
+    const acts = el('div'); acts.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:8px';
+    acts.append(cancel, go);
+    b.append(p, row, el('div', 'muted', 'Files to copy from it:'), kindsBox, out, acts);
+    const check = async () => {
+      out.textContent = 'Checking…';
+      go.disabled = true;
+      try {
+        if (!kinds().length) { out.textContent = 'Tick at least one kind of file to copy.'; return; }
+        const d = await post('de_x_replace_all', { source: pick.value, dry: true, kinds: kinds() });
+        if (d.ok === false) { out.textContent = d.error_text; return; }
+        out.textContent = `${d.characters} characters become copies of ${d.source} (${d.files} files; it has: ${d.kinds.join(', ')}): `
+          + d.codes.slice(0, 30).join(', ') + (d.codes.length > 30 ? ', …' : '')
+          + '\nYour own character files in the mods folder (swat.dat) stay yours.';
+        go.disabled = false;
+      } catch (e) { out.textContent = e.message; }
+    };
+    pick.onchange = check;
+    for (const c of boxes) c.onchange = check;
+    cancel.onclick = () => close && close();
+    go.onclick = async () => {
+      go.disabled = true;
+      out.textContent = 'Writing the files…';
+      try {
+        const r = await post('de_x_replace_all', { source: pick.value, kinds: kinds() });
+        if (r.ok === false) { out.textContent = r.error_text; go.disabled = false; return; }
+        toast(`${r.characters} characters are copies of ${r.source} in the mods folder` + (r.removed ? ` (${r.removed} files of an earlier Replace All taken out)` : '') + '. Build to put it in the game.', 'good');
+        if (close) close();
+        if (window.rdrRefreshDE) window.rdrRefreshDE();
+      } catch (e) { out.textContent = e.message; go.disabled = false; }
+    };
+    check();
+  }, []);
+}
+
+// A brand-new character made for Showdown: Add Character (its model, character files and .tex of your own, or copied),
+// then this dialog for its roster entry, portraits and place on the select screen.
+function newShowdownCharacter() { addCharacterDialog({ mp: true }); }
+
+// The Showdown editor: the character select as it is. Click a character's photo to pick them; drag to move the photo,
+// click inside it to put the pointer on the face; layer, lineup (lineup 2: the second page, L1 / R1 in the game) and
+// either lineup's background; and the character's stats -- health, dodges, weapons, deadeye, special moves, bot and
+// every other value of its m<code>.swt. Save writes into the mods folder; Build puts it on the disc.
+async function showdownEditor(startCode) {
+  let info;
+  try { info = await post('de_x_lineup_info', {}); } catch (e) { return toast('The select screen could not be read: ' + e.message, 'bad'); }
+  const loadImg = (src) => new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = src; });
+  dialog('Showdown editor — the character select', (b) => {
+    const top = el('div'); top.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px';
+    const viewSel = el('select'); viewSel.append(new Option('Lineup 1', '0'), new Option('Lineup 2 (second page: L1 / R1)', '1'));
+    const bgPick = el('input'); bgPick.type = 'file'; bgPick.accept = '.png,.jpg,.jpeg,.tex'; bgPick.style.display = 'none';
+    const bgBtn = el('button', 'btn', 'Change background…'), bgReset = el('button', 'btn', 'Reset background');
+    const who = el('b', null, 'Click a character\'s photo');
+    top.append(el('span', 'muted', 'Showing'), viewSel, bgBtn, bgReset, bgPick, el('span', 'muted', '·'), who);
+    const cv = el('canvas'); cv.width = 1024; cv.height = 256;
+    cv.style.cssText = 'width:100%;border:1px solid var(--line);background:#222;cursor:pointer;display:block;margin-top:6px';
+    const ctl = el('div'); ctl.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:12px';
+    const layer = el('input'); layer.type = 'range'; layer.min = 0; layer.max = 0; layer.step = 1; layer.style.width = '200px';
+    const toBack = el('button', 'btn', 'Behind all'), toFront = el('button', 'btn', 'In front of all');
+    const onSel = el('select'); onSel.append(new Option('on lineup 1', '0'), new Option('on lineup 2 (L1 / R1)', '1'));
+    const layLab = el('span', 'muted', ''), pos = el('span', 'mono', '');
+    ctl.append(el('span', 'muted', 'Layer'), toBack, layer, toFront, layLab, onSel, pos);
+    const stats = el('div'); stats.style.cssText = 'margin-top:10px;border-top:1px solid var(--line);padding-top:8px;font-size:12px';
+    b.append(top, cv, ctl, stats);
+    const st = { view: 0, code: null, lineup: 0, bg: null, stack: [], spots: [], fig: null, x: 0, sx: 64, sy: 100, layer: 0,
+                 dirty: false, all: [] };
+    ctl.style.visibility = 'hidden';
+    function bgShow() {
+      const ln = st.view;
+      const can = ln === 0 || info.counts[1] > 0;
+      bgBtn.style.display = can ? '' : 'none';
+      bgReset.style.display = can && (ln === 0 ? info.bg1_changed : info.own_bg2) ? '' : 'none';
+    }
+    const nameOf = (c) => ((info.roster || []).find((r) => r.code === c) || { name: (c || '').toUpperCase() }).name;
+    function draw() {
+      const g = cv.getContext('2d');
+      g.clearRect(0, 0, 1024, 256);
+      if (st.bg) g.drawImage(st.bg, 0, 0);
+      const n = st.stack.length, k = Math.max(0, Math.min(n, st.layer));
+      for (let i = 0; i <= n; i++) {
+        if (st.code && i === k && st.fig && st.lineup === st.view) g.drawImage(st.fig, st.x, 0, 128, 256);
+        if (i < n && st.stack[i].img) g.drawImage(st.stack[i].img, st.stack[i].x, 0);
+      }
+      g.fillStyle = 'rgba(255,211,107,.85)';
+      for (const p of st.spots) { g.beginPath(); g.arc(p.x + p.sx, p.sy, 2.5, 0, 7); g.fill(); }
+      if (st.code && st.lineup === st.view) {
+        g.strokeStyle = 'rgba(255,255,255,.7)'; g.setLineDash([4, 3]); g.strokeRect(st.x + .5, .5, 127, 255); g.setLineDash([]);
+        const px = st.x + st.sx, py = st.sy;
+        g.strokeStyle = '#ffd36b'; g.lineWidth = 2;
+        g.beginPath(); g.moveTo(px - 8, py); g.lineTo(px + 8, py); g.moveTo(px, py - 8); g.lineTo(px, py + 8); g.stroke();
+      }
+      layer.max = n; layer.value = k;
+      const up = (c) => (c || '').toUpperCase();
+      layLab.textContent = n ? (k === 0 ? 'behind everyone' : k === n ? 'in front of everyone'
+        : `in front of ${up(st.stack[k - 1].code)}, behind ${up(st.stack[k].code)}`) : '';
+      pos.textContent = st.code ? `photo x ${Math.round(st.x)} · pointer ${Math.round(st.x + st.sx)}, ${Math.round(st.sy)}`
+        + (st.dirty ? ' · place not saved' : '') : '';
+    }
+    async function load(keepPlace) {
+      let L;
+      try { L = await post('de_x_mp_lineup', { exclude: st.code ? [st.code] : [], lineup: st.view }); }
+      catch (e) { who.textContent = 'The select screen could not be drawn: ' + e.message; return; }
+      info = L.info || info;
+      bgShow();
+      st.bg = await loadImg('data:image/png;base64,' + L.png);
+      st.stack = await Promise.all((L.stack || []).map(async (s) => ({ ...s, img: await loadImg('data:image/png;base64,' + s.png) })));
+      st.spots = L.hotspots;
+      if (st.code) {
+        st.fig = L.photos[st.code] ? await loadImg('data:image/png;base64,' + L.photos[st.code]) : null;
+        if (!keepPlace) {
+          const own = (L.own || {})[st.code];
+          if (own) { st.x = own.x; st.sx = own.sx; st.sy = own.sy; }
+          st.layer = (L.layer || {})[st.code] !== undefined && (L.on || {})[st.code] === st.view ? L.layer[st.code] : st.stack.length;
+          st.dirty = false;
+        } else if (st.layer > st.stack.length) st.layer = st.stack.length;
+      }
+      // what can be clicked: everyone drawn (the picked one included), topmost first, with their pixels to test
+      restack();
+    }
+    function restack() {
+      st.all = st.stack.map((s) => ({ code: s.code, x: s.x, img: s.img }));
+      if (st.code && st.fig && st.lineup === st.view) st.all.splice(Math.min(st.layer, st.all.length), 0, { code: st.code, x: st.x, img: st.fig, mine: true });
+      draw();
+    }
+    const probe = document.createElement('canvas'); probe.width = 128; probe.height = 256;
+    function hit(px, py) {                                     // the topmost photo with a visible pixel there
+      for (let i = st.all.length - 1; i >= 0; i--) {
+        const s = st.all[i], lx = Math.floor(px - (s.mine ? st.x : s.x)), ly = Math.floor(py);
+        if (lx < 0 || lx >= 128 || ly < 0 || ly >= 256 || !s.img) continue;
+        const g = probe.getContext('2d'); g.clearRect(0, 0, 128, 256); g.drawImage(s.img, 0, 0, 128, 256);
+        if (g.getImageData(lx, ly, 1, 1).data[3] > 40) return s.code;
+      }
+      return null;
+    }
+    if (startCode) setTimeout(() => pick(startCode), 0);      // opened from Add to Showdown's Edit
+    async function pick(code) {
+      if (st.dirty && st.code && code !== st.code && !confirm('Leave ' + nameOf(st.code) + '\'s place unsaved?')) return;
+      st.code = code;
+      const r = (info.roster || []).find((x) => x.code === code);
+      st.lineup = r ? r.lineup : st.view; onSel.value = String(st.lineup);
+      who.textContent = nameOf(code) + ' (' + code + ')';
+      ctl.style.visibility = '';
+      await load(false);
+      loadStats();
+    }
+    // ---- stats
+    let S = null;
+    const fields = {};
+    async function loadStats() {
+      stats.innerHTML = '';
+      if (!st.code) return;
+      try { S = await post('de_x_creature_stats', { code: st.code }); }
+      catch (e) { stats.append(el('span', 'muted', 'Its stats could not be read: ' + e.message)); return; }
+      for (const k of Object.keys(fields)) delete fields[k];
+      const grid = el('div'); grid.style.cssText = 'display:grid;grid-template-columns:150px 1fr 150px 1fr;gap:6px 10px;align-items:center';
+      const sel = (opts, val) => { const s = el('select'); for (const o of opts) s.append(new Option(o, o)); if (val && !opts.includes(val)) s.append(new Option(val, val)); s.value = val || ''; return s; };
+      const num = (v) => { const i = el('input'); i.type = 'number'; i.step = 'any'; i.value = v; i.style.width = '110px'; return i; };
+      const chk = (v) => { const c = el('input'); c.type = 'checkbox'; c.checked = String(v) === '1'; return c; };
+      fields.health = num(S.health);
+      fields.w1 = sel(['', ...S.choices.weapons], S.weapons[0] || '');
+      fields.w2 = sel(['', ...S.choices.weapons], S.weapons[1] || '');
+      fields.brain = sel(S.choices.brains, S.brain);
+      const sw = S.swt;
+      const swt = {};
+      for (const k of ['MRKDodge', 'PGJDodge', 'BDGDodge']) if (sw[k] !== undefined) swt[k] = chk(sw[k]);
+      for (const k of ['NormalSpecialMove', 'MeleeSpecialMove']) if (sw[k] !== undefined) swt[k] = sel(S.choices.moves, sw[k]);
+      for (const k of ['DodgeTime', 'PunchDamage', 'KickDamage', 'DiveDamage', 'ThrowDamage']) if (sw[k] !== undefined) swt[k] = num(sw[k]);
+      fields.swt = swt;
+      const lab = (t, tip) => { const s = el('span', 'muted', t); if (tip) s.title = tip; return s; };
+      grid.append(lab('Health', 'm' + st.code + '.cr MaxHitPoints'), fields.health, lab('Bot brain', 'AIBrainTable'), fields.brain,
+                  lab('Weapon 1', 'CharWeaponTable (and its .ars)'), fields.w1, lab('Weapon 2 (optional)'), fields.w2,
+                  lab('Special move (deadeye)', '.swt NormalSpecialMove: every spmove the game has'), swt.NormalSpecialMove || el('span'),
+                  lab('Melee special', '.swt MeleeSpecialMove: every spmove the game has'), swt.MeleeSpecialMove || el('span'),
+                  lab('Dodge time', '.swt DodgeTime'), swt.DodgeTime || el('span'));
+      const dodges = el('div'); dodges.style.cssText = 'display:flex;gap:14px;align-items:center';
+      for (const k of ['MRKDodge', 'PGJDodge', 'BDGDodge']) if (swt[k]) { const l = el('label'); l.style.cssText = 'display:inline-flex;gap:4px;align-items:center'; l.append(swt[k], document.createTextNode(k)); dodges.append(l); }
+      grid.append(lab('Dodges', 'Mr Kelly\'s, Pig Josh\'s and Dan\'s dodge styles (.swt)'), dodges);
+      for (const k of ['PunchDamage', 'KickDamage', 'DiveDamage', 'ThrowDamage']) if (swt[k]) grid.append(lab(k), swt[k]);
+      stats.append(el('b', null, 'Stats'), grid);
+      // every other value of the .swt
+      const more = el('details'); more.style.marginTop = '8px';
+      more.append(el('summary', 'muted', `All ${Object.keys(sw).length} values of m${st.code}.swt`));
+      const g2 = el('div'); g2.style.cssText = 'display:grid;grid-template-columns:repeat(3, 190px 110px);gap:4px 8px;max-height:220px;overflow:auto;margin-top:6px';
+      for (const [k, v] of Object.entries(sw)) {
+        if (swt[k]) continue;
+        const i = el('input'); i.value = v; i.style.width = '100px'; swt[k] = i;
+        g2.append(lab(k), i);
+      }
+      more.append(g2);
+      stats.append(more);
+      stats.append(picturesBox(st.code));
+      const looks = el('div'); looks.style.cssText = 'margin-top:12px;border-top:1px solid var(--line);padding-top:8px';
+      stats.append(looks);
+      loadLooks(looks);
+    }
+    // ---- its pictures: the select screen photo (ui_mphoto_) and the portrait (mp_), which the end screen's mugshot
+    // is made from at the next Build
+    function picturesBox(code) {
+      const box = el('div'); box.style.cssText = 'margin-top:12px;border-top:1px solid var(--line);padding-top:8px';
+      box.append(el('b', null, 'Pictures'));
+      const row = (label, kind, tip, withTone) => {
+        const r = el('div'); r.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:12px';
+        const pickIn = el('input'); pickIn.type = 'file'; pickIn.accept = '.png,.jpg,.jpeg,.tex,.xtex'; pickIn.style.display = 'none';
+        const btn = el('button', 'btn', 'Change ' + label + '…'); btn.title = tip;
+        const alpha = el('select');
+        if (kind === 'portrait') alpha.append(new Option('mp portrait recipe (team square, ink), as the game\'s', 'recipe'));
+        for (const [v, l] of ALPHA_CHOICES) if (v !== 'auto') alpha.append(new Option(l, v));
+        const tone = el('input'); tone.type = 'checkbox';
+        const toneLab = el('label', 'muted'); toneLab.style.cssText = 'display:inline-flex;gap:4px;align-items:center';
+        toneLab.append(tone, document.createTextNode('Colour like the other photos'));
+        btn.onclick = () => pickIn.click();
+        const savePlaced = async (png) => {
+          await post('de_x_mp_picture', { code, kind: 'photo', file: { name: code + '_photo.png', data: png, upright: true } });
+          toast('Full portrait changed. Build to put it in the game.', 'good');
+          load(true);
+        };
+        let adjust = null;
+        if (kind === 'photo') {
+          adjust = el('button', 'btn', 'Adjust in its frame…');
+          adjust.title = 'Drag the full portrait it has now into place in its frame, and size it';
+          adjust.onclick = async () => {
+            if (!st.fig) return toast('It has no full portrait to adjust yet', 'bad');
+            const png = await placePhoto(st.fig.src, 'Adjust ' + code + '\'s full portrait');
+            if (png) { try { await savePlaced(png); } catch (e) { toast(e.message, 'bad'); } }
+          };
+        }
+        pickIn.onchange = async () => {
+          const f = pickIn.files[0]; pickIn.value = '';
+          if (!f) return;
+          if (kind === 'photo') {
+            // its transparency (and colouring) first, upright, then placed in the frame by hand
+            try {
+              let src = 'data:image/png;base64,' + (await post('de_x_alpha_png', { data: await readAsB64(f),
+                alpha: { alpha: alpha.value, tone: withTone && tone.checked ? 'photo' : '' } })).png;
+              if (/\.x?tex$/i.test(f.name)) {
+                const im = await new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.onerror = () => r(null); i.src = src; });
+                if (im && im.width > im.height) {                // a stored (sideways) ui_mphoto: upright first
+                  const c = document.createElement('canvas'); c.width = im.height; c.height = im.width;
+                  const g = c.getContext('2d'); g.translate(c.width, 0); g.rotate(Math.PI / 2); g.drawImage(im, 0, 0);
+                  src = c.toDataURL('image/png');
+                }
+              }
+              const png = await placePhoto(src, 'Place ' + code + '\'s full portrait in its frame');
+              if (png) await savePlaced(png);
+            } catch (e) { toast(e.message, 'bad'); }
+            return;
+          }
+          try {
+            await post('de_x_mp_picture', { code, kind, file: { name: f.name, data: await readAsB64(f),
+              alpha: { alpha: alpha.value, tone: withTone && tone.checked ? 'photo' : '' } } });
+            toast(label[0].toUpperCase() + label.slice(1) + ' changed. Build to put it in the game'
+              + (kind === 'portrait' ? ' (the end screen\'s mugshot follows it).' : '.'), 'good');
+            if (kind === 'photo') load(true);
+          } catch (e) { toast(e.message, 'bad'); }
+        };
+        r.append(el('span', 'muted', label[0].toUpperCase() + label.slice(1)), btn);
+        if (adjust) r.append(adjust);
+        r.append(pickIn, el('span', 'muted', 'transparency'), alpha);
+        if (withTone) r.append(toneLab);
+        return r;
+      };
+      box.append(row('full portrait', 'photo', 'ui_mphoto_' + code + '.tex: the full-body photo on the select screen (upright, 128 x 256)', true),
+                 row('mugshot', 'portrait', 'mp_' + code + '.tex: the 128 x 128 portrait; the end-of-match screen\'s mugshot is made from it at the next Build', false));
+      return box;
+    }
+    // ---- alternate looks for players 2-4 (<code>02.tex .. <code>04.tex: the game draws one in place of the model's first texture)
+    async function loadLooks(box) {
+      box.innerHTML = '';
+      const code = st.code;
+      let A;
+      try { A = await post('de_x_alt_looks', { code }); }
+      catch (e) { box.append(el('b', null, 'Alternate looks'), el('div', 'muted', 'Not available: ' + e.message)); return; }
+      if (code !== st.code) return;
+      const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+      head.append(el('b', null, 'Alternate looks (players 2–4)'));
+      const tip = el('div', 'muted', 'In a match, players 2, 3 and 4 (bots too) who pick this character can wear their own version of its texture ('
+        + code + '02 / 03 / 04.tex). The game draws the WHOLE model with that one texture, so this is for a model with a single texture, like the game’s own. '
+        + 'With none, they look like player 1.');
+      tip.style.cssText = 'font-size:11px;margin:4px 0 6px';
+      box.append(head, tip);
+      // texture sizes on the disc (the build shrinks; the mods folder keeps full size, so unticking restores them)
+      try {
+        const O = (await post('de_x_sd_options', { code })).options;
+        const opt = el('div'); opt.style.cssText = 'display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin:2px 0 8px';
+        const mk = (key, text, tipText) => {
+          const l = el('label'); l.style.cssText = 'display:inline-flex;gap:5px;align-items:center'; l.title = tipText;
+          const c = el('input'); c.type = 'checkbox'; c.checked = !!O[key];
+          c.onchange = async () => {
+            try { await post('de_x_sd_options', { code, set: true, [key]: c.checked }); toast('Saved. Build to put it on the disc.', 'good'); }
+            catch (e) { c.checked = !c.checked; toast(e.message, 'bad'); }
+          };
+          l.append(c, document.createTextNode(text));
+          return l;
+        };
+        opt.append(
+          mk('own_small', 'Shrink its own textures to 128 x 128 on the disc', 'Saves video memory (the PS2 has 4 MB): safer with several custom characters in a match. The mods folder keeps them full size; untick to put full-size textures back at the next build.'),
+          mk('alt_small', 'Shrink players 2\u20134 alternates to 128 x 128', 'Each changed texture is kept in video memory for the match; full size for three players can run past it (the screen fills with noise). Untick for full-size alternates at the next build.'));
+        box.append(opt);
+      } catch (e) { /* older back end: no options */ }
+      const T = A.textures || [];
+      if (!T.length) { box.append(el('span', 'muted', 'Its model has no textures.')); return; }
+      if (A.multi) {
+        // several textures: players 2-4 each get their own version of every one (<code>0N_<k>.tex, the alttex code mod)
+        tip.textContent = 'In a match, players 2, 3 and 4 (bots too) who pick this character can wear their own version of each of its textures ('
+          + code + '02_0.tex …). Change any of them; the rest stay as player 1’s. Only changed ones are loaded (the PS2 has 4 MB of video memory). The build adds the code mod that loads them.';
+        const imgs = await Promise.all(T.map((t) => loadImg('data:image/png;base64,' + t.png)));
+        const grid = el('div');
+        grid.style.cssText = `display:grid;grid-template-columns:70px repeat(${T.length}, 104px);gap:6px;align-items:start;overflow-x:auto`;
+        const cellCanvas = (img, filter) => {
+          const c = el('canvas'); c.width = 96; c.height = 96; c.style.cssText = 'width:96px;height:96px;border:1px solid var(--line);background:#333';
+          const g = c.getContext('2d'); g.filter = filter || 'none'; if (img) g.drawImage(img, 0, 0, 96, 96); return c;
+        };
+        const send = async (n, body, what) => {
+          try { await post('de_x_alt_looks_set', { code, pics: { [n]: body } }); toast(what + ' is in the mods folder. Build to put it on the disc.', 'good'); }
+          catch (e) { toast(e.message, 'bad'); }
+          loadLooks(box);
+        };
+        const filtered = (img, flt) => {
+          const full = document.createElement('canvas'); full.width = img.naturalWidth; full.height = img.naturalHeight;
+          const g = full.getContext('2d'); g.filter = flt; g.drawImage(img, 0, 0); return full.toDataURL('image/png').split(',')[1];
+        };
+        const sliders = (n, onLive, onUse, useLabel) => {
+          const box2 = el('div'); box2.style.cssText = 'display:none;flex-direction:column;gap:2px;font-size:11px';
+          const rng = (min, max, v) => { const r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.value = v; r.style.width = '96px'; return r; };
+          const hue = rng(-180, 180, n === 2 ? 120 : n === 3 ? -120 : 60), sat = rng(0, 200, 100), lig = rng(30, 170, 100);
+          const use = el('button', 'btn', useLabel);
+          box2.append(el('span', 'muted', 'Hue'), hue, el('span', 'muted', 'Saturation'), sat, el('span', 'muted', 'Brightness'), lig, use);
+          const flt = () => `hue-rotate(${hue.value}deg) saturate(${sat.value / 100}) brightness(${lig.value / 100})`;
+          hue.oninput = sat.oninput = lig.oninput = () => onLive(flt());
+          use.onclick = () => onUse(flt());
+          return box2;
+        };
+        // header row: the model's own (player 1), each savable as a PNG to paint on
+        grid.append(el('b', null, 'Player 1'));
+        T.forEach((t, k) => {
+          const c = el('div'); c.style.cssText = 'display:flex;flex-direction:column;gap:3px;font-size:11px';
+          const a = el('a', null, t.name.replace(/\.png$/i, '')); a.href = 'data:image/png;base64,' + t.png;
+          a.download = code + '_' + t.name.replace(/\.png$/i, '') + '.png'; a.title = 'Save it as a PNG to paint on';
+          c.append(cellCanvas(imgs[k]), a);
+          grid.append(c);
+        });
+        for (const n of [2, 3, 4]) {
+          const row = A.alts[n] || {};
+          const lab = el('div'); lab.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+          const any = Object.values(row).some((v) => v && v.own);
+          const allT = el('button', 'btn', 'Recolour all…'), reset = el('button', 'btn', 'Reset');
+          reset.style.display = any ? '' : 'none';
+          lab.append(el('b', null, 'Player ' + n), allT, reset);
+          grid.append(lab);
+          const canv = [];
+          T.forEach((t, k) => {
+            const cur = row[k];
+            const c = el('div'); c.style.cssText = 'display:flex;flex-direction:column;gap:3px;font-size:11px';
+            let shown = cur && cur.own ? null : imgs[k];
+            const cv = cellCanvas(shown, cur && cur.own ? '' : 'grayscale(1) opacity(.45)');
+            if (cur && cur.own) loadImg('data:image/png;base64,' + cur.png).then((im) => { const g = cv.getContext('2d'); g.clearRect(0, 0, 96, 96); g.drawImage(im, 0, 0, 96, 96); });
+            canv.push(cv);
+            const pickF = el('input'); pickF.type = 'file'; pickF.accept = '.png,.jpg,.jpeg,.tex'; pickF.style.display = 'none';
+            const bP = el('button', 'btn', 'Picture…'), bT = el('button', 'btn', 'Recolour…'), bR = el('button', 'btn', 'Reset');
+            for (const b2 of [bP, bT, bR]) b2.style.cssText = 'font-size:11px;padding:1px 4px';
+            bR.style.display = cur && cur.own ? '' : 'none';
+            const paint = (flt) => { const g = cv.getContext('2d'); g.clearRect(0, 0, 96, 96); g.filter = flt; g.drawImage(imgs[k], 0, 0, 96, 96); g.filter = 'none'; };
+            const sl = sliders(n, paint, (flt) => send(n, { [k]: filtered(imgs[k], flt) }, `Player ${n}’s ${t.name}`), 'Use');
+            bT.onclick = () => { sl.style.display = sl.style.display === 'none' ? 'flex' : 'none'; };
+            bP.onclick = () => pickF.click();
+            pickF.onchange = async () => { const f = pickF.files[0]; pickF.value = ''; if (f) send(n, { [k]: await readAsB64(f) }, `Player ${n}’s ${t.name}`); };
+            bR.onclick = () => send(n, { [k]: '' }, `Player ${n}’s ${t.name} (the model’s own)`);
+            const btns = el('div'); btns.style.cssText = 'display:flex;gap:2px;flex-wrap:wrap'; btns.append(bP, bT, bR, pickF);
+            c.append(cv, btns, sl);
+            grid.append(c);
+          });
+          const slAll = sliders(n, (flt) => canv.forEach((cv, k) => { const g = cv.getContext('2d'); g.clearRect(0, 0, 96, 96); g.filter = flt; g.drawImage(imgs[k], 0, 0, 96, 96); g.filter = 'none'; }),
+            (flt) => { const body = {}; T.forEach((t, k) => { body[k] = filtered(imgs[k], flt); }); send(n, body, `Player ${n}’s look`); }, 'Use on all');
+          lab.append(slAll);
+          allT.onclick = () => { slAll.style.display = slAll.style.display === 'none' ? 'flex' : 'none'; };
+          reset.onclick = () => { if (confirm(`Put every one of player ${n}’s textures back to the model’s own?`)) send(n, '', `Player ${n}’s look (the model’s own)`); };
+        }
+        box.append(grid);
+        return;
+      }
+      const row = el('div'); row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px';
+      const texSel = el('select');
+      for (const t of T) texSel.append(new Option(`${t.name} (${t.w} x ${t.h})`, t.name));
+      texSel.value = T[0].name;
+      texSel.disabled = T.length < 2;
+      const dl = el('a', 'btn', 'Save it as a PNG to paint on');
+      dl.href = 'data:image/png;base64,' + T[0].png; dl.download = code + '_' + T[0].name.replace(/\.png$/i, '') + '.png';
+      row.append(el('span', 'muted', 'Texture that changes'), texSel, dl);
+      box.append(row);
+      texSel.onchange = async () => {
+        const name = texSel.value;
+        if (!confirm(`Make ${name} the texture players 2–4 change? It is moved into its model's first slot (the model looks the same).`)) { texSel.value = T[0].name; return; }
+        try { const r = await post('de_x_alt_looks_set', { code, texture: name, pics: {} }); toast(r.note || 'Done', 'good'); }
+        catch (e) { toast(e.message, 'bad'); }
+        loadLooks(box);
+      };
+      const base = await loadImg('data:image/png;base64,' + T[0].png);
+      const cards = el('div'); cards.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap';
+      const card = (title, src, sub) => {
+        const c = el('div'); c.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:150px';
+        const cv2 = el('canvas'); cv2.width = 128; cv2.height = 128; cv2.style.cssText = 'width:128px;height:128px;border:1px solid var(--line);background:#333';
+        c.append(el('b', null, title), cv2);
+        if (sub) c.append(el('span', 'muted', sub));
+        return [c, cv2];
+      };
+      const paint = (cv2, img, filter) => { const g = cv2.getContext('2d'); g.clearRect(0, 0, 128, 128); g.filter = filter || 'none'; if (img) g.drawImage(img, 0, 0, 128, 128); g.filter = 'none'; };
+      const [c1, cv1] = card('Player 1', null, "the model's own");
+      paint(cv1, base);
+      cards.append(c1);
+      for (const n of [2, 3, 4]) {
+        const cur = A.alts[n];
+        const [c, cvn] = card('Player ' + n, null, cur ? (cur.own ? 'yours' : "the game's") : 'none: same as player 1');
+        const img = cur ? await loadImg('data:image/png;base64,' + cur.png) : null;
+        paint(cvn, img || base, img ? '' : 'grayscale(1) opacity(.45)');
+        const pickF = el('input'); pickF.type = 'file'; pickF.accept = '.png,.jpg,.jpeg,.tex'; pickF.style.display = 'none';
+        const bPic = el('button', 'btn', 'Picture…'), bTint = el('button', 'btn', 'Recolour…'), bDel = el('button', 'btn', 'Remove');
+        bDel.style.display = cur && cur.own ? '' : 'none';
+        const btns = el('div'); btns.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap'; btns.append(bPic, bTint, bDel, pickF);
+        const tint = el('div'); tint.style.cssText = 'display:none;flex-direction:column;gap:2px;font-size:11px;width:150px';
+        const rng = (min, max, v) => { const r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.value = v; r.style.width = '140px'; return r; };
+        const hue = rng(-180, 180, n === 2 ? 120 : n === 3 ? -120 : 60), sat = rng(0, 200, 100), lig = rng(30, 170, 100);
+        const use = el('button', 'btn', 'Use this colour');
+        tint.append(el('span', 'muted', 'Hue'), hue, el('span', 'muted', 'Saturation'), sat, el('span', 'muted', 'Brightness'), lig, use);
+        const flt = () => `hue-rotate(${hue.value}deg) saturate(${sat.value / 100}) brightness(${lig.value / 100})`;
+        const live = () => paint(cvn, base, flt());
+        hue.oninput = sat.oninput = lig.oninput = live;
+        bTint.onclick = () => { const on = tint.style.display === 'none'; tint.style.display = on ? 'flex' : 'none'; if (on) live(); else paint(cvn, img || base, img ? '' : 'grayscale(1) opacity(.45)'); };
+        const send = async (pic) => {
+          try { await post('de_x_alt_looks_set', { code, pics: { [n]: pic } }); toast('Player ' + n + '’s look is in the mods folder. Build to put it on the disc.', 'good'); }
+          catch (e) { toast(e.message, 'bad'); }
+          loadLooks(box);
+        };
+        use.onclick = () => {
+          const full = document.createElement('canvas'); full.width = base.naturalWidth; full.height = base.naturalHeight;
+          const g = full.getContext('2d'); g.filter = flt(); g.drawImage(base, 0, 0);
+          send(full.toDataURL('image/png').split(',')[1]);
+        };
+        bPic.onclick = () => pickF.click();
+        pickF.onchange = async () => { const f = pickF.files[0]; pickF.value = ''; if (f) send(await readAsB64(f)); };
+        bDel.onclick = () => { if (confirm('Remove your player ' + n + ' look?')) send(''); };
+        c.append(btns, tint);
+        cards.append(c);
+      }
+      box.append(cards);
+    }
+    async function saveStats() {
+      if (!S) return [];
+      const swt = {};
+      for (const [k, f] of Object.entries(fields.swt)) {
+        const v = f.type === 'checkbox' ? (f.checked ? '1' : '0') : f.value.trim();
+        if (String(S.swt[k]) !== v && !(f.type === 'number' && parseFloat(S.swt[k]) === parseFloat(v))) swt[k] = v;
+      }
+      const ws = [fields.w1.value, fields.w2.value].filter(Boolean);
+      const body = { code: st.code, swt };
+      if (parseFloat(fields.health.value) !== S.health) body.health = parseFloat(fields.health.value);
+      if (ws.join() !== S.weapons.filter(Boolean).join()) body.weapons = ws;
+      if (fields.brain.value !== S.brain) body.brain = fields.brain.value;
+      if (!Object.keys(swt).length && body.health === undefined && !body.weapons && !body.brain) return [];
+      const r = await post('de_x_creature_stats_set', body);
+      await loadStats();
+      return r.wrote;
+    }
+    viewSel.onchange = () => { st.view = +viewSel.value; load(true); };
+    onSel.onchange = () => { st.lineup = +onSel.value; st.dirty = true; st.view = st.lineup; viewSel.value = String(st.view); st.layer = 1e9; load(true); };
+    layer.oninput = () => { st.layer = +layer.value; st.dirty = true; restack(); };
+    toBack.onclick = () => { st.layer = 0; st.dirty = true; restack(); };
+    toFront.onclick = () => { st.layer = st.stack.length; st.dirty = true; restack(); };
+    bgBtn.onclick = () => bgPick.click();
+    bgPick.onchange = async () => {
+      const f = bgPick.files[0]; bgPick.value = '';
+      if (!f) return;
+      const data = await readAsB64(f);
+      let src;
+      try { src = 'data:image/png;base64,' + (await post('de_x_alpha_png', { data, alpha: { alpha: 'keep' } })).png; }
+      catch (e) { return toast(f.name + ': ' + e.message, 'bad'); }
+      const pk = await cropDialog(src, { title: 'Lineup ' + (st.view + 1) + ' background', aspect: 4,
+        target: '1024 x 256 (two 512 x 256 halves, 24-bit)', keepLabel: 'Fit it whole', okLabel: 'Use this crop',
+        text: 'Pick the part to use as the lineup\'s background: it fills the 1024 x 256 picture the characters stand in front of.' });
+      if (pk === null) return;
+      try { await post('de_x_lineup_bg', { lineup: st.view, data, crop: pk === 'keep' ? null : pk }); } catch (e) { return toast(e.message, 'bad'); }
+      toast('Lineup ' + (st.view + 1) + '\'s background is in the mods folder. Build to put it on the disc.', 'good');
+      load(true);
+    };
+    bgReset.onclick = async () => {
+      try { await post('de_x_lineup_bg', { lineup: st.view, reset: true }); } catch (e) { return toast(e.message, 'bad'); }
+      load(true);
+    };
+    let drag = null;
+    const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * 1024 / r.width, (e.clientY - r.top) * 256 / r.height]; };
+    cv.onmousedown = (e) => {
+      const [mx, my] = at(e);
+      const inMine = st.code && st.lineup === st.view && mx >= st.x && mx < st.x + 128;
+      drag = { mx, my, x: st.x, moved: false, inMine };
+      const move = (ev) => {
+        if (!drag.inMine) return;                              // only the picked character's photo moves
+        const [nx, ny] = at(ev);
+        if (Math.abs(nx - drag.mx) + Math.abs(ny - drag.my) > 3) drag.moved = true;
+        if (!drag.moved) return;
+        st.x = Math.max(-64, Math.min(1024 - 64, drag.x + nx - drag.mx)); st.dirty = true; draw();
+      };
+      const up = (ev) => {
+        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+        const [cx, cy] = at(ev);
+        if (drag.moved) { const s = st.all.find((a) => a.mine); if (s) s.x = st.x; drag = null; draw(); return; }
+        const h = hit(cx, cy);
+        if (h && h !== st.code) { drag = null; pick(h); return; }   // a click on someone else's photo picks them
+        if (drag.inMine) {                                       // a click in the picked one's frame: the pointer
+          st.sx = Math.max(0, Math.min(127, cx - st.x)); st.sy = Math.max(0, Math.min(255, cy)); st.dirty = true;
+        }
+        drag = null; draw();
+      };
+      document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+    };
+    b._save = async () => {
+      if (!st.code) return toast('Click a character\'s photo first', 'bad');
+      const wrote = [];
+      if (st.dirty) {
+        const r = await post('de_x_mp_place', { code: st.code, spot: { x: Math.round(st.x), sx: Math.round(st.sx), sy: Math.round(st.sy) },
+                                                 layer: Math.min(st.layer, st.stack.length), on_lineup: st.lineup });
+        wrote.push(...r.wrote);
+        st.dirty = false;
+        try { info = await post('de_x_lineup_info', {}); } catch { /* keep the old one */ }
+      }
+      wrote.push(...await saveStats());
+      bgShow(); draw();
+      toast(wrote.length ? `${nameOf(st.code)}: ${wrote.length} files in the mods folder. Build to put them on the disc.` : 'Nothing changed.', wrote.length ? 'good' : 'warn');
+    };
+    load(false);
+  }, [{ label: 'Close' }, { label: 'Save', cls: 'primary', run: async (b, btn) => {
+    btn.disabled = true;
+    try { await b._save(); } catch (e) { toast(e.message, 'bad'); }
+    btn.disabled = false;
+    return true;
+  } }], 1150);
 }
 
 // ------------------------------------------------------------------ BALANCE > Creatures > Delete Character
@@ -2210,8 +3806,24 @@ async function pckPage(keepPane) {
 
 export function init(bridge) {
   A = bridge;
+  window.rdrDEStartJob = startJob;                               // the header's Build
+  const logBtn = document.querySelector('#deLogBtn');            // the bar is under every tab
+  if (logBtn) logBtn.onclick = logDialog;
+  const cancelBtn = document.querySelector('#deCancel');
+  if (cancelBtn && !cancelBtn.onclick) {
+    cancelBtn.onclick = async () => { try { await post('de_cancel', {}); poll(); } catch (e) { toast(e.message, 'bad'); } };
+  }
+  if (bridge && bridge.toast) window.rdrToast = bridge.toast;   // for xboxmode.js
   const addChar = document.querySelector('#crAddChar');
   if (addChar) addChar.onclick = addCharacterDialog;
+  const mpAdd = document.querySelector('#crMpAdd');
+  if (mpAdd) mpAdd.onclick = () => showdownDialog();
+  const repAll = document.querySelector('#crReplaceAll');
+  if (repAll) repAll.onclick = replaceAllCharactersDialog;
+  const mpNew = document.querySelector('#crMpNew');
+  if (mpNew) mpNew.onclick = newShowdownCharacter;
+  const mpEdit = document.querySelector('#crMpEdit');
+  if (mpEdit) mpEdit.onclick = showdownEditor;
   const delChar = document.querySelector('#crDelChar');
   if (delChar) {
     delChar.onclick = deleteCharacterDialog;
@@ -2231,7 +3843,10 @@ export function init(bridge) {
   onPanel((panel) => {
     if (panel === 'hudtext') { hudTextPage(); return; }
     if (panel === 'pck') { pckPage(); return; }
-    if (panel !== 'dataeditor') { clearTimeout(pollTimer); pollTimer = null; return; }
+    if (panel !== 'dataeditor') {
+      if (!jobDone) { clearTimeout(pollTimer); pollTimer = null; }   // a running job keeps its status line going
+      return;
+    }
     wire();
     refresh();
     loadWorkbench();

@@ -93,11 +93,27 @@ def is_text(data):
 # ---------------------------------------------------------------------------------------------------------------
 # textures
 
+def shared_format(t, like=None):
+    """A texture both games read as it is: every type but DXT1/3/5 (the Xbox's own) is stored the same way on both
+    discs (2026-11-16: 1,417 .xtex/.tex pairs of the palette types byte-identical, the rest only differing in their
+    art), so re-encoding one would only lose to the 256-colour requantize (the levels' shadow boxes drew wrong).
+    like: the target game's own file of that name -- then only when it has the same size and type."""
+    from rdrformats import tex
+    if t.type in (tex.DXT1, tex.DXT3, tex.DXT5):
+        return False
+    if like and len(like) >= 8:
+        lw, lh, lt = struct.unpack_from('<3H', like)
+        return (lw, lh, lt) == (t.width, t.height, t.type)
+    return True
+
+
 def convert_texture(data, to_xbox, like=None):
     """A .tex as .xtex or back: decoded, encoded again in the format of the target game's own file (like), else as
     the game picks (palette types stay palettes; DXT to 256 colours on the PS2)."""
     from rdrformats import tex
     t = tex.read(data)
+    if shared_format(t, like):
+        return data
     img = t.mips[0]
     kind, mips, flags = t.type, len(t.mips) > 1, t.flags
     if like:
@@ -167,14 +183,38 @@ def model_code(stem):
     return code.replace('_face', '')
 
 
+def face_out(tris):
+    """Triangles turned so each one's winding agrees with its corners' normals. The Xbox draws characters with
+    back faces culled; a PS2 mesh's strips read back with about a sixth of their triangles wound the other way (the
+    PS2 draws them anyway), and written as they were, those became holes on the Xbox (2026-11-16: gbw, 24% of its
+    triangles; the Blender add-on's own Xbox export of it 0.1%, the shipped characters none)."""
+    from rdrformats import builder
+    out = []
+    for t in tris:
+        c = t.corners
+        (ax, ay, az), (bx, by, bz), (cx, cy, cz) = (c[0].position, c[1].position, c[2].position)
+        ux, uy, uz, vx, vy, vz = bx - ax, by - ay, bz - az, cx - ax, cy - ay, cz - az
+        fx, fy, fz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        nx = sum(k.normal[0] for k in c)
+        ny = sum(k.normal[1] for k in c)
+        nz = sum(k.normal[2] for k in c)
+        if fx * nx + fy * ny + fz * nz < 0:
+            t = builder.Triangle(t.material, (c[0], c[2], c[1]))
+        out.append(t)
+    return out
+
+
 def rebase(model, positions, to_xbox, version=None):
     """A skinned model moved between bone relative (PS2) and model space (Xbox) with its skeleton's bone
-    positions. Models of one bone (hats, faces: head relative on both) are left as they are."""
+    positions. Models of one bone (hats, faces: head relative on both) keep their positions. For the Xbox every
+    triangle is also turned to face the way its normals do (face_out)."""
     from rdrformats import builder
-    if positions is None or (model.header_totals and model.header_totals[2] <= 1):
+    one = positions is None or (model.header_totals and model.header_totals[2] <= 1)
+    if one and not to_xbox:
         return model
-    if to_xbox:  # bone relative -> model space
-        tris, mats = builder.triangles_of(model, positions)
+    if to_xbox:  # bone relative -> model space, every triangle facing out
+        tris, mats = builder.triangles_of(model, None if one else positions)
+        tris = face_out(tris)
         opts = builder.BuildOptions(version=version or model.version, bone_relative=False,
                                     bone_count=model.header_totals[2] if model.header_totals else None)
     else:
@@ -390,6 +430,504 @@ def convert_level(stem, data, src_clean, tgt_clean, src_zone_texts, tgt_zone_tex
     return out, mapping
 
 
+
+# ---------------------------------------------------------------------------------------------------------------
+# levels only the Xbox has (Coliseum: lvls_m2/colseum2.dat, lvls_m4/colseum4.dat), or a mod made from one
+#
+# Read from the two games' own copies of the levels they share (2026-11-16): a level's text files (.lvl, .bnds, .spwn,
+# .aisp, .bxes, .lnes, .lgt, .fog ...) are the same on both; a zone file carries both games' chunk numbers
+# (resourceIndex / resourceIndexXbox) and an Xbox-only level's PS2 field is 0; the bundles hold the same chunks in the
+# same order, the Xbox's padded: BND0 = the PS2's + zeros (its length: align16(u32 @0x80 + 4 * ceil(faces @0x50 / 32)),
+# 404 of 470 shipped shells identical, the rest are two levels that differ), PMT0 = the PS2's 64 + zeros, RSV0 (the
+# view) and NTG0 (navigation) = the PS2's + zeros to 0x80. Textures and meshes are each game's own encoding.
+# So an Xbox-only level converts with every chunk keeping its number: the zone and bound files only need the PS2
+# field filled in.
+
+class _Same(dict):
+    """A chunk-number map that keeps every number."""
+    def get(self, k, default=None):
+        return k
+
+
+def _a16(n):
+    return (n + 15) & ~15
+
+
+def _strip_len(b):
+    i = len(b)
+    while i and b[i - 1] == 0:
+        i -= 1
+    return i
+
+
+def _rk(p):
+    return (round(p[0], 2), round(p[1], 2), round(p[2], 2))
+
+
+def ps2_level_colors(ps2_bundle):
+    """The PS2 game's own level bundle's baked light, per static mesh: [{triangle (its 3 corners' positions): {corner
+    position: rgba}}]. The PS2 bakes its shading and shadows into the vertex colours; the Xbox's copies of the same
+    meshes carry flatter colours, lit at run time (Ranch, 2026-11-16: 8% of the corners near black on the PS2, 0.93
+    on the Xbox) -- so a converted level of a map the PS2 has takes the PS2's own."""
+    from rdrformats import rsc, ps2rsc, builder
+    out = []
+    for c in rsc.read_chunks(ps2_bundle):
+        if c.tag != 'MOD0' or (len(c.data) > 1 and c.data[1]):
+            continue
+        try:
+            tris, _m = builder.triangles_of(ps2rsc.to_model(ps2rsc.read_mod0(c.data), {}))
+        except Exception:                                   # noqa: BLE001
+            continue
+        d = {}
+        for t in tris:
+            d[frozenset(_rk(k.position) for k in t.corners)] = {_rk(k.position): tuple(k.color) for k in t.corners}
+        out.append(d)
+    return out
+
+
+def _recolor(materials, ps2_meshes):
+    """A level mesh's materials (mod0's input) with the PS2's baked colours where its twin among the PS2 game's
+    meshes (the one sharing most of its triangles, at least half) has the triangle: (materials, triangles recoloured).
+    Triangles the PS2 does not have (a mod's new or moved geometry) keep the Xbox's colours."""
+    keys = [frozenset(_rk(vs[i][0]) for i in t) for _tx, vs, tr in materials for t in tr]
+    if not keys or not ps2_meshes:
+        return materials, 0
+    best = max(ps2_meshes, key=lambda d: sum(k in d for k in keys))
+    if sum(k in best for k in keys) * 2 < len(keys):
+        return materials, 0
+    out, n = [], 0
+    for tex, verts, tris in materials:
+        nv, index, nt = [], {}, []
+        for t in tris:
+            cols = best.get(frozenset(_rk(verts[i][0]) for i in t))
+            if cols is not None and len(cols) == 3:
+                n += 1
+            tri = []
+            for i in t:
+                p, col, uv, bone = verts[i]
+                if cols is not None and len(cols) == 3:
+                    col = cols.get(_rk(p), col)
+                key = (p, tuple(col), uv, bone)
+                if key not in index:
+                    index[key] = len(nv)
+                    nv.append((p, tuple(col), uv, bone))
+                tri.append(index[key])
+            nt.append(tuple(tri))
+        out.append((tex, nv, nt))
+    return out, n
+
+
+def level_outdated(xdata, pdata):
+    """What a PS2 copy of an Xbox level made by an older converter lacks -> {reason: count} (empty: up to date, or a
+    PS2 bundle of its own, whose chunks do not line up with the Xbox's): animated meshes written static (they
+    black-screen the game), shadow-map layers with no second-pass mesh (no ground / wall shadows)."""
+    from rdrformats import rsc
+    try:
+        X, P = rsc.read_chunks(xdata), rsc.read_chunks(pdata)
+    except Exception:                                   # noqa: BLE001
+        return {}
+    static = sum(1 for i, c in enumerate(X) if c.tag == 'MOD0' and len(c.data) > 1 and c.data[1] and i < len(P)
+                 and P[i].tag == 'MOD0' and len(P[i].data) > 1 and not P[i].data[1])
+    out = {'animated meshes written static': static} if static else {}
+    xm = sum(1 for c in X if c.tag == 'MOD0')
+    if xm and sum(1 for c in P if c.tag == 'MOD0') == xm:
+        layered = 0
+        for i, c in enumerate(X, 1):
+            if c.tag == 'MOD0' and len(c.data) > 1 and not c.data[1]:
+                try:
+                    if any(len(m) > 1 and m[1] for m in rsc.read_mod0(c.data).materials):  # a 2nd texture
+                        layered += 1
+                except Exception:                       # noqa: BLE001
+                    pass
+        if layered:
+            out['shadow layers with no second pass'] = layered
+    return out
+
+
+def second_pass(model, numbers):
+    """The PS2's second pass of a two-layer Xbox level mesh, or None. The Xbox draws a level mesh's second texture
+    layer (a baked shadow map on the second UVs: Ranch's ground with ranch_GRNDshadow2, the barn with ranch_BSshadow)
+    in one pass; the PS2 cannot, so its own files have a copy of the mesh drawn over it (zone node <name>_2p_NN): every
+    triangle black, the layered ones textured with the layer on their second UVs (material colour 0.8), the rest
+    untextured -- read from Ranch's (2026-11-16). -> (materials, diffuse) for ps2rsc.mod0(level=True)."""
+    from rdrformats import builder
+    tris, mats = builder.triangles_of(model)
+    if not any(len(mats[t.material].textures) > 1 for t in tris):
+        return None
+    groups = {}
+    for t in tris:
+        tx = mats[t.material].textures
+        key = tx[1].lower() if len(tx) > 1 else None
+        verts, index, out = groups.setdefault(key, ([], {}, []))
+        tri = []
+        for c in t.corners:
+            uv = tuple(c.uv2) if key else (0.0, 0.0)
+            k = (tuple(c.position), uv)
+            if k not in index:
+                index[k] = len(verts)
+                verts.append((c.position, (0.0, 0.0, 0.0, 1.0), uv, 0))
+            tri.append(index[k])
+        out.append(tuple(tri))
+    materials, diffuse = [], []
+    for key in sorted(groups, key=lambda k: (k is not None, k or '')):
+        verts, _i, out = groups[key]
+        materials.append((numbers.get(key, 0) if key else 0, verts, out))
+        diffuse.append((0.8, 0.8, 0.8, 1.0) if key else (1.0, 1.0, 1.0, 1.0))
+    return materials, diffuse
+
+
+def add_pass_nodes(text, passes):
+    """A converted zone file (PS2 numbers) with a node for each second-pass mesh (passes: {base chunk number: its
+    pass's chunk number}) after its base's node, named as the PS2's are (zone_ground_01 -> zone_ground_2p_01)."""
+    if not passes:
+        return text
+    added = 0
+    out = []
+    pos = 0
+    for m in re.finditer(r'node\s+(\S+)\s*\{', text):
+        if m.start() < pos:
+            continue
+        depth, j = 0, m.end() - 1
+        while j < len(text):
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        block = text[m.start():j + 1]
+        out.append(text[pos:j + 1])
+        pos = j + 1
+        r = re.search(r'resourceIndex\s+(-?\d+)', block)
+        num = int(r[1]) if r else 0
+        if num in passes:
+            name = m[1]
+            mm = re.match(r'(.*?)(_\d+)$', name)
+            new = (mm[1] + '_2p' + mm[2]) if mm else name + '_2p'
+            b = block.replace(name, new, 1)
+            b = re.sub(r'numLods\s+\d+\s*', '', b, count=1)
+            b = re.sub(r'(resourceIndex\s+)-?\d+', lambda q: q[1] + str(passes[num]), b, count=1)
+            out.append('\n' + b)
+            added += 1
+    out.append(text[pos:])
+    text = ''.join(out)
+    if added:
+        text = re.sub(r'(NumInstNodes\s+)(\d+)', lambda q: q[1] + str(int(q[2]) + added), text, count=1)
+    return text
+
+
+def convert_level_xonly(data, notes, stem='', ps2_like=None, passes=None):
+    """An Xbox level bundle (.xrsc) as a PS2 one (.rsc) with every chunk at its number: textures and meshes encoded
+    for the PS2, the padding the Xbox adds to the other chunks taken off."""
+    from rdrformats import rsc, ps2rsc, rscwrite
+    X = rsc.read_chunks(data)
+    chunks = [(c.tag, c.data) for c in X]
+    texs = level_textures(X, True)
+    numbers = {name.lower(): i for i, (name, _rgba) in texs.items()}
+    names = {i: name for i, (name, _rgba) in texs.items()}
+    bad_tex = 0
+    for i, c in enumerate(X, 1):
+        if c.tag != 'TEX0':
+            continue
+        if i not in texs or texs[i][1] is None:
+            bad_tex += 1
+            continue
+        name, rgba = texs[i]
+        pal, mip = struct.unpack_from('<II', c.data, 0x14)
+        if not (0 < pal <= len(X)) or X[pal - 1].tag != 'PAL0':
+            # a full-colour / compressed Xbox texture has no palette chunk: the PS2's (256 colours) goes at the end,
+            # so every other chunk keeps its number
+            chunks.append(('PAL0', b''))
+            pal = len(chunks)
+        trip = ps2rsc.texture_chunks(name, fit_ps2(rgba), pal, mip, level=True)
+        chunks[mip - 1], chunks[pal - 1], chunks[i - 1] = trip
+    meshes = skinned = relit = 0
+    pass_meshes = []
+    ps2_meshes = ps2_level_colors(ps2_like) if ps2_like else []
+    for i, c in enumerate(X, 1):
+        if c.tag == 'MOD0':
+            bones = c.data[1] if len(c.data) > 1 else 0
+            model = level_model(X, i, True, names)
+            if bones:
+                # an animated object (a windmill's blades, a door ...): a skinned mesh on both games, in model space
+                # (unlike characters: Ranch's windmill reads the same on both discs), moved by its skeleton (SKE0)
+                # float positions (world space) and the skeleton's whole bone count, as the PS2's own have them
+                chunks[i - 1] = ('MOD0', ps2rsc.mod0(ps2rsc.model_input(model, numbers)[0], bones, floats=True))
+                skinned += 1
+            else:
+                mats = ps2rsc.model_input(model, numbers, level=True)[0]
+                mats, n = _recolor(mats, ps2_meshes)
+                relit += n
+                chunks[i - 1] = ('MOD0', ps2rsc.mod0(mats, 0, level=True))
+                sp = second_pass(model, numbers)
+                if sp is not None:            # its shadow-map layer: a mesh of its own at the end (numbers kept)
+                    pass_meshes.append((i, ps2rsc.mod0(sp[0], 0, level=True, diffuse=sp[1])))
+            meshes += 1
+        elif c.tag == 'BND0' and len(c.data) >= 0x84:
+            n = _a16(struct.unpack_from('<I', c.data, 0x80)[0] + 4 * ((struct.unpack_from('<I', c.data, 0x50)[0] + 31) // 32))
+            if 0x84 <= n <= len(c.data) and not any(c.data[n:]):
+                chunks[i - 1] = ('BND0', c.data[:n])
+        elif c.tag == 'PMT0':
+            n = max(64, _a16(_strip_len(c.data)))
+            if n <= len(c.data):
+                chunks[i - 1] = ('PMT0', c.data[:n])
+    for i, d in pass_meshes:
+        chunks.append(('MOD0', d))
+        if passes is not None:
+            passes[i] = len(chunks)
+    if bad_tex:
+        notes.append(f'{stem}: {bad_tex} texture(s) could not be read: left as the Xbox has them')
+    print(f'  {stem}: the Xbox level made for the PS2: {len(texs)} textures, {meshes} meshes'
+          + (f' ({skinned} animated, skinned)' if skinned else '') + ', every chunk at its number'
+          + (f'; {relit} triangles given the PS2 game\'s own baked light' if relit else '')
+          + (f'; {len(pass_meshes)} shadow-map layer(s) made second-pass meshes' if pass_meshes else ''))
+    return rscwrite.write_bundle(chunks, ps2rsc.PS2_ALIGN)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# the text formats both games have under their own extensions (.xfilm/.film, .xhud/.hud ...): read from every file of
+# each type on both discs (2026-11-16), the same syntax and key order, the values tuned per platform; the Xbox's only
+# extra keys are .xshadows' ShadowAlpha / ShadowBase and .xrain's Lightning_Flash_Position / _Size, which the PS2's
+# files never have (dropped).
+
+TEXT_FORMATS = ('.xfilm', '.xhud', '.xlsh', '.xshadows', '.xmmb', '.xflares', '.xrain')
+XBOX_ONLY_KEYS = {'.xshadows': ('ShadowAlpha', 'ShadowBase'),
+                  '.xrain': ('Lightning_Flash_Position', 'Lightning_Flash_Size')}
+
+
+def _keyed(text):
+    """[(key, line)] of a key/value text file: key = the block names it is in + its first token + which occurrence of
+    that path it is (a data row of numbers keys by its block and row number)."""
+    out, stack, seen = [], [], {}
+    for line in text.splitlines(True):
+        s = line.strip()
+        tok = re.split(r'[\s=]+', s)[0] if s else ''
+        if not s:
+            key = None
+        elif s == '{':
+            key = None
+        elif s.startswith('}'):
+            if stack:
+                stack.pop()
+            key = None
+        else:
+            base = '/'.join(stack + ['#' if re.fullmatch(r'-?[\d.]+', tok) else tok])
+            seen[base] = seen.get(base, 0) + 1
+            key = '%s@%d' % (base, seen[base])
+            if s.endswith('{'):
+                stack.append(tok)
+        out.append((key, line))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# files both games have under the SAME name with different contents (2026-11-16, every pair on both discs): all the
+# same format -- text in the same syntax with values tuned per platform (.cam .arfx .plyr .csv .bnds .swui .nav ...;
+# .swptx's newer keys are on the PS2 disc's newer files too, so the PS2 reads both), binary in the same layout (.actb
+# .stateb scripts, .strtbl string tables, UTF-16 .txt subtitles). Only these key paths are never in any PS2 file of
+# the type (every file of it on both discs read): taken out when there is nothing to merge with.
+
+XBOX_ONLY_PATHS = {
+    '.plyr': tuple('PlayerData/AimRampOnGGun/%s%s2' % (a, k) for a in 'HV'
+                   for k in ('DeadZone', 'FastRate', 'FineLogZone', 'FineMaxRate', 'FineMinRate', 'LogWidth')),
+    '.arfx': ('cr_knife_poison/DurationShots', 'cr_knife_poison/DurationTime', 'cr_knife_poison/HudGlowMode',
+              'cr_knife_poison/NewHudGlowColor'),
+    '.veh': ('StartRail',),
+}
+
+
+def same_name_to_ps2(data, name, xbox_clean=None, ps2_clean=None):
+    """An Xbox mod's EDITED copy of a file the PS2 game has under the same name -> (bytes, note). Text: with the Xbox
+    game's own (xbox_clean) and the PS2's (ps2_clean), the mod's changes laid over the PS2's own (key by key: its PS2
+    tuning kept); else the file with the keys only the Xbox reads taken out. Binary: as it is (the same layout)."""
+    ext = os.path.splitext(name)[1].lower()
+    if not is_text(data):
+        return data, 'kept as it is (the same format on both games)'
+    if xbox_clean is not None and ps2_clean is not None and is_text(xbox_clean) and is_text(ps2_clean):
+        out, ok = merge_keys(xbox_clean, data, ps2_clean)
+        return out, ('its changes laid over the PS2 game\'s own' if ok else
+                     'its changes laid over the PS2 game\'s own (some did not fit: check it)')
+    drop = set(XBOX_ONLY_PATHS.get(ext, ()))
+    if not drop:
+        return data, 'kept as it is (the same format on both games)'
+    lines = _keyed(data.decode('latin-1'))
+    keep = [l for k, l in lines if not (k and k.rsplit('@', 1)[0] in drop)]
+    return ''.join(keep).encode('latin-1'), '%d Xbox-only line(s) taken out' % (len(lines) - len(keep))
+
+
+def merge_keys(base, mine, theirs):
+    """mine's changes to base applied to theirs BY KEY (the block path of each line), not by line: a value the two
+    games tune differently is still found. Lines mine adds go after the line before them in theirs; lines it removes
+    go. -> (bytes, every change placed)."""
+    b, m, t = (_keyed(x.decode('latin-1')) for x in (base, mine, theirs))
+    bmap = {k: l for k, l in b if k}
+    mmap = {k: l for k, l in m if k}
+    out = list(t)
+    tidx = {k: i for i, (k, _l) in enumerate(out) if k}
+    ok = True
+    for k, l in m:                                     # changed
+        if k and k in bmap and bmap[k] != l:
+            if k in tidx:
+                out[tidx[k]] = (k, l)
+            else:
+                ok = False
+    for k in bmap:                                     # removed
+        if k not in mmap and k in tidx:
+            out[tidx[k]] = (None, '')
+    prev = None
+    for k, l in m:                                     # added
+        if k and k not in bmap:
+            if prev is not None and prev in tidx:
+                at = tidx[prev] + 1
+                out.insert(at, (k, l))
+                tidx = {kk: i for i, (kk, _l) in enumerate(out) if kk}
+            else:
+                ok = False
+        if k:
+            prev = k
+    return ''.join(l for _k, l in out).encode('latin-1'), ok
+
+
+def text_to_ps2(data, ext, xbox_clean=None, ps2_clean=None):
+    """An Xbox text-format file for the PS2 -> (bytes, note). With the Xbox game's own file of that name (xbox_clean)
+    and the PS2's (ps2_clean), the mod's changes to the Xbox one are laid over the PS2's own (its PS2 tuning kept);
+    else the file itself with the keys only the Xbox reads taken out."""
+    ext = ext.lower()
+    if xbox_clean is not None and ps2_clean is not None:
+        merged, ok = merge_keys(xbox_clean, data, ps2_clean)
+        return merged, ('its changes laid over the PS2 game\'s own' if ok else
+                        'its changes laid over the PS2 game\'s own (some did not fit: check it)')
+    drop = XBOX_ONLY_KEYS.get(ext, ())
+    if not drop:
+        return data, 'the same on both games'
+    lines = data.decode('latin-1').splitlines(True)
+    keep = [l for l in lines if not l.strip() or re.split(r'[\s=]+', l.strip())[0] not in drop]
+    return ''.join(keep).encode('latin-1'), '%d Xbox-only line(s) taken out' % (len(lines) - len(keep))
+
+
+def level_short_parts(data):
+    """How many mesh parts of a PS2 level bundle the game cannot read whole: it walks a part's batches by the length
+    in each batch's first qword (0x3B05B8 / 0x3B05D8: the next batch must start with STMASK there) and hangs reading
+    vertices past the end of the walk when the part says it has more. 0 for a sound bundle (the shipped levels: 0).
+    The level writer padded even-sized batches 8 bytes short until 2026-11-16."""
+    from rdrformats import rsc
+    bad = 0
+    for c in rsc.read_chunks(data):
+        if c.tag != 'MOD0' or len(c.data) < 16:
+            continue
+        d = c.data
+        try:
+            nm = d[0]
+            draw_at = struct.unpack_from('<I', d, 8)[0]
+            for k in range(nm):
+                desc = struct.unpack_from('<I', d, draw_at + 4 * k)[0]
+                off, _q, cnt = struct.unpack_from('<IHH', d, desc)
+                if cnt == 0:
+                    continue
+                node = off + (32 if struct.unpack_from('<I', d, off + 8)[0] else 16)
+                got = 0
+                while node + 56 <= len(d) and struct.unpack_from('<I', d, node)[0] == 0x20000000:
+                    got += struct.unpack_from('<I', d, node + 52)[0]
+                    step = struct.unpack_from('<H', d, node + 32)[0] * 4
+                    if step <= 0:
+                        break
+                    node += step
+                if got < cnt:
+                    bad += 1
+        except struct.error:
+            continue
+    return bad
+
+
+def level_problems(data):
+    """What in a PS2 level bundle the game cannot draw: {short, untagged} counts (both 0 for the shipped levels) --
+    mesh parts the game cannot read whole (level_short_parts: it hangs loading), level textures without the 0x00010000
+    at TEX0 +0x70 every shipped level texture has (they draw as noise). Every level the writer made before 2026-11-16
+    has untagged textures (its mesh batches were also padded wrong then), so that marks one to make again."""
+    from rdrformats import rsc
+    out = {'short': level_short_parts(data), 'untagged': 0}
+    for c in rsc.read_chunks(data):
+        d = c.data
+        if c.tag == 'TEX0' and len(d) >= 0x98 and struct.unpack_from('<I', d, 0x70)[0] != 0x00010000:
+            out['untagged'] += 1
+    return out
+
+
+def repack_ps2(data):
+    """An Xbox bundle of chunks the two games share as they are (a level's _view: RSV0, _nav: NTG0) with the PS2's
+    16-byte alignment (the chunks keep the Xbox's trailing zeros: their own offsets say where they end)."""
+    from rdrformats import rsc, ps2rsc, rscwrite
+    return rscwrite.write_bundle([(c.tag, c.data) for c in rsc.read_chunks(data)], ps2rsc.PS2_ALIGN)
+
+
+def _target_has_base(arch, tgt, template, showdown):
+    if showdown:
+        return f'lvls_m2/{template}2.dat' in tgt.index['archives']
+    return f'lvls_sng/{template}.dat' in tgt.index['archives']
+
+
+def place_foreign_level(arch, folder, dst_dir, stem, notes, dst=None, ps2_like=None):
+    """An Xbox-only level's own files (its place: geometry, collision, zones, paths, boxes, spawns, lights ...) from
+    the mods folder `folder` converted into the PS2 map at dst_dir/<arch> (made from a PS2 base before: its place
+    files taken out first). The base's shared files, sound banks and sound setup are kept."""
+    pat = re.compile(re.escape(stem) + r'(?=[_.]|$)', re.I)
+    gone = 0
+    if dst is None:                                # dst given (the Studio): written beside the Xbox files, none taken out
+        dst = os.path.join(dst_dir, *arch.split('/'))
+        os.makedirs(dst, exist_ok=True)
+        for f in os.listdir(dst):
+            if re.match(re.escape(stem) + r'[_.]', f, re.I) and f.lower().endswith(ps2build.PLACE_EXTS):
+                os.remove(os.path.join(dst, f))
+                gone += 1
+    done = skipped = 0
+    passes = {}
+    main = stem.lower() + '.xrsc'
+    for f in sorted(os.listdir(folder), key=lambda n: (n.lower() != main, n.lower())):
+        low = f.lower()
+        if not pat.search(low) or low.startswith('snd_cfg_'):
+            continue                               # shared files and the sound setup: the PS2 base's
+        p = os.path.join(folder, f)
+        if not os.path.isfile(p):
+            continue
+        data = open(p, 'rb').read()
+        ext = os.path.splitext(low)[1]
+        out_name = target_name(f, False)
+        try:
+            if ext == '.xrsc' and os.path.splitext(low)[0] == stem.lower():
+                out = convert_level_xonly(data, notes, stem, ps2_like, passes)
+            elif ext == '.xrsc':
+                out = repack_ps2(data)
+            elif ext == '.xznes':
+                out = add_pass_nodes(renumber_zone(data.decode('latin-1'), _Same(), True, False),
+                                     passes).encode('latin-1')
+            elif ext == '.xtex':
+                out = convert_texture(data, False, None)
+            elif ext == '.bnds':
+                # the bundle keeps the Xbox's chunk numbers: the Xbox field where it has one (325 of the PS2
+                # disc's 4,039 bound references differ between the games: train, traingoo, saloon)
+                out = re.sub(r'(resourceIndex\s+)(-?\d+)(\s*resourceIndexXbox\s+)(-?\d+)',
+                             lambda m: f'{m[1]}{m[4] if int(m[4]) > 0 else m[2]}{m[3]}{m[4]}',
+                             data.decode('latin-1')).encode('latin-1')
+            elif ext in TEXT_FORMATS:
+                out = text_to_ps2(data, ext)[0]
+            elif ext in BACK or ext in ('.xbd', '.xhd', '.xalpha'):
+                skipped += 1                       # Xbox-only kinds the PS2 map does without (its .mmb, sound banks)
+                continue
+            elif is_text(data):
+                out = data
+            else:
+                skipped += 1
+                continue
+        except Exception as e:                     # one file does not stop the rest
+            notes.append(f'{arch}/{f}: not converted ({type(e).__name__}: {e}): left out')
+            continue
+        with open(os.path.join(dst, out_name), 'wb') as fh:
+            fh.write(out)
+        done += 1
+    print(f'  {arch}: the Xbox level\'s own files laid over the PS2 base: {done} converted'
+          + (f', {skipped} Xbox-only left out' if skipped else '') + f' ({gone} of the base\'s taken out)')
+
 # ---------------------------------------------------------------------------------------------------------------
 
 def remake_new_levels(fresh, src, tgt, dst_dir, to_xbox, dave, notes):
@@ -422,6 +960,11 @@ def remake_new_levels(fresh, src, tgt, dst_dir, to_xbox, dave, notes):
         template = old[4:]
         if showdown and sarch.startswith(('lvls_m2/', 'lvls_m4/')):
             template = template.rstrip('24')
+        foreign = not to_xbox and not _target_has_base(arch, tgt, template, showdown)
+        if foreign:
+            # a level only the Xbox has (Coliseum), or a map made from one: a PS2 base (Ranch / the unused saloon)
+            # for the files every map shares, then the level's own files converted over it (place_foreign_level)
+            template = 'ranch' if showdown else 'saloon'
         ns = argparse.Namespace(new_level='showdown' if showdown else 'sng', name=name, template=template, title=None,
                                 subtitle=None, replace=True, mods=dst_dir, cache=tgt.cache, dave=dave)
         if not showdown:
@@ -438,6 +981,17 @@ def remake_new_levels(fresh, src, tgt, dst_dir, to_xbox, dave, notes):
             continue
         done_names.add((group if not showdown else 'm', name))
         remade.add(arch)
+        if foreign:
+            pcs = ('2', '4') if showdown else ('',)
+            for pc in pcs:
+                a2 = f'lvls_m{pc}/{name}{pc}.dat' if showdown else arch
+                f2 = fresh.get(a2)
+                if f2:
+                    place_foreign_level(a2, f2, dst_dir, f'lvl_{name}{pc}', notes)
+                    remade.add(a2)
+                elif showdown:
+                    notes.append(f'{a2}: the Xbox map’s {pc}-player half was not in the mod: it is the PS2 base '
+                                 f'(Ranch) as it is')
         made = [l for l in out.getvalue().splitlines() if l.startswith('Made ')]
         print(f'  {arch}: made again from the {"Xbox" if to_xbox else "PS2"} game\'s own files (from {old[4:]}): ' +
               '; '.join(m[5:].split(':')[0] for m in made))
@@ -551,6 +1105,10 @@ def convert(src_dir, dst_dir, src, tgt, to_xbox, log=print, only_changed=False, 
                 if mapping is None:
                     mapping = zone_map_from_game(low, archive, src, tgt, to_xbox)
                 write(renumber_zone(text, mapping, not to_xbox, to_xbox).encode('latin-1'), 'zone')
+            elif not to_xbox and ext in TEXT_FORMATS:
+                _a, tclean = tgt.find(tname, prefer)
+                out_b, _n = text_to_ps2(data, ext, clean if clean is not None and tclean is not None else None, tclean)
+                write(out_b, 'merged' if clean is not None and tclean is not None else 'copied')
             elif ext == '.bnds':
                 text = data.decode('latin-1')
                 stem = next((s for (d, s) in level_maps if d == rel_dir and low.startswith(s)), None)

@@ -69,8 +69,28 @@ FEATURES = [
      "Nothing to press: always on for this disc. (God Mode wins if both are ticked.)"),
     ("moneyx5", "Money x5", "Every dollar Red picks up or is given counts five times (coins, money bags, rewards, the Big Money cheat). Spending is unchanged.",
      "Nothing to press: always on for this disc."),
+    # The second Showdown lineup (2026-11-16): put on the working disc by the Data Editor's build whenever a
+    # character is on lineup 2 (postermultiview.swui <FONTGRIDDATA:y:<code>:1>), taken off when none is.
+    ("lineup2", "Second Showdown Lineup", "A second page on the Showdown character select for the characters on lineup 2; the photo pans between the two.",
+     "L1 / R1 on the Showdown select (any controller). Added by the Data Editor's build when a character is on lineup 2."),
+    ("lineup2bg", "Second Lineup Background", "Lineup 2 uses its own background (ui_characterlineup2l24b / r24b) instead of lineup 1's.",
+     "Comes with Second Showdown Lineup when the mods folder has the two pictures."),
+    # 2026-11-16: put on by the Data Editor's build when the mods folder has a Showdown character model
+    ("alttex", "Own Textures For Players 2-4", "A Showdown character with no player 2-4 alternate texture keeps its own textures instead of being drawn blank (any character made with several textures).",
+     "Nothing to press. Added by the Data Editor's build."),
+    # 2026-11-16: the PS2 game's "is this stage available" (0x131E08) refuses lvl_colseum by name, whatever the menu
+    # table, unlocks or save say; put on by the Data Editor's build when the mods folder has Coliseum's map
+    ("colseum", "Coliseum On The PS2", "The Xbox-only Showdown stage The Coliseum is offered on the PS2 (the game turns it down by name).",
+     "Nothing to press. Added by the Data Editor's build when the mods folder has lvls_m2/colseum2.dat."),
+    # 2026-11-17: Script Hooks > Unlock added maps and characters, on the PS2 (codemods_unlocknew.py); again at the END
+    ("unlocknew", "Unlock Added Maps And Characters", "Showdown maps and characters mods add count as unlocked on any save (a save made before them has no unlock for them).",
+     "Nothing to press. Added by the Data Editor's build when the mod adds maps or characters."),
 ]
 KEYS = [f[0] for f in FEATURES]
+# set by the Data Editor's build, not ticked in the Code Mods tab
+AUTO_KEYS = ("lineup2", "lineup2bg", "alttex", "colseum", "unlocknew")
+# the rows "unlocknew" unlocks (unlockables.csv names the mod added), set for a build by `controls`
+UNLOCKNEW_NAMES = []
 RESEARCH_KEYS = ["hitlog", "memwatch"]
 CORE_KEYS = [k for k in KEYS if k not in RESEARCH_KEYS]
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "02_Modded", "research_config.json")
@@ -149,6 +169,38 @@ SLOW_FN = 0x0025F960               # per-frame timer: computes the frame time at
 SLOW_FN_WORDS = (0x27BDFFD0, 0x3C020075)
 CTRL = dict(up="CROSS", down="SQUARE", fast="R2", slow="L2", speed=8.0, fast_mult=4.0, slow_mult=0.25,
             deadzone=24, grace=4)
+
+
+class controls:
+    """`with controls({'noclip': 'L3+R3', 'up': 'CROSS', ...}):` -- the trainer's combos and flight buttons for the
+    builds made inside it (the Script Hooks tab's mapping, rdrstudio/hookmods.py); the defaults again after."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping or {}
+
+    def __enter__(self):
+        global UNLOCKNEW_NAMES
+        self.saved = (dict(TOGGLE), dict(CTRL), list(UNLOCKNEW_NAMES))
+        UNLOCKNEW_NAMES = list(self.mapping.get("_unlocknew") or [])
+        for k in ("noclip", "freeze", "camlock", "slowmo"):
+            if self.mapping.get(k):
+                mask(self.mapping[k])                           # a name that is not a button: refused here
+                TOGGLE[k] = self.mapping[k]
+        for k in ("up", "down", "fast", "slow"):
+            if self.mapping.get(k):
+                mask(self.mapping[k])
+                CTRL[k] = self.mapping[k]
+        return self
+
+    def __exit__(self, *exc):
+        global UNLOCKNEW_NAMES
+        UNLOCKNEW_NAMES = self.saved[2]
+        TOGGLE.clear()
+        TOGGLE.update(self.saved[0])
+        CTRL.clear()
+        CTRL.update(self.saved[1])
+        return False
+
 
 # data block offsets
 D_ENABLED, D_PREV, D_TOGGLES, D_MOVER_CALLS = 0x00, 0x04, 0x08, 0x0C
@@ -951,6 +1003,16 @@ def build_menu(img, feats):
     return iw_ + cw_ + sw, hooks
 
 
+COLSEUM_SITE = 0x00131E48          # bne v0,zero,+3 after strcmp(name, "lvl_colseum"): equal -> "not available"
+
+
+def build_colseum(img):
+    """The stage check's lvl_colseum test always passed (a branch made unconditional)."""
+    if img is not None and img.word(COLSEUM_SITE) != 0x14400003:
+        raise ValueError('Coliseum: 0x%08X is %08X, not the vanilla 14400003' % (COLSEUM_SITE, img.word(COLSEUM_SITE)))
+    return [], [(COLSEUM_SITE, 0x10000003, 'beq zero,zero: past the "no Coliseum" check')]
+
+
 def build(img, feats):
     """-> (cave words {addr: word}, hook words {addr: word}, list of (title, [(addr,word,comment)...]))"""
     feats = [k for k in KEYS if k in feats]
@@ -980,6 +1042,17 @@ def build(img, feats):
         parts.append(("unlock everything", *build_unlockall(img)))
     if "moneyx5" in feats:
         parts.append(("money x5", *build_money(img)))
+    if "lineup2" in feats:
+        from . import codemods_lineup as CL
+        parts.append(("second lineup", *CL.build(img, "lineup2bg" in feats)))
+    if "alttex" in feats:
+        from . import codemods_alttex as CA
+        parts.append(("own textures for players 2-4", *CA.build(img)))
+    if "colseum" in feats:
+        parts.append(("Coliseum on the PS2", *build_colseum(img)))
+    if "unlocknew" in feats and "unlockall" not in feats and UNLOCKNEW_NAMES:   # Unlock Everything covers them
+        from . import codemods_unlocknew as CU
+        parts.append(("unlock added maps and characters", *CU.build(img, UNLOCKNEW_NAMES)))
     if any(k in ROW_LABEL for k in feats):
         mw, mh = build_menu(img, feats)
         parts.append(("cheat menu", mw, mh))
@@ -1654,6 +1727,7 @@ def describe(vanilla_iso, working_iso, out_iso):
         hide = set(RESEARCH_KEYS) if _F.build() == "release" else set()
     except Exception:                                       # noqa: BLE001
         hide = set()
+    hide |= set(AUTO_KEYS)                  # the Data Editor's build adds / removes these by itself
     out = {"features": [dict(key=k, title=t, help=h, controls=c, row=ROW_LABEL.get(k), research=k in RESEARCH_KEYS) for k, t, h, c in FEATURES if k not in hide],
            "output_path": out_iso, "job": job_status(), "proven": dict(PROVEN)}
     for name, p in (("stock", vanilla_iso), ("working", working_iso), ("built", out_iso)):

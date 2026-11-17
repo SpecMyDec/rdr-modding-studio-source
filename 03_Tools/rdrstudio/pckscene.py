@@ -545,6 +545,12 @@ def load_image(raw):
     from . import texture as T
     dec = T.decode_tex_file(raw)
     if not dec:
+        try:                                                    # an Xbox .xtex (DXT): the format library reads it
+            from rdrformats import tex as _TEX
+            t = _TEX.read(raw)
+            return Image.fromarray(np.ascontiguousarray(t.mips[0][::-1]), 'RGBA')
+        except Exception:                                       # noqa: BLE001
+            pass
         try:
             return Image.open(io.BytesIO(raw)).convert('RGBA')
         except Exception:                                       # noqa: BLE001

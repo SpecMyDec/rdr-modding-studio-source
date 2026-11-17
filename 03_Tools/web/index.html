@@ -227,6 +227,13 @@
     font:11px/1 Consolas,"Cascadia Mono",monospace; color:var(--dim-ink);
   }
   #statusbar .spacer{flex:1}
+  /* the PS2 / Xbox switch (xboxmode.js) */
+  #statusbar .platsw{display:inline-flex; border:1px solid var(--line); border-radius:4px; overflow:hidden;
+    margin-left:2px}
+  #statusbar .platsw button{border:none; border-radius:0; background:transparent; color:var(--dim-ink);
+    padding:1px 9px; font-size:11px; cursor:pointer; min-height:0; line-height:16px}
+  #statusbar .platsw button.on{background:var(--gold); color:var(--bg)}
+  body.xbox-mode #statusbar .platsw button.on{background:var(--grn); color:var(--bg)}
   #statusbar .sb{white-space:nowrap; font-variant-numeric:tabular-nums}
   #statusbar .sb.dim{color:var(--dim-ink)}
   #statusbar .sb.ok{color:var(--grn)}
@@ -804,7 +811,13 @@
   #tab-dataeditor .de-masterbar{border-top:none}
   #tab-dataeditor .de-split{height:5px;flex:none;cursor:row-resize;background:var(--line);opacity:.55}
   #tab-dataeditor .de-split:hover{opacity:1;background:var(--blue)}
-  #tab-dataeditor .de-status{border-top:1px solid var(--line);min-height:28px}
+  #deStatusBar{border-top:1px solid var(--line);min-height:28px;flex:none;gap:6px}
+  #deStatusBar select{min-height:0;padding:1px 4px;font-size:12px}
+  /* a build running: look around, change nothing (the requests are refused too: xboxmode.js) */
+  body.building [data-write], body.building .actionbar button, body.building #btnPlay{opacity:.45; pointer-events:none}
+  /* the game picker: PS2 blue, Xbox green, over the theme's accent (the select is styled by the theme too) */
+  #deStatusBar #deGameSel{border-color:#5b9dd9 !important;color:#5b9dd9 !important}
+  body.xbox-mode #deStatusBar #deGameSel{border-color:#6fbf7a !important;color:#6fbf7a !important}
   #tab-dataeditor .de-wbbar{flex-wrap:wrap;gap:4px}
   #tab-dataeditor .de-wbbar.drop, #tab-dataeditor #deWbTree.drop{outline:2px dashed var(--blue);outline-offset:-2px}
   #tab-dataeditor .de-wbrow{display:flex;gap:6px;align-items:center;padding:2px 10px;cursor:pointer;white-space:nowrap}
@@ -1139,7 +1152,7 @@ try {
       <button data-tab="audio" data-ws="MEDIA"
               title="Every spoken line and the sound-effect banks">Audio</button>
       <button data-tab="movies" data-ws="MEDIA"
-              title="The cutscenes and the still screens">Cutscenes</button>
+              title="The videos (cutscenes) and the pictures (still screens)">Videos/Pictures</button>
     </span>
     <span class="ws" data-ws="DISC">
       <span class="wslabel">Data Editor</span>
@@ -1160,6 +1173,11 @@ try {
               title="Saved copies of your mod: save, restore, compare. Checkpoints live here too.">Versions</button>
       <button data-tab="codemods" data-ws="PROJECT"
               title="Noclip, Freeze World, Camera Lock, Slow-Mo and the Cheats menu unlock, built into the game">Code Mods</button>
+    </span>
+    <span class="ws" data-ws="HOOKS">
+      <span class="wslabel">Script Hooks</span>
+      <button data-tab="hookmods" data-ws="HOOKS"
+              title="Code the Studio puts into the game for you (the trainer, unlocking added maps and characters): each one on or off for the PS2 and the Xbox, and the trainer's controller mapping">Script Hooks</button>
     </span>
     <span class="navbreak"></span>
     <!-- Sub-views of a composite mode, on row 2 after the modes. Filled in
@@ -1627,9 +1645,11 @@ try {
           <span class="spacer" style="flex:1"></span>
           <button id="btnOpenLevel" disabled>Open in 3D editor</button>
         </div>
-        <div class="scroll pad" id="missionFields" style="flex:1">
+        <div class="scroll pad" id="missionFields" style="flex:1 1 50%;min-height:0">
           <div class="empty" title="levelflow.csv: mission order and rewards">Pick a mission</div>
         </div>
+        <!-- the level's enemy roster (.enm): behaviour .tbl, weapons, drops ... (cast.js missionEnemies) -->
+        <div id="missionEnemies" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;border-top:1px solid var(--line)"></div>
       </div>
     </section>
 
@@ -1792,6 +1812,14 @@ try {
           <div id="wmWarn" style="display:none;margin-top:8px;padding:6px 8px;border:1px solid var(--warn);color:var(--warn);border-radius:4px"></div>
           <div id="wmResult" style="margin-top:8px"></div>
         </div>
+        <div class="actionbar" style="flex-wrap:wrap;gap:6px">
+          <input type="file" id="wmModFile" accept=".mod,.xmod" style="display:none">
+          <button id="btnWmModImport" disabled
+                  title="Put a game model over this weapon's: a PS2 .mod, or an Xbox .xmod (made the PS2's). Checked first; Ctrl+Z undoes it.">Import .mod / .xmod&hellip;</button>
+          <span class="spacer" style="flex:1"></span>
+          <button id="btnWmExportMod" disabled title="Save this weapon's model as the PS2 game has it (.mod)">Export .mod</button>
+          <button id="btnWmExportXmod" disabled title="Save this weapon's model as the Xbox game's (.xmod)">Export .xmod</button>
+        </div>
         <div class="actionbar">
           <span id="wmStatus" class="muted"></span>
           <span class="spacer" style="flex:1"></span>
@@ -1828,7 +1856,15 @@ try {
         <div class="pad"><button id="crAddChar" style="width:100%"
              title="A new character slot: copies a character's files under a new code (its model, skeleton, damage, hit spots ...) into SWAT.DAT. Rebuilds SWAT.DAT to make room.">Add Character…</button>
           <button id="crDelChar" class="ghost" style="width:100%;margin-top:6px" disabled
-             title="Delete the selected character from the working disc. Only characters you added: the game's own cannot be deleted.">Delete Character…</button></div>
+             title="Delete the selected character from the working disc. Only characters you added: the game's own cannot be deleted.">Delete Character…</button>
+          <button id="crMpAdd" class="ghost" style="width:100%;margin-top:6px"
+             title="Make the selected character playable in Showdown: its roster entry (m + its code), versus tuning from a character on the same skeleton, its name, portraits and place on the select screen">Add to Showdown…</button>
+          <button id="crReplaceAll" class="ghost" style="width:100%;margin-top:6px"
+             title="Make every humanoid character a copy of one character: every file of it (model, skeleton, .cr, hit spots, damage ...), as Add Character copies one. Animals and differently rigged characters are left as they are. It goes in the mods folder: Build puts it in the game.">Replace All Characters…</button>
+          <button id="crMpNew" class="ghost" style="width:100%;margin-top:6px"
+             title="A brand-new Showdown character: its model, character files and .tex files (yours, or copied from a character), then its roster entry, portraits and place on the select screen">New Showdown character…</button>
+          <button id="crMpEdit" class="ghost" style="width:100%;margin-top:6px"
+             title="The Showdown character select as it is: move any character's photo and pointer, change its layer or its lineup (lineup 2: the second page, L1 / R1 in the game), and change either lineup's background -- without adding a character">Showdown editor…</button></div>
       </div>
       <div style="flex:1; display:flex; flex-direction:column; min-width:0">
         <div class="bar">
@@ -1989,7 +2025,7 @@ try {
     <!-- ---------------------------------------------- movies + screens -->
     <section class="tab" id="tab-movies">
       <div class="panel" style="width:280px">
-        <h2>Cutscenes</h2>
+        <h2>Videos/Pictures</h2>
         <div class="scroll" id="movList" style="flex:1;min-height:120px"></div>
         <h2 style="border-top:1px solid var(--line)">Screens (.ipu)</h2>
         <div class="scroll" id="stillList" style="flex:1;min-height:120px"></div>
@@ -2398,11 +2434,11 @@ try {
             <span>Master files: Replace only = just the .dat files that have a file of that name; Add to all = every level .dat, front.dat and swat.dat.</span>
           </div>
           <div class="bar de-buttons">
-            <button id="deBuild" data-write="1" class="primary" title="Rebuild the .dat files your mods go in and put them on the working disc">Build into working disc</button>
+            <button id="deBuild" data-write="1" class="primary" title="Rebuild the .dat files your mods go in and put them on the working disc">Build into the PS2 game</button>
             <span class="de-sep"></span>
             <button id="deAddBtn" data-write="1" title="Add files to the selected folder (or drop them on the list or on a folder)">Add files…</button>
             <button id="deFromGame" data-write="1" title="Copy the selected .dat's own files out of the working disc to change them">Add from game…</button>
-            <button id="deDelete" data-write="1" title="Delete the selected files (to the Recycle Bin). Delete key">Remove</button>
+            <button id="deDelete" data-write="1" title="Delete the selected files: you choose Recycle Bin or permanently. Delete key">Remove</button>
             <button id="deDelNew" data-write="1" class="ghost" title="Delete all files new to the archive: the selected .dat folder's files that the archive has no file of the name of go to the Recycle Bin, so the folder only replaces the archive's own files">Delete new files</button>
             <button id="deOpenFolder" class="ghost" title="Open the selected folder in Explorer">Open folder</button>
             <button id="deRestore" data-write="1" class="ghost" title="Take your builds off the working disc: the archives go back to how they were before the Data Editor built them">Restore defaults…</button>
@@ -2470,12 +2506,13 @@ try {
         <!-- ============================================== page: settings -->
         <div id="dePageSettings" class="scroll" style="display:none;flex:1;padding:14px 18px"></div>
 
-        <!-- the status line and the log behind it -->
-        <div class="bar de-status">
-          <span id="deStatus" class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-          <span class="muted" style="margin-right:8px">Game: PS2</span>
-          <button id="deLogBtn" class="ghost" title="Everything the Data Editor did">Log</button>
-        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="tab-hookmods">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div class="bar"><b>Script Hooks</b><span class="muted" style="margin-left:10px">trainer &middot; unlock added maps and characters, per game, and the trainer&rsquo;s controls</span></div>
+        <div class="scroll" id="hmBody" style="flex:1;padding:10px 18px;max-width:900px"></div>
       </div>
     </section>
 
@@ -2712,6 +2749,17 @@ try {
 
   </main>
 
+  <!-- the build's status line and the log behind it, under every tab; the game Build and Play are for -->
+  <div id="deStatusBar" class="bar de-status">
+    <span id="deStatus" class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <button id="deCancel" class="ghost" style="display:none" title="Stop the build at its next safe point: nothing is written to the working disc">Cancel</button>
+    <select id="deGameSel" title="Which game Build and Play are for: PS2 (the working disc, PCSX2) or Xbox (the recomp's mods folder, RDR.exe). The same mod either way.">
+      <option value="ps2">Game: PS2</option>
+      <option value="xbox">Game: Xbox</option>
+    </select>
+    <button id="deLogBtn" class="ghost" title="Everything the Data Editor did">Log</button>
+  </div>
+
   <!-- Persistent global state, the way a DCC tool does it. These used to be
        pills crowded into the header next to six buttons; down here they are
        always visible without competing with the toolbar. -->
@@ -2722,6 +2770,14 @@ try {
           <div style="width:min(400px,92vw);margin-top:14vh;background:var(--bg2);
                border:1px solid var(--line);border-radius:6px;padding:14px 16px">
             <div style="font:var(--t-head);color:var(--title);margin-bottom:10px">Export whole level</div>
+            <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px"
+                   title="What to export: a 3D model set for Blender and other tools, or the level's own files as a game reads them.">
+              Format
+              <select id="lvlExportFormat" style="flex:1">
+                <option value="model">3D model set (.obj / .glb, textures)</option>
+                <option value="rsc">Level files for the PS2 (.rsc, .znes ...)</option>
+                <option value="xrsc">Level files for the Xbox (.xrsc, .xznes ...)</option>
+              </select></label>
             <label style="display:flex;align-items:center;gap:6px"
                    title="Every area, textures included, zipped.">
               <input type="checkbox" id="lvlExportCol" checked> Include collision</label>
@@ -2755,6 +2811,7 @@ try {
     <span id="sbEdits" class="sb dim"></span>
     <span id="isopill" class="sb">disc ?</span>
     <span id="pcsx2pill" class="sb">PCSX2 ?</span>
+    <span id="xboxpill" class="sb" style="display:none">RDR.exe ?</span>
     <span class="sbsep"></span>
     <button id="sbGuides" class="sblink" title="User guide, modding guide, custom models">Guides</button>
     <span class="sbsep"></span>
@@ -2832,6 +2889,20 @@ try {
       </div>
       <div id="asPcsx2Note" class="dim" style="font-size:11px;margin-top:4px"></div>
 
+      <h3 style="font-size:13px;margin:16px 0 4px">Xbox recomp (Game: Xbox)</h3>
+      <div class="mono dim" id="asRecomp" style="word-break:break-all">&mdash;</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asPickRecomp">Choose folder&hellip;</button>
+        <button id="asClearRecomp" class="ghost">Forget</button>
+      </div>
+      <div class="dim" style="font-size:11px;margin-top:4px">The folder with the recomp's RDR.exe: Play starts it and Build (Xbox) writes the mod into its mods folder.</div>
+      <h3 style="font-size:13px;margin:12px 0 4px">Xbox game files (the Xbox side's working disc)</h3>
+      <div class="mono dim" id="asRecompAssets" style="word-break:break-all">&mdash;</div>
+      <div class="bar" style="display:flex;gap:8px;margin:6px 0 0">
+        <button id="asPickRecompAssets">Choose folder&hellip;</button>
+        <button id="asClearRecompAssets" class="ghost">Beside RDR.exe</button>
+      </div>
+
       <h3 style="font-size:13px;margin:16px 0 6px">Folders</h3>
       <div id="asFolders"></div>
       <div class="dim" style="font-size:11px">Changing a folder restarts the Studio; nothing is moved for you.</div>
@@ -2893,5 +2964,7 @@ try {
 
 <script type="module" src="./app.js"></script>
 <script type="module" src="./saveeditor.js"></script>
+<script type="module" src="./xboxmode.js"></script>
+<script type="module" src="./hookmods.js"></script>
 </body>
 </html>

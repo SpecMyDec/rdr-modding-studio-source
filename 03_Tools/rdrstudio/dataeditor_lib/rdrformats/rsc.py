@@ -183,6 +183,7 @@ def strip_triangles(ix):
 # back to models and pictures, for importing a bundle
 
 XBOX_P8, XBOX_DXT1, XBOX_DXT3, XBOX_DXT5 = 0x0B, 0x0C, 0x0E, 0x0F
+XBOX_L8, XBOX_A8 = 0x00, 0x19  # the Xbox's 8-bit grey / alpha-only textures (no palette)
 
 
 def _swizzle_order(w, h):
@@ -208,6 +209,16 @@ def read_texture(chunks: list, tex_num: int):
         pal = np.frombuffer(chunks[pal_num - 1].data[0x40:0x440], np.uint8).reshape(256, 4)[:, [2, 1, 0, 3]]
         ix = np.frombuffer(data[:w * h], np.uint8)[_swizzle_order(w, h)].reshape(h, w)
         return name, pal[ix]
+    if kind in (XBOX_L8, XBOX_A8):  # 8 bits, no palette: grey, or alpha only (white)
+        v = np.frombuffer(data[:w * h], np.uint8)[_swizzle_order(w, h)].reshape(h, w)
+        rgba = np.empty((h, w, 4), np.uint8)
+        if kind == XBOX_A8:
+            rgba[..., :3] = 255
+            rgba[..., 3] = v
+        else:
+            rgba[..., :3] = v[..., None]
+            rgba[..., 3] = 255
+        return name, rgba
     dxt = {XBOX_DXT1: tex.DXT1, XBOX_DXT3: tex.DXT3, XBOX_DXT5: tex.DXT5}.get(kind)
     if dxt:
         return name, tex._decode_dxt(data[:tex.level_size(dxt, w, h)], dxt, w, h)

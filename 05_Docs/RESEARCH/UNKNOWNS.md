@@ -599,6 +599,33 @@ clean (sofa, panelling, books, marble, rug, wallpaper); drawn raw they were nois
   front.dat). Measured: two new maps load and play.
 - **No archive has folders**: 66 of 66 hold only top-level names. A file added as `gbw/gbw.cr` is never found.
 
+### The Showdown select screen, in the code
+
+`characterlineup.swui` draws the select screen as a group photo: the town background
+(`ui_characterlineupl24b.tex` + `r24b`, rows top first) and each roster character's `ui_mphoto_<code>.tex` laid at
+its `<POSMARKER:x,0,0:sx,sy:hotspot_<code>>`, in file order; `(x + sx, sy)` is the face the pointer goes to (all 48
+checked by drawing them). In SLUS_205.00 the loop at 0x0013F2F8 walks the screen's character list -- **not the
+roster table**: a growable array (pointer at +332, count u16 at +336 of the object at +92 of the screen) filled by
+the `.swui` tag parser at 0x00107408 from the `<FONTGRIDDATA:y:<code>:0>` lines of **`postermultiview.swui`**
+(front.dat and swat.dat, identical): one 48-byte entry per line (the symbol -- `y` turns the photo upright, `x` for
+mok, who lies down -- at +0, the code at +1, the number as a byte at +41), added by 0x00113008, which grows the
+array 8 at a time, so **there is no 48 limit**. (`MPCharBounty`, loaded at 0x003557D8 into 0x00760D00, is the
+bounty table, not the screen's list.) Proven with a savestate on the select screen, an added character in
+`mpcharbounty.csv`, `unlockables.csv` and `characterlineup.swui` and the lock check patched out: the list held the 48
+shipped entries in file order and not the new one. The same file's `CharWeaponTable`, `CharSpecialTable` and
+`AIBrainTable` give a character, by code, its starting weapons, special and bot brain (a `default` row otherwise).
+For each entry the loop skips the code's first letter, looks `m%s` up in the unlock
+table (0x00742120, by name: 0x00183090) and reads its unlock bit (0x00183028: bit `idx` of a bit set in the table or
+behind its first pointer, `idx` the row). **Not found, or the bit clear: the character is locked, and a locked one
+is not drawn (`ui_mphoto_%s`) nor given its `hotspot_%s`** -- unless the `unlockmulti` flag (0x0025A518) is set.
+
+**The game's own off-by-one.** The `Unlockables` loader (0x00182C40) skips rows whose last column is `xbox`
+(`lvl_colseum`, row 172), yet sets a row's Default bit by its ROW number (0x00182F38 -> 0x00183118) while the select
+screen reads a character's bit by its place in the LIST (0x00183090, 0x00183028). After row 172 the two are one
+apart: **a character starts unlocked when the row before it has Default 1** (the game's own msrd reads mshp's 0, msto
+reads msrd's 1). A new character therefore needs a Default-1 row right before its own (the Studio writes a filler
+`_m<code>`); unlock rows are appended, never inserted, so no other row moves.
+
 ### BVH through Blender
 
 Blender's BVH importer converts Y-up to Z-up (forward -Z, up Y) and its exporter has no axis option, so a clip

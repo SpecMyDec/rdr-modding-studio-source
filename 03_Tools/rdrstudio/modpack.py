@@ -55,7 +55,7 @@ FORMAT = "rdrmodpack/1"
 # mods stay format 1, so they keep working in every Studio that has packs.
 FORMAT_CODE = "rdrmodpack/2"
 CODE_VERSION = 1
-STUDIO_VERSION = "2.0.0"
+STUDIO_VERSION = "2.1.0"
 GAME = "SLUS-20500"
 SUFFIX = ".rdrmodpack.zip"
 MAX_UNPACKED = 1 << 30

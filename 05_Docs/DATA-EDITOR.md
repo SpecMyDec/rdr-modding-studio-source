@@ -245,3 +245,29 @@ character, edited and grown Flash screens, replaced sounds and streams.
   edits the map's row in both copies of the menu; Build puts it on the disc.
 - **Flash screens, Audio and Streams**: see [RESEARCH/FORK-CHANGES.md](RESEARCH/FORK-CHANGES.md) sections 2 and 4.
 - **Build complete** / **Build failed** lines in the activity log.
+
+## After 2.0.0
+
+- **The Showdown select screen** (`characterlineup.swui`, front.dat and swat.dat): the background
+  `ui_characterlineupl24b.tex` + `ui_characterlineupr24b.tex` (two 512x256 halves, rows top first), then each roster
+  character's `ui_mphoto_<code>.tex` drawn upright (128x256) at `<POSMARKER:x,0,0:sx,sy:hotspot_<code>>` in file
+  order; `(x + sx, sy)` is the face the pointer goes to (drawn for all 48: every point is on a face). A roster
+  entry without a hotspot is neither drawn nor selectable -- which is why a character put in Red's slot showed
+  nowhere and Red was gone. **Add to Showdown** draws this screen and places the character on it (drag, size, click
+  the face); a **fresh entry** adds its own roster row, unlock row and hotspot (the game ships 48: a 49th is not yet
+  seen in game); **in place of** an entry takes that entry's hotspot too. **New Showdown character…** chains Add
+  Character (own .rsc / .rnt / .skel / .tex / character files) into it.
+- **Add to Showdown…** (Creatures; also offered at the end of Add Character). A Showdown character is m + its code
+  (48 of 48 shipped entries), with its own m<code>.cr; its name (swat.strtbl) and portraits (mp_<code>.tex 128x128,
+  ui_mphoto_<code>.tex 256x128, in swat.dat and front.dat) go by the code without the m; mpcharbounty.csv is the
+  roster, unlockables.csv its unlocks. The dialog fills all of it in: it takes one roster slot, copies the versus
+  files (.cr .ars .dam .msd .rep .sphs .swt) of the Showdown character on the same skeleton that matches best (its
+  story .cr closest to the new character's -- gbw, copied from mrk, gets mmrk's), points the .cr at the character's
+  own model, writes the name in every language, and converts the portraits you give (else the slot's for now). A
+  roster entry under a bare code (the crash: the game read "gbw" as "bw") is offered as the slot to repair.
+- **Texture fit**: a .tex dropped on a .dat folder, or copied there from the Workbench, over one of the game's of
+  another size, format or mip count opens a crop window (locked to the game's shape); the part kept is made that
+  size, format, mip count and flags (`de_x_tex_target`, `de_x_tex_fit`).
+- **Convert images**: Crop… on every picture, in every mode (a preset's page shape locks it); **mp photo** preset;
+  the two ink options merged into one with an ink colour.
+- The build log warns about a texture that differs from the one it replaces, and roster entries breaking the rule.

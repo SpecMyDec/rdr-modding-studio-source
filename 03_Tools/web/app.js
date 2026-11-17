@@ -6770,6 +6770,13 @@ function openMission(i) {
     + (m.archive ? '' : '  (no matching level archive)');
   $('#btnOpenLevel').disabled = !m.archive;
 
+  // the bottom half: the level's enemy roster for this mission's variation (cast.js)
+  if (window.rdrMissionEnemies && $('#missionEnemies')) {
+    const lvlName = String(m.Level || '').toLowerCase().replace(/^lvl_/, '');
+    window.rdrMissionEnemies($('#missionEnemies'), m.archive,
+      `lvl_${lvlName}_var_${parseInt(m.Variation, 10) || 1}.enm`);
+  }
+
   const box = $('#missionFields');
   box.innerHTML = '';
   for (const [label, col, blurb] of MISSION_FIELDS) {
@@ -7635,6 +7642,7 @@ function wmReset() {
     ? `${w.name} uses the model "${w.model || '?'}".`
     : 'Pick a weapon on the left.';
   $('#btnWmPick').disabled = !(w && w.model);
+  for (const id of ['#btnWmModImport', '#btnWmExportMod', '#btnWmExportXmod']) $(id).disabled = !(w && w.model);
   $('#btnWmCheck').disabled = true;
   $('#btnWmWrite').disabled = true;
   $('#wmStatus').textContent = '';
@@ -7678,6 +7686,69 @@ function wmShow(j, dry) {
   $('#btnWmWrite').disabled = false;
 }
 $('#btnWmPick').onclick = () => $('#wmFile').click();
+
+// .mod / .xmod: the weapon's model as the game has it, out (the PS2's, or made the Xbox's) and in (an .xmod made the
+// PS2's), over the weapon_model_export / weapon_model_import routes
+function wmModelStem() {
+  const m = (gunCurrent && gunCurrent.weapon && gunCurrent.weapon.model || '').trim();
+  return m.replace(/\.[^.]*$/, '');
+}
+async function wmExport(fmt) {
+  const w = gunCurrent && gunCurrent.weapon;
+  if (!w || !w.model) return;
+  if (await saveFile(`/api/weapon_model_export?target=${encodeURIComponent(w.model.trim())}&format=${fmt}`,
+                     wmModelStem() + '.' + fmt))
+    toast(`${wmModelStem()}.${fmt} saved (your Downloads folder).`, 'good');
+}
+$('#btnWmExportMod').onclick = () => wmExport('mod');
+$('#btnWmExportXmod').onclick = () => wmExport('xmod');
+$('#btnWmModImport').onclick = () => $('#wmModFile').click();
+async function wmModCall(body) {
+  const r = await fetch('/api/weapon_model_import', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                     body: JSON.stringify(body) });
+  return r.json();
+}
+$('#wmModFile').onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  const w = gunCurrent && gunCurrent.weapon;
+  if (!f || !w || !w.model) return;
+  const box = $('#wmResult');
+  box.innerHTML = '';
+  const line = (t, c) => { const d = el('div', c || '', t); d.style.marginTop = '4px'; box.append(d); };
+  const data = await new Promise((res, rej) => {
+    const rd = new FileReader();
+    rd.onload = () => res(String(rd.result).split(',')[1] || '');
+    rd.onerror = () => rej(rd.error);
+    rd.readAsDataURL(f);
+  });
+  const body = { target: w.model.trim(), filename: f.name, data, dry: true };
+  let j;
+  try { j = await wmModCall(body); } catch (ex) { return line('The Studio is not answering: ' + ex.message, 'bad'); }
+  const pl = j.plan || {};
+  if (j.error) return line(j.error, 'bad');
+  if (!j.ok) {
+    const p = j.problem || {};
+    line(p.message || 'The import was refused.', 'bad');
+    if (p.fix) line(p.fix);
+    line('Nothing was changed.', 'muted');
+    return;
+  }
+  line(`${f.name}: ${pl.triangles} triangles, ${pl.stored} of ${pl.slot} bytes (all ${pl.copies} copies fit).`, 'good');
+  for (const n of pl.notes || []) line(n, 'muted');
+  const ask = window.rdrAskInPage;
+  const go = ask ? await ask('Import ' + f.name,
+    `Replace the model "${w.model.trim()}" with ${f.name}` + (f.name.toLowerCase().endsWith('.xmod') ? ' (made the PS2\'s)' : '')
+      + ` in all ${pl.copies} copies on the working disc? Ctrl+Z undoes it.`,
+    [['Cancel', false], ['Import', true, 'primary']]) : true;
+  if (!go) return line('Nothing was changed.', 'muted');
+  try { j = await wmModCall({ ...body, dry: false }); } catch (ex) { return line('The Studio is not answering: ' + ex.message, 'bad'); }
+  if (!j.ok) { const p = j.problem || {}; line(p.message || j.error || 'The import was refused.', 'bad'); if (p.fix) line(p.fix); return; }
+  line(j.message || 'Imported.', 'good');
+  line(j.next || '', 'muted');
+  toast(j.message || 'Imported.', 'good');
+  try { await refreshHistory(); } catch {}
+};
 $('#wmFile').onchange = async (e) => {
   const f = e.target.files[0];
   if (!f) return;
@@ -8353,18 +8424,19 @@ async function renderCharacterParts(entry, host, onImported) {
     };
     const rfile = el('input');
     rfile.type = 'file';
-    rfile.accept = '.rsc,.rnt';
+    rfile.accept = '.rsc,.rnt,.xrsc,.xrnt';
     rfile.multiple = true;
     rfile.style.display = 'none';
     rfile.onchange = async () => {
       const files = [...rfile.files];
       rfile.value = '';
-      const rscF = files.find((f) => /\.rsc$/i.test(f.name));
-      const rntF = files.find((f) => /\.rnt$/i.test(f.name));
+      const rscF = files.find((f) => /\.x?rsc$/i.test(f.name));
+      const rntF = files.find((f) => /\.x?rnt$/i.test(f.name));
+      if (rscF && /\.xrsc$/i.test(rscF.name) && !rntF) return toast('Pick the .xrnt with the .xrsc (both)', 'bad');
       if (!rscF) return toast('Pick the .rsc (and its .rnt) the Blender add-on exported', 'bad');
       const b64 = async (f) => { const u = new Uint8Array(await f.arrayBuffer()); let x = '';
         for (let i = 0; i < u.length; i += 0x8000) x += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(x); };
-      const b = { name: entry.file, archive: entry.archive, rsc_b64: await b64(rscF),
+      const b = { name: entry.file, archive: entry.archive, rsc_b64: await b64(rscF), rsc_name: rscF.name,
                   rnt_b64: rntF ? await b64(rntF) : null, everywhere: true };
       try {
         const dry = await post('character_rsc_import', { ...b, dry: true });
@@ -8377,6 +8449,7 @@ async function renderCharacterParts(entry, host, onImported) {
         toast(`Importing ${rscF.name} into ${n} archive(s)…`, 'good');
         const r = await post('character_rsc_import', b);
         if (r.ok === false) return toast(r.error_text, 'bad');
+        for (const n of r.notes || []) toast(n, 'good');
         toast(`${entry.file}: replaced in ${r.copies.length} archive(s)` + (r.rebuilds ? `, ${r.rebuilds} queued to rebuild on the next launch` : '') + '. Ctrl+Z undoes it.', 'good');
         await refreshHistory();
         crChars = null;
@@ -8386,7 +8459,7 @@ async function renderCharacterParts(entry, host, onImported) {
     };
     const up = el('button', '', '↑ .rsc');
     up.style.fontSize = '11px';
-    up.title = 'Import a bundle exported by the RDR Blender add-on (pick the .rsc and its .rnt) over every copy of this character on the disc';
+    up.title = 'Import a bundle exported by the RDR Blender add-on (pick the .rsc and its .rnt, or the Xbox .xrsc and .xrnt) over every copy of this character on the disc';
     up.onclick = () => rfile.click();
     row.append(nm, down, up, rfile);
     box.append(row);
@@ -8983,6 +9056,16 @@ $('#btnLevelExportGo').onclick = async () => {
   // inside the exterior's box; "native" hands back the stated coordinates.
   const layout = $('#lvlExportNative')?.checked ? 'native' : 'auto';
   const stem = arc.replace(/[\/\\]/g, '_').replace(/\.DAT$/i, '');
+  const fmt = $('#lvlExportFormat')?.value || 'model';
+  if (fmt !== 'model') {
+    // the level's own files, for the PS2 (.rsc) or made the Xbox's (.xrsc)
+    try {
+      const name = stem + (fmt === 'xrsc' ? '_xbox' : '_ps2') + '.zip';
+      if (await saveFile(`/api/level_export?archive=${encodeURIComponent(arc)}&format=${fmt}`, name))
+        toast(`Exported ${name}: the level's files for the ${fmt === 'xrsc' ? 'Xbox' : 'PS2'}.`, 'good');
+    } finally { btn.disabled = false; btn.textContent = was; }
+    return;
+  }
   // Every area in the archive, not just the loaded one -- the point of this
   // button is the whole map, and the switcher above only changes what the
   // VIEWPORT is showing.
@@ -9937,7 +10020,49 @@ async function withProgress(label, fn) {
   }
 }
 
+// Which game Reset to stock is for: with a backup of the unedited Xbox game files ("unedited assets") there are two
+// stocks, so it asks; without one it is the PS2's, as it always was. -> 'ps2' | 'xbox' | null.
+function chooseReset() {
+  return new Promise((res) => {
+    const back = document.createElement('div');
+    back.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center';
+    const box = document.createElement('div');
+    box.style.cssText = 'margin-top:16vh;width:min(460px,92vw);background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:14px 16px';
+    box.innerHTML = '<div style="font:var(--t-head);color:var(--title);margin-bottom:8px">Reset to stock: which game?</div>'
+      + '<p class="muted" style="margin:0 0 12px">PS2: the working disc copied again from the stock disc (PCSX2).<br>'
+      + 'Xbox: the recomp\'s game files put back as "unedited assets" has them, and the Studio\'s files taken out of its mods folder.<br>'
+      + 'Either way every change to that game is lost; the Data Editor\'s mod files are kept as a Saved Mod.</p>';
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end';
+    const done = (v) => { back.remove(); document.removeEventListener('keydown', esc); res(v); };
+    const esc = (e) => { if (e.key === 'Escape') done(null); };
+    for (const [label, v, cls] of [['Cancel', null, ''], ['PS2 (PCSX2)', 'ps2', 'danger'], ['Xbox (recomp)', 'xbox', 'danger']]) {
+      const btn = document.createElement('button'); btn.textContent = label; if (cls) btn.className = cls;
+      btn.onclick = () => done(v); row.append(btn);
+    }
+    box.append(row); back.append(box);
+    back.addEventListener('mousedown', (e) => { if (e.target === back) done(null); });
+    document.addEventListener('keydown', esc);
+    document.body.append(back);
+  });
+}
+
 $('#btnRestore').onclick = async () => {
+  if (!window.__resetConfirmed) {
+    let xs = null;
+    try { xs = await post('de_x_xbox_state', {}); } catch { /* no Xbox side */ }
+    if (xs && xs.backup_exists) {
+      const which = await chooseReset();
+      if (!which) return;
+      if (which === 'xbox') {
+        if (!window.rdrDEStartJob) return toast('The Data Editor is not ready yet', 'bad');
+        const ok = await window.rdrDEStartJob('de_x_xbox_reset', { clear_mods: true }, 'Reset to stock (Xbox)');
+        toast(ok ? 'The Xbox game is back to its unedited files.' : 'The Xbox reset stopped (see the Log)', ok ? 'good' : 'bad');
+        if (ok && window.RDR && window.RDR.refreshLists) window.RDR.refreshLists();
+        return;
+      }
+      window.__resetConfirmed = true;                   // PS2 chosen in the dialog: no second question
+    }
+  }
   if (!window.__resetConfirmed
       && !confirm('Overwrite the working disc from the stock disc?\n' +
                   'Every change is lost. The stock disc is untouched.')) return;
@@ -9974,13 +10099,19 @@ function renderBuildButton(w) {
   buildWaiting = w || null;
   const q = (w && w.queued) || [];
   const n = (w && w.data_editor) || 0;
-  b.disabled = building || !(w && w.any) || (w && w.running);
-  b.textContent = building ? 'Building…' : 'Build';
+  const xbox = window.rdrPlatform && window.rdrPlatform() === 'xbox';
+  b.disabled = building || (w && w.running);
+  b.textContent = building ? 'Building…' : (xbox ? 'Build (Xbox)' : 'Build (PS2)');
+  if (xbox && !building && !(w && w.running)) {
+    b.title = 'Build into the Xbox game: the mod made the Xbox\'s files, into the recomp\'s mods folder'
+      + (q.length ? ' (first ' + q.length + ' .dat file(s) with Studio changes are rebuilt on the working disc)' : '');
+    return;
+  }
   const lines = [];
   if (q.length) lines.push(q.length + ' .dat file(s) to rebuild with Studio changes: ' + q.map((p) => p.archive).join(', '));
   if (n) lines.push(n + ' Data Editor file(s) waiting' + (w.folders && w.folders.length ? ' (' + w.folders.join(', ') + ')' : ''));
   b.title = building ? 'Building…' : (w && w.running) ? 'The Data Editor is busy'
-    : lines.length ? 'Build these into the working disc:\n' + lines.join('\n') : 'Nothing to build: every change is on the working disc';
+    : 'Build into the PS2 game (the working disc)' + (lines.length ? ':\n' + lines.join('\n') : ': the Data Editor\'s mods folder');
 }
 
 async function waitDataEditorJob(label) {
@@ -9993,32 +10124,54 @@ async function waitDataEditorJob(label) {
   }
 }
 
-if ($('#btnBuild')) $('#btnBuild').onclick = async () => {
-  const w = buildWaiting;
-  if (!w || !w.any || building) return;
+window.rdrRenderBuild = () => renderBuildButton(buildWaiting);
+
+// The build runs behind the app: the log bar at the bottom shows it (and a green Done!), the app can be looked
+// around meanwhile, and what would change something waits (xboxmode.js refuses those requests while it runs).
+function logBar(text, cls) {
+  const s = $('#deStatus');
+  if (!s) return;
+  s.textContent = text; s.title = text;
+  s.style.color = cls === 'done' ? 'var(--grn)' : cls === 'bad' ? 'var(--red)' : '';
+  s.style.fontWeight = cls === 'done' ? '600' : '';
+}
+
+// the top Build; -> true when it went through (the Xbox's Play builds first: xboxmode.js)
+async function runTopBuild() {
+  const w = buildWaiting || {};
+  const xbox = window.rdrPlatform && window.rdrPlatform() === 'xbox';
+  if (building) return false;
+  let ok = false;
   building = true; renderBuildButton(w);
+  document.body.classList.add('building');
   try {
-    await withProgress('Building your changes into the working disc', async () => {
-      if ((w.queued || []).length) await rebuildQueuedArchives();
-      if (w.data_editor) {
-        const r = await post('de_build', {});
-        if (r && r.ok === false) throw new Error(r.error_text || 'the Data Editor refused');
-        const j = await waitDataEditorJob('Data Editor build');
-        if (j.state !== 'done') throw new Error('the Data Editor build stopped: ' + ((j.log || []).slice(-1)[0] || j.state));
-      }
-    });
-    toast('Built: every change is on the working disc.', 'good');
-    post('note', { text: 'Build complete: every change is on the working disc.' }).catch(() => {});
+    if ((w.queued || []).length) {
+      logBar('Building: rebuilding ' + w.queued.length + ' .dat file(s) with your Studio changes…');
+      await rebuildQueuedArchives();
+    }
+    {
+      const route = xbox ? 'de_x_xbox_build' : 'de_build';
+      const label = xbox ? 'Build into the Xbox game' : 'Build into the PS2 game';
+      if (!window.rdrDEStartJob) throw new Error('the Data Editor is not ready yet');
+      const ok = await window.rdrDEStartJob(route, {}, label);
+      if (!ok) throw new Error(label + ' stopped (see the Log)');
+    }
+    post('note', { text: 'Build complete.' }).catch(() => {});
     if (window.RDR && window.RDR.refreshLists) window.RDR.refreshLists();
+    ok = true;
   } catch (e) {
     post('note', { text: 'Build failed: ' + e.message }).catch(() => {});
+    logBar('Build failed: ' + e.message, 'bad');
     toast('Build failed: ' + e.message, 'bad');
-    alert('Build failed\n\n' + e.message);
   } finally {
     building = false;
+    document.body.classList.remove('building');
     refreshDiscState();
   }
-};
+  return ok;
+}
+if ($('#btnBuild')) $('#btnBuild').onclick = runTopBuild;
+window.rdrBuild = runTopBuild;
 
 async function rebuildQueuedArchives() {
   // One rebuild per archive, every queued file in it, as a job polled here.
@@ -10027,9 +10180,11 @@ async function rebuildQueuedArchives() {
   if (r && r.ok === false) throw new Error(r.error_text || 'the rebuild was refused');
   let job = r.job || {};
   while (job.state === 'running') {
-    if (label) label.textContent = `Rebuilding ${job.total} .dat file${job.total === 1 ? '' : 's'} with your changes`
+    const line = `Rebuilding ${job.total} .dat file${job.total === 1 ? '' : 's'} with your changes`
       + (job.archive ? ` — ${job.done + 1} / ${job.total}: ${job.archive}` : '')
       + (/SWAT/i.test(job.archive || '') ? ' (swat.dat takes a few minutes)' : '');
+    if (label) label.textContent = line;
+    logBar('Building: ' + line);
     await new Promise((res) => setTimeout(res, 1500));
     try { job = (await api('disc_state')).rebuild_job || {}; } catch { /* restarting the disc: ask again */ }
   }
@@ -10101,6 +10256,11 @@ async function appSetupRefresh() {
   $('#asVanilla').textContent = s.vanilla || 'not set';
   $('#asWorking').textContent = s.working || 'not set';
   $('#asPcsx2').textContent = s.pcsx2 || 'not configured';
+  try {                                                     // the Xbox recomp (rdrstudio/xboxmode.py)
+    const x = await post('de_x_xbox_state', {});
+    if ($('#asRecomp')) $('#asRecomp').textContent = x.exe ? x.exe + (x.exe_ok ? '' : '  (not there)') : 'not set';
+    if ($('#asRecompAssets')) $('#asRecompAssets').textContent = x.assets ? x.assets + (x.assets_ok ? '' : '  (not there)') : 'not set';
+  } catch { /* an older server */ }
   $('#asPcsx2Note').textContent = s.pcsx2_ok ? ''
     : 'Play stays off until this points at a real pcsx2.exe.';
   // DOM-built rather than a template string: paths carry quotes and
@@ -10305,6 +10465,34 @@ if ($('#asClearPcsx2')) $('#asClearPcsx2').onclick = async () => {
   await api.set_pcsx2(''); appSetupRefresh(); refreshDiscState();
 };
 
+// the Xbox recomp's folder and its game files, chosen in the system's folder dialog
+async function pickRecompFolder(key) {
+  const api = shellApi();
+  if (!api || !api.pick_any_folder) return toast('Choosing a folder needs the Studio app', 'warn');
+  let cur = '';
+  try {
+    const x = await post('de_x_xbox_state', {});
+    cur = key === 'exe' ? (x.exe || '').split(/[\\/]/).slice(0, -1).join('\\') : (x.assets || '');
+  } catch { /* none set */ }
+  const d = await api.pick_any_folder(cur);
+  if (!d) return;
+  try {
+    await post('de_x_xbox_set', key === 'exe' ? { exe: d } : { assets: d });
+    toast(key === 'exe' ? 'Xbox recomp: ' + d : 'Xbox game files: ' + d, 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+  appSetupRefresh();
+}
+if ($('#asPickRecomp')) $('#asPickRecomp').onclick = () => pickRecompFolder('exe');
+if ($('#asPickRecompAssets')) $('#asPickRecompAssets').onclick = () => pickRecompFolder('assets');
+if ($('#asClearRecomp')) $('#asClearRecomp').onclick = async () => {
+  try { await post('de_x_xbox_set', { exe: '' }); } catch (e) { return toast(e.message, 'bad'); }
+  appSetupRefresh();
+};
+if ($('#asClearRecompAssets')) $('#asClearRecompAssets').onclick = async () => {
+  try { await post('de_x_xbox_set', { assets: '' }); } catch (e) { return toast(e.message, 'bad'); }
+  appSetupRefresh();
+};
+
 if ($('#asPickWorking')) $('#asPickWorking').onclick = async () => {
   const api = shellApi(); if (!api) return;
   const v = await api.pick_iso('working');
@@ -10353,7 +10541,12 @@ async function refreshDiscState() {
     renderBuildButton(d.build_waiting);
     const play = $('#btnPlay');
     if (play) {
-      if (pendingRebuild.length) {
+      // a build is writing the working disc: Play waits (PCSX2 would read a half-written disc)
+      play.disabled = !!d.building;
+      play.style.opacity = d.building ? '.45' : '';
+      if (d.building) {
+        play.title = d.building + ' in progress: Play is available when it finishes.';
+      } else if (pendingRebuild.length) {
         play.textContent = 'Rebuild and play';
         play.classList.add('rebuildplay');
         play.title = 'These .dat files have changes waiting for more room. They are rebuilt (once each, with every '

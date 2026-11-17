@@ -57,6 +57,10 @@ TEXT_EXTS = ('.csv', '.txt', '.cr', '.skel', '.lvl', '.znes', '.bnds', '.lnes', 
              '.ars', '.tail', '.guns', '.colors', '.strtbl_txt')
 
 
+class Cancelled(BaseException):     # not caught by the build's "except Exception" around its optional steps
+    """A job stopped at a safe point because the user asked (Cancel)."""
+
+
 class Busy(Exception):
     """The working disc cannot be written right now (PCSX2 has it, another writer, ...)."""
 
@@ -73,6 +77,15 @@ class _Bytes:
 
     def close(self):
         pass
+
+
+XBOX_ONLY = ('.xrsc', '.xrnt', '.xznes', '.xtex', '.xmod', '.xshadows', '.xlsh', '.xfilm', '.xhud', '.xmmb', '.xrain',
+             '.xflares', '.xalpha', '.xbd', '.xhd')
+
+
+def is_xbox_only(name):
+    """An Xbox game file (its PS2 copy is made beside it; the Xbox one stays in the mods folder, never packed)."""
+    return name.lower().endswith(XBOX_ONLY)
 
 
 def _md5(b):
@@ -100,6 +113,7 @@ class DataEditor:
         self.job = {"state": "idle", "label": "", "log": [], "started": 0.0, "result": None}
         self._index = None
         PB._clean = self._clean_for_pb        # New .dat extracts archives with the Studio's reader
+        self._drop_old_unpacked()
 
     # ------------------------------------------------------------------ the unedited disc's index
 
@@ -151,15 +165,32 @@ class DataEditor:
             os.replace(tmp, clean)
         return clean
 
-    def _extracted(self, data):
-        """An archive (bytes) extracted once into the cache, keyed by its md5."""
-        folder = os.path.join(self.cache, 'base_' + _md5(data))
-        if not os.path.isdir(folder):
-            tmp = folder + '.part'
-            shutil.rmtree(tmp, ignore_errors=True)
-            self.extract_bytes(data, tmp)
-            os.replace(tmp, folder)
-        return folder
+    @staticmethod
+    def _files_of(data):
+        """An archive (bytes) as {lower case path: bytes}, as pack_folder reads its extracted folder (no folder made:
+        swat.dat is 47,115 files)."""
+        arc = D.Dave(_Bytes(data), "archive")
+        return {e.name.lower(): arc.read(e) for e in arc.entries if not e.name.endswith('/')}
+
+    def _drop_old_unpacked(self):
+        """The extracted copies earlier versions built from (cache/base_<md5>, one per archive version, ~47,000 files
+        each for swat.dat, and the work folders), unused since builds run in memory: moved aside at once, deleted
+        in the background (a stop half way is picked up at the next start)."""
+        trash = os.path.join(self.cache, '_old_unpacked')
+        try:
+            names = os.listdir(self.cache)
+        except OSError:
+            return
+        for n in names:
+            if n.startswith('base_') or n in ('work', 'work_rebuild') or n.endswith('.part'):
+                try:
+                    os.makedirs(trash, exist_ok=True)
+                    os.replace(os.path.join(self.cache, n), os.path.join(trash, n))
+                except OSError:
+                    pass
+        if os.path.isdir(trash):
+            threading.Thread(target=shutil.rmtree, args=(trash, True), daemon=True,
+                             name='data-editor-cache-cleanup').start()
 
     # ------------------------------------------------------------------ building an archive
 
@@ -189,6 +220,8 @@ class DataEditor:
         for root, _d, fs in os.walk(folder):
             for f in fs:
                 if f.lower() == PB.FOLDER_FILE:                 # which disc folder it belongs in: not a game file
+                    continue
+                if is_xbox_only(f):                             # kept beside its PS2 copy, never packed
                     continue
                 full = os.path.join(root, f)
                 files[os.path.relpath(full, folder).replace(os.sep, '/').lower()] = open(full, 'rb').read()
@@ -345,10 +378,38 @@ class DataEditor:
         loose, targeted, every, master = PB.mod_files(self.mods, list(index['archives']) + list(fresh))
         return index, holders, fresh, loose, targeted, every, master
 
+    _sweep_lock = threading.Lock()
+
+    def _sweep_in_background(self):
+        """Xbox files put in the mods folder from outside given their PS2 copies -- on a thread of its own, one sweep
+        at a time: done inside the page's overview request it took minutes for a whole Xbox map, the page asked again
+        and again, the sweeps piled up on the same files and every other request of the Studio waited behind them."""
+        if not self._sweep_lock.acquire(blocking=False):
+            return                                       # one is running
+
+        def run():
+            try:
+                from .dataeditor_more import more as _more
+                for n in _more(self).xbox_sweep():
+                    self.s.note('Data Editor: ' + n)
+            except Exception:                           # noqa: BLE001
+                pass
+            finally:
+                self._sweep_lock.release()
+        threading.Thread(target=run, daemon=True, name='data-editor-xbox-sweep').start()
+
     def overview(self):
         """The folders (Master, every archive, new archives) and each one's files with their status."""
+        if self.job['state'] != 'running':
+            self._sweep_in_background()
         index, holders, fresh, loose, targeted, every, master = self.mod_files()
         last = self._last_build()
+        try:                                       # Game: Xbox -- built or not as the last Xbox build had it
+            from .xboxmode import xbox as _xbox
+            if _xbox(self).platform() == 'xbox':
+                last = _xbox(self).last_build()
+        except Exception:                                       # noqa: BLE001
+            pass
         st = self.state()
         health = self.check_state() if st['archives'] else {}
         modes = PB.master_modes(self.mods)
@@ -356,7 +417,22 @@ class DataEditor:
         for p in sorted(index['archives'], key=lambda a: (a != 'swat.dat', list(index['archives']).index(a))):
             folders.append({'key': p, 'label': p, 'kind': 'archive',
                             'injected': p in st['archives'], 'health': health.get(p)})
+        # the Xbox game's own levels the PS2 disc has not (Coliseum): base game folders of the Xbox side, there
+        # whether a mod has their files yet or not (a Build makes them the PS2's and adds them to the disc)
+        try:
+            from .xboxmode import xbox as _xbox
+            X = _xbox(self)
+            X.xbox_level_archives()
+            xgame = sorted(a.lower() for a in getattr(X, 'shipped_levels', set())
+                           if a.lower() not in index['archives'])
+        except Exception:                                       # noqa: BLE001
+            xgame = []
+        for p in xgame:
+            folders.append({'key': p, 'label': p + '  (Xbox game)', 'kind': 'new', 'xbox': True,
+                            'injected': p in st['archives'], 'health': health.get(p)})
         for p in sorted(fresh):
+            if p in xgame:
+                continue
             folders.append({'key': p, 'label': p + '  (new archive)', 'kind': 'new',
                             'injected': p in st['archives'], 'health': health.get(p)})
         files = []
@@ -367,7 +443,7 @@ class DataEditor:
             md5 = _md5(open(path, 'rb').read())
             parts = k.split('/')
             folder = 'master' if parts[0] == 'master' else next(
-                (a for a in list(index['archives']) + list(fresh) if k.startswith(a + '/')), '')
+                (a for a in list(index['archives']) + list(fresh) + xgame if k.startswith(a + '/')), '')
             into, mode = [], None
             if folder == 'master':
                 mode = PB.master_mode(low, modes, holders)
@@ -437,21 +513,234 @@ class DataEditor:
         for pth, r in sf.items():
             d = pth.rsplit('/', 1)[0] if '/' in pth else ''
             last_in[d] = max(last_in.get(d, 0), r['lba'])
+        # A code-modded executable (bigger than the shipped one) stays at the end: in its shipped place it would push
+        # every file after it along (the whole disc rewritten), and the game reads it once, at boot.
+        moved_elf = {p for p in files if p == 'slus_205.00' and p in sf and files[p]['size'] != sf[p]['size']}
+
         def key(item):
             pth, r = item
+            if pth in moved_elf:
+                return (1 << 31, 2, pth)
             if pth in sf:
                 return (sf[pth]['lba'], 0, pth)
             d = pth.rsplit('/', 1)[0] if '/' in pth else ''
             return (last_in.get(d, 1 << 30), 1, pth)
         plan, cur, moved = [], start, False
         for pth, r in sorted(files.items(), key=key):
-            want = sf[pth]['lba'] if pth in sf else cur
+            want = sf[pth]['lba'] if pth in sf and pth not in moved_elf else cur
             lba = max(want, cur)
             plan.append((pth, r, lba))
             if lba != r['lba']:
                 moved = True
             cur = lba + max(1, -(-r['size'] // SECTOR))
         return plan if moved else None
+
+    def _warn_textures(self, todo, log):
+        """A .tex replacing one of the game's at another size, format or mip count, named in the log. The game reads
+        a texture by the shipped one's layout: a 2048x1024, 10-level picture in place of a 128x128 roster portrait
+        crashed the Showdown menu, and a 128x128 in place of a 256x128 photo drew scrambled."""
+        try:
+            van = self.s.vanilla
+        except Exception:                                       # noqa: BLE001
+            van = None
+        if van is None:
+            return
+        seen = set()
+        for p, items in todo.items():
+            for inner, path, _how in items:
+                n = inner.rsplit('/', 1)[-1]
+                if not n.endswith('.tex') or (p, n) in seen:
+                    continue
+                seen.add((p, n))
+                try:
+                    stock = van.archive(p.upper()).read(n)
+                    mine = open(path, 'rb').read(14)
+                except Exception:                               # noqa: BLE001
+                    continue
+                if len(stock) < 8 or len(mine) < 8:
+                    continue
+                sw, sh, sf, sl = struct.unpack_from('<4H', stock)
+                mw, mh, mf, ml = struct.unpack_from('<4H', mine)
+                if (sw, sh, sf, sl) != (mw, mh, mf, ml):
+                    log('  WARNING %s: %s is %dx%d (format %d, %d level%s) where the game\'s is %dx%d (format %d, '
+                        '%d level%s): it will draw wrong, and a big one can crash the game. Convert the picture '
+                        'with the matching preset, or "Match a game texture".'
+                        % (p, n, mw, mh, mf, ml, '' if ml == 1 else 's', sw, sh, sf, sl, '' if sl == 1 else 's'))
+
+    def _warn_roster(self, log):
+        """The Showdown roster (mpcharbounty.csv, unlockables.csv) checked against the game's rule: a character's
+        code is m + the code its name and portraits go by (mjck -> jck: "Jack Swift", mp_jck.tex,
+        ui_mphoto_jck.tex), with its own m<code>.cr. 48 of 48 shipped entries follow it; an entry that does not
+        is read without its first letter."""
+        folder = self.folder_path('swat.dat')
+        csvp = os.path.join(folder, 'mpcharbounty.csv')
+        if not os.path.isfile(csvp):
+            return
+        try:
+            rows = [l.split(',')[0].strip() for l in open(csvp, encoding='latin-1').read().splitlines()[1:]
+                    if l.strip() and not l.startswith('#')]
+        except OSError:
+            return
+        g = getattr(self.s, 'disc', None)
+        def has(arch, name):
+            for f in (self.folder_path(arch),):
+                if os.path.isfile(os.path.join(f, name)):
+                    return True
+            try:
+                return g is not None and g.archive(arch.upper()).find(name) is not None
+            except Exception:                                   # noqa: BLE001
+                return False
+        unl = os.path.join(folder, 'unlockables.csv')
+        unlocked = None
+        if os.path.isfile(unl):
+            unlocked = {l.split(',')[0].strip() for l in open(unl, encoding='latin-1').read().splitlines()[1:]
+                        if ',character,' in l}
+        # the select screen's own list: the <FONTGRIDDATA:y:<code>:0> lines of postermultiview.swui (both copies)
+        grids = {}
+        for arch in ('swat.dat', 'front.dat'):
+            p = os.path.join(self.folder_path(arch), 'postermultiview.swui')
+            try:
+                t = open(p, encoding='latin-1').read() if os.path.isfile(p) else \
+                    (g.archive(arch.upper()).read('postermultiview.swui').decode('latin-1') if g is not None else None)
+            except Exception:                                   # noqa: BLE001
+                t = None
+            if t:
+                grids[arch] = {x.lower() for x in re.findall(r'<FONTGRIDDATA:\w:(\w+):\d+>', t)}
+        for c in rows:
+            for arch, codes in grids.items():
+                if c.startswith('m') and len(c) > 1 and c[1:].lower() not in codes:
+                    log('  WARNING Showdown roster: %s is not on the select screen\'s list (%s postermultiview.swui has '
+                        'no <FONTGRIDDATA:y:%s:0>): the game neither shows nor offers it. Add to Showdown writes it.'
+                        % (c, arch, c[1:]))
+            if not c.startswith('m') or len(c) < 2:
+                log('  WARNING swat.dat mpcharbounty.csv: "%s" does not start with m. The game reads a Showdown '
+                    'character as m + its code (mjck -> jck): this one would be looked up as "%s". Use "m%s", '
+                    'with an m%s.cr.' % (c, c[1:], c, c))
+                continue
+            base = c[1:]
+            missing = [n for a, n in (('swat.dat', c + '.cr'), ('front.dat', 'mp_%s.tex' % base),
+                                      ('front.dat', 'ui_mphoto_%s.tex' % base)) if not has(a, n)]
+            if missing:
+                log('  WARNING Showdown roster: %s has no %s' % (c, ', '.join(missing)))
+            if unlocked is not None and c not in unlocked:
+                log('  WARNING Showdown roster: %s is in mpcharbounty.csv but not in unlockables.csv' % c)
+
+    # ------------------------------------------------------------------ the second Showdown lineup (a code mod)
+
+    def lineup_wanted(self, raw=False):
+        """The automatic code mods the mods folder asks for: 'lineup2' when a character is on lineup 2
+        (postermultiview.swui <FONTGRIDDATA:y:<code>:1>), 'lineup2bg' when lineup 2 has its own background too."""
+        from .dataeditor_more import more as _more
+        m = _more(self)
+        text, _from = m._poster_text('front.dat')
+        want = set()
+        if text and re.search(r'<FONTGRIDDATA:\w:\w+:0*[1-9]\d*>', text):
+            want.add('lineup2')
+            if all(m._mod_or_disc('front.dat', n) for n in ('ui_characterlineup2l24b.tex', 'ui_characterlineup2r24b.tex')):
+                want.add('lineup2bg')
+        # Coliseum's map in the mods folder: the game's own "never on the PS2" check of lvl_colseum taken off
+        if any(os.path.isdir(os.path.join(self.mods, g, n)) for g, n in (('lvls_m2', 'colseum2.dat'), ('lvls_m4', 'colseum4.dat'))):
+            want.add('colseum')
+        # a character model in the mods folder: players 2-4 with no alternate texture keep its own (codemods_alttex)
+        top = self.folder_path('swat.dat')
+        if os.path.isdir(top) and any(f.lower().endswith('_lods.rsc') for _r, _d, fs in os.walk(top) for f in fs):
+            want.add('alttex')
+        if raw:
+            return want
+        from . import hookmods as _hooks                       # Script Hooks: the ones switched off stay out
+        off = _hooks.disabled(self, 'ps2')
+        want -= off
+        if 'trainer' not in off:                                # the trainer: on the working disc whenever it is on
+            want |= set(_hooks.TRAINER_KEYS)
+        if 'unlocknew' not in off and self.unlock_added_names():
+            want.add('unlocknew')
+        return want
+
+    def unlock_added_names(self):
+        """The Showdown characters and stages the mod's unlockables.csv adds (Script Hooks: unlock added ones)."""
+        from . import codemods_unlocknew as CU
+        from .dataeditor_more import more as _more
+        try:
+            d = _more(self)._mod_or_disc('swat.dat', 'unlockables.csv')
+        except Exception:                                       # noqa: BLE001
+            d = None
+        return CU.added_names(d.decode('latin-1') if d else '')
+
+    def _apply_lineup_mod(self, log):
+        """The working disc's executable given (or rid of) the second lineup, keeping any other code mods on it.
+        -> True when it changed."""
+        from . import codemods as C
+        want = self.lineup_wanted()
+        with open(self.s.modded_path, 'rb') as f:
+            files, _rec = C.iso_files(f)
+            off, size = files['slus_205.00']
+            f.seek(off)
+            cur_elf = f.read(size)
+            cur = C.elf_features(cur_elf)
+        if cur is None:
+            if want:
+                log('  The working disc\'s executable is not one the Studio knows: the second Showdown lineup was '
+                    'not added (lineup 2 will not show)')
+            return False
+        from . import hookmods as _hooks
+        managed = set(C.AUTO_KEYS) | set(_hooks.TRAINER_KEYS)   # put on and taken off by the Script Hooks
+        desired = [k for k in C.KEYS if (k in cur and k not in managed) or k in want]
+        if set(desired) == set(cur) and not desired:
+            return False
+        with open(self.s.vanilla_path, 'rb') as f:
+            vf, _r = C.iso_files(f)
+            voff, vsize = vf['slus_205.00']
+            f.seek(voff)
+            vanilla = f.read(vsize)
+        mapping = dict(_hooks.controls(self), _unlocknew=self.unlock_added_names() if 'unlocknew' in want else [])
+        with C.controls(mapping):                               # the trainer's combos as the Script Hooks map them
+            new_elf = C.patch_elf(vanilla, desired)[0] if desired else vanilla
+        # the same mods by name is not enough: a newer Studio may carry a newer version of one (compare the code itself)
+        if new_elf == cur_elf:
+            return False
+        updated = set(desired) == set(cur)
+        with self.s.lock:
+            self._take_disc()
+            try:
+                with open(self.s.modded_path, 'r+b') as f:
+                    files, records = C.iso_files(f)
+                    off, size = files['slus_205.00']
+                    room = -(-size // SECTOR) * SECTOR
+                    f.seek(0, 2)
+                    end = f.tell()
+                    if len(new_elf) > room and off + room == end:
+                        # it is the last file (appended by an earlier build): the image ends before it again
+                        f.seek(16 * SECTOR)
+                        pvd = bytearray(f.read(SECTOR))
+                        struct.pack_into('<I', pvd, 80, off // SECTOR)
+                        struct.pack_into('>I', pvd, 84, off // SECTOR)
+                        f.seek(16 * SECTOR)
+                        f.write(pvd)
+                        f.truncate(off)
+                    if len(new_elf) <= room:
+                        f.seek(off)
+                        f.write(new_elf + bytes(room - len(new_elf)))
+                        rec = records['slus_205.00']
+                        f.seek(rec + 10)
+                        f.write(struct.pack('<I', len(new_elf)) + struct.pack('>I', len(new_elf)))
+                    else:
+                        C._relocate_elf(f, records, new_elf)
+                    f.flush()
+            finally:
+                self._give_back()
+        added = sorted(set(desired) - set(cur))
+        gone = sorted(set(cur) - set(desired))
+        said = [t for k, t in (('lineup2', 'second Showdown lineup added (L1 / R1 on the select screen)'),
+                               ('lineup2bg', 'lineup 2 has its own background')) if k in added]
+        said += [t for k, t in (('lineup2', 'second Showdown lineup taken off (no character on lineup 2)'),
+                                ('lineup2bg', 'lineup 2\'s own background taken off')) if k in gone]
+        titles = {f[0]: f[1] for f in C.FEATURES}
+        said += ['%s added' % titles.get(k, k) for k in added if k not in ('lineup2', 'lineup2bg')]
+        said += ['%s taken off' % titles.get(k, k) for k in gone if k not in ('lineup2', 'lineup2bg')]
+        if updated:
+            said.append('its code mods brought up to date with this Studio (%s)' % ', '.join(desired))
+        log('  The working disc\'s executable: ' + '; '.join(said))
+        return True
 
     def restore_disc_order(self, log=None):
         """The working disc rewritten with its files in the shipped order (disc_order_plan). The image up to the
@@ -689,15 +978,18 @@ class DataEditor:
             done.append(name)
         return done
 
-    def delete_files(self, keys):
+    def delete_files(self, keys, permanent=False):
+        """The mods folder's files: to the Recycle Bin, or deleted outright when the user chose so."""
         if self.job['state'] == 'running':
             raise Busy('A build is running: wait for it to finish before deleting files.')
-        gone = []
+        from .dataeditor_more import recycle as _recycle
+        gone, paths = [], []
         for k in keys:
             p = self._safe(k)
             if os.path.isfile(p):
-                os.remove(p)
+                paths.append(p)
                 gone.append(k)
+        _recycle(paths, permanent)
         return gone
 
     def read_file(self, key, base=None):
@@ -764,6 +1056,10 @@ class DataEditor:
         """Where an imported archive (tomb.dat) goes: the game's archive of that name (in the folder dropped on when
         several have it), else a new archive in the lvls_ folder dropped on, or by its player count."""
         name = name.lower()
+        if re.fullmatch(r'stream\d\.dat', name) and 'streams.dat' in self.archives():
+            # the Xbox splits the streams over stream0-4.dat; the PS2 has them all in streams.dat (the same 8,361
+            # .stm files, byte for byte, 2026-11-16)
+            return 'streams.dat'
         into = (into or '').strip('/').lower()
         hits = [a for a in self.archives() if a.rsplit('/', 1)[-1] == name]
         if into.endswith('.dat') and into.rsplit('/', 1)[-1] == name:
@@ -774,17 +1070,64 @@ class DataEditor:
                 return h
         if hits:
             return hits[0]
+        half = self.showdown_half(name)
+        if half and group in ('', 'lvls_m2', 'lvls_m4'):
+            group = half                       # a Showdown map half: <name>2.dat is read from lvls_m2, <name>4 from m4
         if not group:
-            stem = os.path.splitext(name)[0]
-            group = 'lvls_m2' if stem.endswith('2') else 'lvls_m4' if stem.endswith('4') else 'lvls_sng'
+            group = 'lvls_sng'
         return '%s/%s' % (group, name)
 
-    def import_archive(self, name, data, into=''):
+    @staticmethod
+    def showdown_half(name):
+        """'lvls_m2' / 'lvls_m4' for a Showdown map half by its name (colseum2.dat, mymap_m4.dat ...), else None."""
+        stem = os.path.splitext(name.rsplit('/', 1)[-1].lower())[0]
+        m = re.search(r'(?:^|[_\-.])m([24])$', stem) or re.search(r'([24])$', stem)
+        return 'lvls_m' + m.group(1) if m else None
+
+    def place_showdown_halves(self, log):
+        """Showdown map halves in the mods folder sitting in the other half's folder (colseum2.dat in lvls_m4) moved
+        to where the game reads them -- unless one of that name is there already."""
+        for grp in ('lvls_m2', 'lvls_m4'):
+            folder = os.path.join(self.mods, grp)
+            if not os.path.isdir(folder):
+                continue
+            for n in sorted(os.listdir(folder)):
+                src = os.path.join(folder, n)
+                want = self.showdown_half(n) if n.lower().endswith('.dat') and os.path.isdir(src) else None
+                if want and want != grp:
+                    dst = os.path.join(self.mods, want, n)
+                    if os.path.exists(dst):
+                        log('  %s/%s belongs in %s, which has one of that name already: left where it is' % (grp, n, want))
+                        continue
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.move(src, dst)
+                    try:
+                        from .dataeditor_more import write_folder_file
+                        write_folder_file(dst, want + '/' + n)
+                    except Exception:                           # noqa: BLE001
+                        pass
+                    log('  %s moved to %s/%s: the game reads <name>%s.dat only from there' % (grp + '/' + n, want, n,
+                                                                                            want[-1]))
+
+    def dat_place(self, name, into=''):
+        """{archive, exists, files}: where an imported .dat would go, and whether the mods folder has that archive's
+        folder with files in it already (the page then asks: replace or merge)."""
+        rel = self.place_archive(name, into)
+        dest = os.path.join(self.mods, *rel.split('/'))
+        n = sum(len(fs) for _r, _d, fs in os.walk(dest)) if os.path.isdir(dest) else 0
+        return {'archive': rel, 'exists': n > 0, 'files': n}
+
+    def import_archive(self, name, data, into='', replace=False):
         """An uploaded .dat into the mods folder as its .dat folder. For an archive the game has, only the files that
         differ from the working disc's copy are kept (so the Studio's edits are not counted as changes)."""
         if self.job['state'] == 'running':
             raise Busy('A build is running: wait for it to finish before importing.')
         rel = self.place_archive(name, into)
+        if replace:                            # the mods folder's copy of the archive goes first (to the Recycle Bin)
+            old = os.path.join(self.mods, *rel.split('/'))
+            if os.path.isdir(old) and os.listdir(old):
+                from .dataeditor_more import recycle as _recycle
+                _recycle([old])
         tmp = os.path.join(self.cache, 'import')
         shutil.rmtree(tmp, ignore_errors=True)
         n = self.extract_bytes(data, tmp)
@@ -794,7 +1137,25 @@ class DataEditor:
         if rel in self.archives():
             files = self._disc_files()
             disc = self._disc_read(files[rel]) if rel in files else None
-        xbox = 0
+        xbox = xsame = merged = 0
+        from .dataeditor_more import more as _more_x
+        mx = _more_x(self)
+        import modconvert as MC
+        # an Xbox .dat? (Xbox-only kinds in it, or the Xbox game's own files)  And the levels whose geometry it
+        # edits: their whole place stays the Xbox's (its zone, nav and bound files match the Xbox's chunks, not
+        # the PS2's), unedited files too
+        allf = [(os.path.join(r, f), f) for r, _d, fs in os.walk(tmp) for f in fs]
+        is_xbox = any(os.path.splitext(f)[1].lower() in MC.BACK or f.lower().endswith(('.xbd', '.xhd'))
+                      for _p, f in allf)
+        own_levels = set()
+        for full, f in allf:
+            if f.lower().startswith('lvl_') and f.lower().endswith('.xrsc') and not mx.xbox_original(f, open(full, 'rb').read()):
+                own_levels.add(re.sub(r'(_nav|_view)?\.xrsc$', '', f.lower()))
+
+        def level_place(f):
+            low = f.lower()
+            return any(re.match(re.escape(s) + r'[_.]', low) for s in own_levels) and (
+                os.path.splitext(low)[1] in MC.BACK or low.endswith(PB.PLACE_EXTS))
         for root, _d, fs in os.walk(tmp):
             for f in fs:
                 full = os.path.join(root, f)
@@ -803,20 +1164,54 @@ class DataEditor:
                     xbox += 1
                 if disc is not None:
                     _p, raw = PB.read_entry(disc, inner)
-                    if raw is not None and raw == open(full, 'rb').read():
+                    mine = open(full, 'rb').read()
+                    if raw is not None and raw == mine and not level_place(f):
                         same += 1
+                        continue
+                    if not level_place(f) and mx.xbox_original(f, mine):
+                        xsame += 1                         # the Xbox game's own, unedited: the PS2 disc's copy is used
                         continue
                 out = os.path.join(dest, *inner.split('/'))
                 os.makedirs(os.path.dirname(out), exist_ok=True)
-                shutil.copyfile(full, out)
+                body = None
+                if is_xbox and not level_place(f) and os.path.splitext(f)[1].lower() not in MC.BACK:
+                    # an edited file the PS2 game has under the same name: its changes over the PS2's own
+                    if disc is not None:
+                        ps2own = raw
+                    else:
+                        ps2own = mx._game_file(f)
+                    if ps2own is not None and MC.is_text(ps2own):
+                        mine = open(full, 'rb').read()
+                        if mine != ps2own:
+                            body, _how = MC.same_name_to_ps2(mine, f, mx.xbox_clean(f), ps2own)
+                            merged += body != mine
+                if body is None:
+                    shutil.copyfile(full, out)
+                else:
+                    with open(out, 'wb') as fh:
+                        fh.write(body)
                 kept += 1
         shutil.rmtree(tmp, ignore_errors=True)
+        conv = []
+        if xbox:
+            with self._sweep_lock:     # not while the background sweep converts the same files
+                try:                   # an Xbox level converted whole, then every other Xbox file given its PS2 copy
+                    conv = mx.xbox_levels(self._log)
+                    conv += [n for n in mx.xbox_in_place('mods', [rel], levels=False) if not n.startswith('LEVEL ')]
+                except Exception as ex:                             # noqa: BLE001
+                    conv.append('its Xbox files could not all be converted now (%s): the build tries again' % ex)
         note = ('%s -> %s%s: %d of %d files kept' % (name, rel, '' if disc is not None else ' (a new archive)', kept, n)
                 + (', %d the same as the working disc\'s left out' % same if same else ''))
+        if xsame:
+            note += ', %d the Xbox game\'s own unedited files left out (the PS2 disc\'s are used)' % xsame
+        if merged:
+            note += ', %d edited file(s) the PS2 game has too given their changes over the PS2\'s own' % merged
+        if own_levels:
+            note += ', the Xbox level(s) it edits (%s) kept whole' % ', '.join(sorted(own_levels))
         if xbox:
-            note += ('. It holds %d Xbox file(s): the PS2 game does not load them (convert the mod in the RDR Data '
-                     'Editor app first)' % xbox)
-        return {'archive': rel, 'kept': kept, 'same': same, 'note': note}
+            note += ('. It holds %d Xbox file(s): each is given its PS2 copy beside it (an Xbox level is converted '
+                     'whole), the Xbox file kept' % xbox)
+        return {'archive': rel, 'kept': kept, 'same': same, 'note': note, 'converted': conv}
 
     def archive_names(self, archive):
         index, _d, _h = self.index()
@@ -836,7 +1231,8 @@ class DataEditor:
     def start(self, label, fn, *args):
         if not self.lock.acquire(blocking=False):
             raise Busy('The Data Editor is already busy (%s).' % self.job.get('label'))
-        self.job = {"state": "running", "label": label, "log": [], "started": time.time(), "result": None}
+        self.job = {"state": "running", "label": label, "log": [], "started": time.time(), "result": None,
+                    "cancel": False, "cancellable": True}
 
         def run():
             try:
@@ -845,6 +1241,10 @@ class DataEditor:
             except Busy as ex:
                 self._log(str(ex))
                 self.job['state'] = 'refused'
+            except Cancelled as ex:
+                self._log('Cancelled%s: nothing was written to the working disc (the mods folder keeps what was '
+                          'converted so far; the next Build picks up from there).' % ((' ' + str(ex)) if str(ex) else ''))
+                self.job['state'] = 'cancelled'
             except Exception as ex:                             # noqa: BLE001
                 import traceback
                 self._log('Stopped: %s: %s' % (type(ex).__name__, ex))
@@ -856,12 +1256,65 @@ class DataEditor:
         threading.Thread(target=run, name='dataeditor', daemon=True).start()
         return True
 
+    def cancel(self):
+        """Ask the running job to stop at its next safe point (never once it writes the disc). -> the job's state."""
+        if self.job.get('state') != 'running':
+            return {'state': self.job.get('state'), 'cancel': False}
+        if not self.job.get('cancellable', False):
+            return {'state': 'running', 'cancel': False, 'why': 'it is writing the working disc: it finishes first'}
+        self.job['cancel'] = True
+        self._log('Cancel asked: stopping at the next safe point...')
+        return {'state': 'running', 'cancel': True}
+
+    def _stop_point(self, where=''):
+        """A place a Build can stop without harm: nothing written to the disc yet."""
+        if self.job.get('cancel'):
+            raise Cancelled(where)
+
     # ------------------------------------------------------------------ Build: mods -> rebuilt archives -> working disc
 
     def build(self):
         log = self._log
         self.check_pcsx2()
         t0 = time.time()
+        try:                       # Xbox files, however they got into the mods folder, made the PS2's first
+            from .dataeditor_more import more as _more
+            with self._sweep_lock:         # after any background sweep (the same files)
+                notes = _more(self).xbox_sweep()
+            if notes:
+                log('Xbox files in the mods folder:')
+                for n in notes:
+                    log('  ' + n)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the Xbox file check could not run: %s)' % ex)
+        try:                       # the select screen's voice lines follow its list (snd_98.csv codes = places)
+            from .dataeditor_more import more as _more
+            if _more(self)._voice_sync():
+                log('Select screen voice lines (snd_98.csv) numbered again to follow the character list')
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the voice line check could not run: %s)' % ex)
+        try:                       # Showdown map halves in the right folders (colseum2.dat -> lvls_m2)
+            self.place_showdown_halves(log)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the Showdown map folders could not be checked: %s)' % ex)
+        try:                       # the end-of-match screen's mugshots (mprewards.pck) for everyone on the roster
+            from .dataeditor_more import more as _more
+            for n in _more(self).mugshots_sync():
+                log('Showdown: ' + n)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the end-of-match mugshots could not be checked: %s)' % ex)
+        try:                       # players 2-4's per-texture alternates: only changed ones, at most 128 x 128
+            from .dataeditor_more import more as _more
+            for n in _more(self).alt_tidy():
+                log('Showdown: ' + n)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the players 2-4 alternates could not be checked: %s)' % ex)
+        try:                       # Xbox levels (Coliseum, a mod, a new map): converted for the PS2, no Blender
+            from .dataeditor_more import more as _more
+            _more(self).xbox_levels(log)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the Xbox levels could not be converted: %s)' % ex)
+        self._stop_point('before the archives were read')
         log('Reading the unedited disc\'s archive list...')
         index, holders, fresh, loose, targeted, every, master = self.mod_files()
         for p in fresh:
@@ -875,6 +1328,48 @@ class DataEditor:
                     'Move the folder there (and its twin to lvls_m%s), then New .dat > Showdown with the name %s to '
                     'list it in the Showdown menu.' % (p, '4' if m.group(2) == '2' else '2', m.group(2), m.group(1),
                                                        m.group(2), '4' if m.group(2) == '2' else '2', m.group(1)))
+        # a Showdown map half in the other half's folder: <name>2.dat is only read from lvls_m2, <name>4.dat from lvls_m4
+        for p in sorted(fresh):
+            m = re.fullmatch(r'lvls_m([24])/(.+)([24])\.dat', p)
+            if m and m.group(1) != m.group(3):
+                log('  WARNING %s is in lvls_m%s, but the game reads <name>%s.dat only from lvls_m%s: move that folder to '
+                    'lvls_m%s (it will not load where it is)' % (p, m.group(1), m.group(3), m.group(3), m.group(3)))
+        # a new level with no geometry: its .lvl names lvl_<name>.rsc, which is not there (an Xbox level's .xrsc is
+        # refused on import -- it has to be converted in Blender: import the .xrsc, export Level as .rsc)
+        for p, folder in sorted(fresh.items()):
+            stem = 'lvl_' + p.rsplit('/', 1)[-1][:-4]
+            names = {f.lower() for f in os.listdir(folder)} if os.path.isdir(folder) else set()
+            if stem + '.lvl' in names and stem + '.rsc' not in names:
+                log('  WARNING %s has no %s.rsc (the level\'s geometry): the game would hang loading it. An Xbox level\'s '
+                    'bundle (lvl_<name>.xrsc / .rsc) is missing from this folder.' % (p, stem))
+            if any(n.endswith(('.xbd', '.xhd')) for n in names):
+                log('  %s holds Xbox sound banks (.xbd / .xhd): left out -- the PS2 game plays the same banks from its '
+                    'banks.dat (see the level\'s sound setup above)' % p)
+        try:                       # level bundles the game would hang on (an even-sized mesh batch 8 bytes short)
+            import modconvert as _MC
+            for _r, _d, _fs in os.walk(self.mods):
+                for _f in _fs:
+                    if _f.lower().startswith('lvl_') and _f.lower().endswith('.rsc'):
+                        _p = os.path.join(_r, _f)
+                        _pr = _MC.level_problems(open(_p, 'rb').read())
+                        _n = sum(_pr.values())
+                        if _n:
+                            log('  WARNING %s: %d thing(s) the PS2 game cannot draw (mesh parts it cannot read whole, level textures without their level flag) -- the level hangs, goes black or shows noise. '
+                                'It was made by an older level writer (Blender export or the Xbox converter before '
+                                '2026-11-16): export it again with the updated add-on.' % (os.path.relpath(_p, self.mods), _n))
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the level mesh check could not run: %s)' % ex)
+        try:                       # a Showdown map's stage row marked "xbox" (lvl_colseum): the PS2 game skips it
+            from .dataeditor_more import more as _more
+            unl = _more(self).unlock_xbox_stages(fresh)
+            for n in unl:
+                log('Showdown: ' + n)
+            if unl:                # unlockables.csv was just written: the mod files listed again
+                index, holders, fresh, loose, targeted, every, master = self.mod_files()
+                for p in fresh:
+                    targeted.pop(p, None)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the stage unlock check could not run: %s)' % ex)
         st = self.state()
         health = self.check_state()
         st = self.state()
@@ -911,6 +1406,11 @@ class DataEditor:
             if moved:
                 log('  %s has no folders: the files in your %s folder(s) %s go in at its top (the game would not '
                     'look inside a folder)' % (p, len(moved), ', '.join(sorted(moved))))
+        for warn in (lambda: self._warn_textures(todo, log), lambda: self._warn_roster(log)):
+            try:                                   # a check, never a reason for the build to stop
+                warn()
+            except Exception as ex:                             # noqa: BLE001
+                log('  (a pre-build check could not run: %s)' % ex)
         for k in sorted(k for k in loose if k not in holders and k not in master):
             log('  %s: no archive of the game has a file of that name: left out' % k)
         # the archives to put back: injected before, no mods for them now
@@ -932,6 +1432,7 @@ class DataEditor:
         def lost_a_file(p):
             return any(k.startswith('master/') or k.startswith(p + '/') for k in removed)
         for p in sorted(todo):
+            self._stop_point('before ' + p)
             if p in conflicts:
                 continue
             if p not in files:
@@ -945,9 +1446,12 @@ class DataEditor:
                 base = self._disc_read(files[p])
                 bases_new[p] = base
             items = todo[p]
-            key = hashlib.md5(('layout3|' + _md5(base)).encode())
+            key = hashlib.md5(('layout4|' + _md5(base)).encode())
             for k, path, how in sorted(items):
                 key.update(k.encode() + how.encode() + hashlib.md5(open(path, 'rb').read()).digest())
+            if p.lower() == 'swat.dat':        # the Showdown texture-size options change no file
+                from .dataeditor_more import more as _more_k
+                key.update(_more_k(self).sd_options_key().encode())
             key = key.hexdigest()
             out = os.path.join(self.cache, 'built_' + _key(p))
             # Only archives with changes are rebuilt and written. Left alone: one built from these same mods whose
@@ -968,50 +1472,52 @@ class DataEditor:
                 built_keys[p] = key
                 continue
             log('Building %s (%d mod file(s))...' % (p, len(items)))
-            src = self._extracted(base)
-            work = os.path.join(self.cache, 'work')
-            shutil.rmtree(work, ignore_errors=True)
-            try:
-                shutil.copytree(src, work, copy_function=os.link)
-            except OSError:
-                shutil.rmtree(work, ignore_errors=True)
-                shutil.copytree(src, work)
-            by_name, by_path = {}, {}
-            for root, _d, fs in os.walk(work):
-                for f in fs:
-                    full = os.path.join(root, f)
-                    by_name.setdefault(f.lower(), []).append(full)
-                    by_path[os.path.relpath(full, work).replace(os.sep, '/').lower()] = full
-
-            def put(srcf, target):
-                if os.path.exists(target):
-                    os.remove(target)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.copyfile(srcf, target)
+            # In memory: the base archive's files and the mods over them. It used to go through a folder -- the base
+            # extracted, hard linked into a work folder, the mods copied in, every file read back -- and swat.dat
+            # is 47,115 files: four file operations each, ~190,000 a build, 12 s from source and minutes in the
+            # packaged app (each file the unsigned exe touches is scanned). Same bytes in, same archive out.
+            content = self._files_of(base)
+            sd = None
+            if p.lower() == 'swat.dat':
+                from .dataeditor_more import more as _more_sd
+                sd = _more_sd(self)
+                sd._sd_roster_cache = None     # the roster as it is now
+            by_name = {}
+            for k0 in content:
+                by_name.setdefault(k0.rsplit('/', 1)[-1], []).append(k0)
             replaced, added = 0, []
             for k, path, how in items:
-                name = k.rsplit('/', 1)[-1]
-                if how == 'path' and '/' in k and k in by_path:
-                    put(path, by_path[k])
+                name = k.rsplit('/', 1)[-1].lower()
+                if name == PB.FOLDER_FILE or is_xbox_only(name):
+                    continue
+                data = open(path, 'rb').read()
+                if sd is not None:
+                    try:                       # Showdown characters' textures at 128 x 128 (the editor's options)
+                        data = sd.build_transform(name, data, log)
+                    except Exception as ex:                     # noqa: BLE001
+                        log('  %s: its textures could not be made smaller (%s): written as they are' % (name, ex))
+                if how == 'path' and '/' in k and k.lower() in content:
+                    content[k.lower()] = data
                     replaced += 1
                 elif by_name.get(name):
                     for target in by_name[name]:
-                        put(path, target)
+                        content[target] = data
                         replaced += 1
-                elif how == 'all':
-                    put(path, os.path.join(work, name))
-                    added.append(k)
                 else:
-                    put(path, os.path.join(work, *os.path.relpath(path, os.path.join(self.mods, *p.split('/'))).split(os.sep)))
+                    # a new file: at its name (Master), or where its folder puts it -- k, which for an archive with
+                    # no folders is the name alone (a file in a subfolder there goes in at the top; going by the
+                    # source path, as this did, put swat.dat/gbw/x in as gbw/x)
+                    content[name if how == 'all' else k.lower()] = data
                     added.append(k)
-            for w in PB.check_view_rooms(work):
+            for w in PB.check_view_rooms(content):
                 log('  ' + w)
             table = PB.file_table(base[:0x800 + sum(struct.unpack_from('<2I', base, 8))])
             order = None
             if added:
-                order = PB.new_archive_order(p, work, _DiscHeads(base, p, self.s.vanilla_path, index), _Dats(p, index),
+                order = PB.new_archive_order(p, content, _DiscHeads(base, p, self.s.vanilla_path, index), _Dats(p, index),
                                              index['archives'])
-            data = self.build_archive(self.pack_folder(work), out, table, order)
+            data = self.build_archive(content, out, table, order)
+            content = by_name = None   # 300 MB, not kept to the next archive
             with open(out + '.key', 'w') as f:
                 f.write(key)
             built_keys[p] = key
@@ -1020,6 +1526,7 @@ class DataEditor:
             built[p] = data
         new_built = {}
         for p, folder in sorted(fresh.items()):
+            self._stop_point('before the new archive ' + p)
             if p in conflicts:
                 continue
             log('Building the new archive %s...' % p)
@@ -1044,6 +1551,8 @@ class DataEditor:
                 with open(path + '.tmp', 'wb') as f:
                     f.write(data)
                 os.replace(path + '.tmp', path)
+        self._stop_point('before anything was written to the disc')
+        self.job['cancellable'] = False          # from here the disc is written: it finishes
         log('Injecting into the working disc...')
         with self.s.lock:
             self._take_disc()
@@ -1107,7 +1616,12 @@ class DataEditor:
         with open(os.path.join(self.cache, 'last_build.tsv'), 'w', encoding='utf-8', newline='\n') as f:
             for k, path in sorted(every.items()):
                 f.write(k + '\t' + _md5(open(path, 'rb').read()) + '\n')
-        if built or new_built or back:
+        elf_changed = False
+        try:
+            elf_changed = self._apply_lineup_mod(log)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  The second Showdown lineup could not be put on the working disc: %s' % ex)
+        if built or new_built or back or elf_changed:
             self.restore_disc_order(log)
         self.s.note('Data Editor: %d archive(s) built into the working disc' % (len(built) + len(new_built)))
         log('Done in %d s: %d archive(s) rebuilt into the working disc%s%s.' % (
@@ -1163,52 +1677,27 @@ class DataEditor:
             raise ValueError('not enough free space to rebuild %s: it needs about %s MB on the drive of %s, and %s MB '
                              'is free. Free some space there, or move the Data Editor folder (App setup > Folders > '
                              'Data Editor) to a drive with room.' % (archive, need >> 20, self.cache, free >> 20))
-        src = self._extracted(base)
-        work = os.path.join(self.cache, 'work_rebuild')
-        shutil.rmtree(work, ignore_errors=True)
-        try:
-            shutil.copytree(src, work, copy_function=os.link)
-        except OSError:
-            shutil.rmtree(work, ignore_errors=True)
-            shutil.copytree(src, work)
-        by_path = {}
-        for root, _d, fs in os.walk(work):
-            for f in fs:
-                full = os.path.join(root, f)
-                by_path[os.path.relpath(full, work).replace(os.sep, '/').lower()] = full
+        # in memory, as build() does (no extracted folder: swat.dat is 47,115 files)
+        files = self._files_of(base)
 
-        def put(target, data):
-            if os.path.exists(target):
-                os.remove(target)  # the link only, never the cached file
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, 'wb') as f:
-                f.write(data)
-        for name, data in (replace or {}).items():
+        def find(name):
             n = name.lower().replace('\\', '/')
-            target = by_path.get(n) or next((v for k, v in by_path.items() if k.rsplit('/', 1)[-1] == n), None)
+            return n if n in files else next((k for k in files if k.rsplit('/', 1)[-1] == n), None)
+        for name, data in (replace or {}).items():
+            target = find(name)
             if target is None:
                 raise ValueError('%s has no file %s' % (archive, name))
-            put(target, data)
+            files[target] = data
         for name, data in (add or {}).items():
-            put(os.path.join(work, *name.lower().replace('\\', '/').split('/')), data)
+            files[name.lower().replace('\\', '/')] = data
         for name in (remove or ()):
-            n = name.lower().replace('\\', '/')
-            target = by_path.get(n) or next((v for k, v in by_path.items() if k.rsplit('/', 1)[-1] == n), None)
+            target = find(name)
             if target is not None:
-                os.remove(target)  # the link only, never the cached file
+                del files[target]
         head = base[:0x800 + sum(struct.unpack_from('<2I', base, 8))]
         out = os.path.join(self.cache, 'rebuilt_' + _key(p))
-        data = self.build_archive(self.pack_folder(work), out, PB.file_table(head), None)
-        # the extracted copy stays, as the new archive's: the next edit of it starts at once
-        keep = os.path.join(self.cache, 'base_' + _md5(data))
-        if os.path.isdir(keep):
-            shutil.rmtree(work, ignore_errors=True)
-        else:
-            os.replace(work, keep)
-        # Only the newest extracted copy of an archive is kept: the one it was rebuilt from is out of date now (a
-        # swat.dat copy is ~600 MB, and keeping every version filled a drive). The built bytes go once injected.
-        if os.path.normcase(src) != os.path.normcase(keep):
-            shutil.rmtree(src, ignore_errors=True)
+        data = self.build_archive(files, out, PB.file_table(head), None)
+        files = None
         g = self.s.game
         if g is None:  # the Studio has handed the disc over (Play): take it as a build does
             self._take_disc()
@@ -1392,6 +1881,255 @@ class DataEditor:
         self.s.note('%s: its files copied to the Workbench (%s)' % (code, code))
 
     # ------------------------------------------------------------------ Delete Character (BALANCE > Creatures)
+
+    # ------------------------------------------------------------------ Replace All Characters (Creatures)
+
+    def humanoid_characters(self):
+        """[(code, render, skel)] of every character whose skeleton starts with the standard humanoid joints (the 52
+        most characters play on; gbw's 59, Black's 62 add tails and coattails after them): the ones Replace All
+        Characters changes. Animals and characters rigged in another order are left out."""
+        from collections import Counter
+        from . import skeleton as _SK
+        from .game import Game as _Game
+        # the STOCK disc: each character's own model and skeleton (after a Replace All build the working disc's .cr
+        # files point at the source's)
+        stock = _Game(self.s.vanilla_path, writable=False)
+        try:
+            return self._humanoids(stock.archive('SWAT.DAT'), _SK, Counter)
+        finally:
+            stock.close()
+
+    def _humanoids(self, swat, _SK, Counter):
+        names_of = {}
+
+        def bones(skel):
+            if skel not in names_of:
+                try:
+                    names_of[skel] = [b.name for b in _SK.parse(swat.read(skel + '.skel'))[2]]
+                except Exception:                               # noqa: BLE001
+                    names_of[skel] = None
+            return names_of[skel]
+        chars = []
+        for e in swat:
+            if not e.name.lower().endswith('.cr'):
+                continue
+            code = e.name.lower()[:-3]
+            try:
+                cr = swat.read(e.name).decode('latin-1')
+            except Exception:                                   # noqa: BLE001
+                continue
+            r = re.search(r'^\s*FileNameRender\s+(\S+)', cr, re.M)
+            k = re.search(r'^\s*FileNameSkel\s+(\S+)', cr, re.M)
+            chars.append((code, (r.group(1) if r else code).lower(), (k.group(1) if k else code).lower()))
+        common = Counter(k for _c, _r, k in chars if bones(k) and len(bones(k)) == 52).most_common(1)
+        ref = set(bones(common[0][0])) if common else None
+        if not ref:
+            return []
+        # every standard joint, in any order: the women's skeletons (ctn, ani, bty, kti) have them all in another
+        # order; the animals have not. Replaced characters play the source's skeleton, so the order does not matter.
+        return [(c, r, k) for c, r, k in chars if bones(k) and ref <= set(bones(k))]
+
+    # the kinds of a character's files Replace All Characters can copy: (key, label, names). {r} / {k} the SOURCE's
+    # model and skeleton names (shared: every replaced character's .cr points at them), {t} the character's model
+    # name (its skins, which the levels' rosters ask for by its name), {c} its code, {p} its Showdown code (mp_ ...)
+    REPLACE_KINDS = [
+        ('model', 'Model (_lods.rsc / .rnt)', ['{r}_lods.rsc', '{r}_lods.rnt', '{r}_nolods.rnt']),
+        ('face', 'Face and its animation (_face.mod)', ['{r}_face.mod']),
+        ('skel', 'Skeleton (.skel)', ['{k}.skel']),
+        ('lods', 'LOD models and edges (_lod .mod / .em)', ['{r}_lod_01.mod', '{r}_lod_02.mod', '{r}.em',
+                                                          '{r}_lod_01.em', '{r}_lod_02.em']),
+        ('textures', 'Textures (skins 01-04 .tex)', ['{t}.tex', '{t}01.tex', '{t}02.tex', '{t}03.tex', '{t}04.tex']),
+        ('photos', 'Showdown pictures (mp_ / ui_mphoto_)', ['mp_{p}.tex', 'ui_mphoto_{p}.tex']),
+        ('cr', 'Character (.cr: stats, behaviour, voice)', ['{c}.cr']),
+        ('swt', 'Showdown tuning (.swt)', ['{c}.swt']),
+        ('msd', '.msd', ['{c}.msd']),
+        ('dam', 'Damage (.dam)', ['{c}.dam']),
+        ('hot', 'Hit spots (.hot)', ['{c}.hot']),
+        ('sphs', 'Hit spheres (.sphs)', ['{c}.sphs']),
+        ('rep', '.rep', ['{c}.rep']),
+        ('ars', 'Arsenal (.ars)', ['{c}.ars']),
+        ('tail', '.tail', ['{c}.tail']),
+        ('acc', '.acc', ['{c}.acc']),
+    ]
+    SHARED_KINDS = ('model', 'face', 'skel', 'lods')            # the source's own files, under its own names
+
+    def _replace_manifest(self):
+        return os.path.join(self.cache, 'replace_all_written.json')
+
+    def replace_all_characters(self, source, dry=False, kinds=None):
+        """Every humanoid character made a copy of `source` (Creatures > Replace All Characters).
+
+        Each character's .cr points at the source's model and skeleton (FileNameRender / FileNameSkel, and its Face
+        lines) -- the source's own .cr when ".cr" is ticked, else the character's own with those lines changed -- and
+        the source's model, face, skeleton and LOD files (the ticked ones) are put, under the source's own names, into
+        every archive that holds the character's model: nothing renamed, so the face and its animation are the
+        source's own, and the Xbox game uses its own copies of them. The skins (<model>01-04.tex, which the levels
+        ask for by the character's name), the Showdown pictures and the per-character files (.swt .msd .dam ...)
+        are the source's under the character's names. Written to the mods folder (a file the game has: Master, into
+        every archive that holds it; else into the archives that hold the character's model); what an earlier run
+        wrote is taken out first. -> a summary."""
+        import hashlib
+        src = source.strip().lower()
+        src = src[:-3] if src.endswith('.cr') else src
+        want = set(kinds) if kinds else {k for k, _l, _n in self.REPLACE_KINDS}
+        g = self.s.game if self.s.game is not None else self.s.disc
+        swat = g.archive('SWAT.DAT')
+        names = {e.name for e in swat.entries}
+        if src + '.cr' not in names:
+            raise ValueError('SWAT.DAT has no %s.cr' % src)
+        cr_src = swat.read(src + '.cr').decode('latin-1')
+        r = re.search(r'^\s*FileNameRender\s+(\S+)', cr_src, re.M)
+        k = re.search(r'^\s*FileNameSkel\s+(\S+)', cr_src, re.M)
+        s_render, s_skel = (r.group(1) if r else src).lower(), (k.group(1) if k else src).lower()
+        # where the game has a file (which archives a name is in): the STOCK disc's -- the working disc already has
+        # what an earlier Replace All's build put on it, and judged by that, this run would leave those files out of
+        # the mods folder and the next Build would take them off again
+        from .game import Game as _Game
+        stock = _Game(self.s.vanilla_path, writable=False)
+        try:
+            index = {n: list(a) for n, a in stock.build_index().items()}
+        finally:
+            stock.close()
+        s_show = src[1:] if src.startswith('m') and ('mp_%s.tex' % src[1:]) in index else src
+
+        def read_any(name):
+            for a in (['SWAT.DAT'] if name in names else []) + index.get(name, []):
+                try:
+                    return g.archive(a).read(name)
+                except Exception:                               # noqa: BLE001
+                    continue
+            return None
+        have = {}                                               # kind -> [(pattern, bytes)]
+        for key, _label, pats in self.REPLACE_KINDS:
+            if key not in want or key == 'cr':
+                continue
+            for pat in pats:
+                n = pat.format(r=s_render, k=s_skel, t=s_render, c=src, p=s_show)
+                d = read_any(n)
+                if d is not None:
+                    have.setdefault(key, []).append((pat, n, d))
+        if 'model' in want and 'model' not in have:
+            raise ValueError('%s has no model bundle (%s_lods.rsc)' % (src, s_render))
+        targets = [t for t in self.humanoid_characters() if t[0] != src]
+        if not targets:
+            raise ValueError('No humanoid character to replace')
+        stock = _Game(self.s.vanilla_path, writable=False)
+        stock_swat = stock.archive('SWAT.DAT')
+        stock_names = {e.name for e in stock_swat.entries}
+        face = re.search(r'^\s*Face\s+\S+', cr_src, re.M)
+        face_off = re.search(r'^\s*FaceOffset\s+[^\r\n]+', cr_src, re.M)
+        files = {}                                              # mods key -> bytes
+        for code, render, sk in targets:
+            homes = index.get(render + '_lods.rsc') or ['SWAT.DAT']
+            show = code[1:] if code.startswith('m') and ('mp_%s.tex' % code[1:]) in index else code
+            # the .cr: the source's, or the character's own pointed at the source's model and skeleton
+            if 'cr' in want:
+                cr = cr_src
+            else:
+                cr = stock_swat.read(code + '.cr').decode('latin-1')
+                for fld, val in (('FileNameRender', s_render), ('FileNameSkel', s_skel)):
+                    cr = re.sub(r'(^\s*%s\s+)\S+' % fld, lambda m, v=val: m.group(1) + v, cr, count=1, flags=re.M)
+                for pat in (face, face_off):                     # the face is the source's now
+                    if pat:
+                        fld = pat.group(0).split()[0]
+                        cr = re.sub(r'^\s*%s\s+[^\r\n]+' % fld, lambda m, v=pat.group(0): v, cr, count=1, flags=re.M)
+            files['master/%s.cr' % code] = cr.encode('latin-1')
+            for key, items in have.items():
+                for pat, sname, data in items:
+                    if key in self.SHARED_KINDS:
+                        # the source's file under its own name, in every archive the character is loaded from
+                        for a in homes:
+                            if a not in index.get(sname, []):
+                                files['%s/%s' % (a.lower(), sname)] = data
+                        continue
+                    n = pat.format(r=s_render, k=s_skel, t=render, c=code, p=show)
+                    if key == 'swt' and n in stock_names:
+                        # male or female stays the character's own (Showdown reads it from here: Male 0 / 1)
+                        own = re.search(r'^\s*Male\s+\S+', stock_swat.read(n).decode('latin-1'), re.M)
+                        if own:
+                            data = re.sub(r'^\s*Male\s+\S+', lambda m, v=own.group(0): v,
+                                          data.decode('latin-1'), count=1, flags=re.M).encode('latin-1')
+                    if index.get(n):
+                        files['master/' + n] = data
+                    elif key not in ('textures', 'photos'):     # a skin or picture it had not: nothing asks for it
+                        for a in homes:
+                            files['%s/%s' % (a.lower(), n)] = data
+            # a coattail / tail (.tail) or accessory (.acc) of its own, which the source has not: it names bones of the
+            # character's old skeleton, which the source's has not -- the Xbox game crashes on the first one it
+            # cannot find (2026-11-17, srd.tail in lvl_hng). Emptied.
+            for ext, empty in (('tail', 'HorseTail\r\nNumTails 0\r\n'), ('acc', 'NumAccessories 0\r\n')):
+                n = '%s.%s' % (code, ext)
+                if index.get(n) and ext not in have:
+                    files['master/' + n] = empty.encode('latin-1')
+        stock.close()
+        summary = {'source': src, 'characters': len(targets), 'files': len(files),
+                   'codes': sorted(c for c, _r, _k in targets),
+                   'kinds': ['cr'] * ('cr' in want) + [kk for kk, _l, _n in self.REPLACE_KINDS if kk in have]}
+        if dry:
+            return summary
+        # what an earlier run wrote (and nobody changed since) comes out first
+        removed = 0
+        try:
+            old = json.load(open(self._replace_manifest(), encoding='utf-8'))
+        except (OSError, ValueError):
+            old = {}
+        old.update(self._replace_legacy(targets, s_render, s_skel, read_any))
+        for key, sha in old.items():
+            path = os.path.join(self.mods, *key.split('/'))
+            try:
+                if key not in files and hashlib.sha1(open(path, 'rb').read()).hexdigest() == sha:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+        written = {}
+        for key, data in files.items():
+            path = os.path.join(self.mods, *key.split('/'))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(data)
+            written[key] = hashlib.sha1(data).hexdigest()
+        with open(self._replace_manifest(), 'w', encoding='utf-8') as f:
+            json.dump(written, f)
+        summary['removed'] = removed
+        self.s.note('Replace All Characters: %d characters made copies of %s (%d files in the mods folder, %d from an '
+                    'earlier run taken out)' % (len(targets), src, len(files), removed))
+        return summary
+
+    def _replace_legacy(self, targets, s_render, s_skel, read_any):
+        """{mods key: sha1} of what the first versions of Replace All wrote (no record kept then): the source's model,
+        face, skeleton and LOD files renamed for each character, in Master or the archive folders."""
+        import hashlib
+        from rdrformats import rsc as _rsc, rscwrite as _rw
+        out = {}
+        pats = [('{r}_lods.rsc', '%s_lods.rsc'), ('{r}_lods.rnt', '%s_lods.rnt'), ('{r}_nolods.rnt', '%s_nolods.rnt'),
+                ('{r}_face.mod', '%s_face.mod'), ('{r}_lod_01.mod', '%s_lod_01.mod'),
+                ('{r}_lod_02.mod', '%s_lod_02.mod'), ('{r}.em', '%s.em'), ('{r}_lod_01.em', '%s_lod_01.em'),
+                ('{r}_lod_02.em', '%s_lod_02.em')]
+        srcs = {}
+        for pat, _t in pats:
+            srcs[pat] = read_any(pat.format(r=s_render))
+        skel = read_any(s_skel + '.skel')
+        folders = ['master'] + [d for d in os.listdir(self.mods) if d.lower().endswith('.dat')
+                                and os.path.isdir(os.path.join(self.mods, d))] if os.path.isdir(self.mods) else []
+        lvl_root = [d for d in ('lvls_m2', 'lvls_m4', 'lvls_sng') if os.path.isdir(os.path.join(self.mods, d))]
+        for d in lvl_root:
+            folders += ['%s/%s' % (d, f) for f in os.listdir(os.path.join(self.mods, d))]
+        for code, render, sk in targets:
+            for pat, tname in pats:
+                data = srcs.get(pat)
+                if data is None:
+                    continue
+                if tname.endswith('.rnt'):
+                    data = _rw.write_names([(tag, num, re.sub(r'(?<![a-z0-9])%s(?=_)' % re.escape(s_render), render,
+                                                               nm)) for tag, num, nm in _rsc.read_names(data)])
+                sha = hashlib.sha1(data).hexdigest()
+                for fo in folders:
+                    out['%s/%s' % (fo.lower(), tname % render)] = sha
+            if skel is not None and sk != s_skel:
+                for fo in folders:
+                    out['%s/%s.skel' % (fo.lower(), sk)] = hashlib.sha1(skel).hexdigest()
+        return out
 
     def character_files(self, code, fresh=True):
         """{archive: [file names]} of a character on the working disc (<code>.* and <code>_lods.*)."""
