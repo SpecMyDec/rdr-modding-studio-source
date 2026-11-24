@@ -399,9 +399,9 @@ class DataEditor:
         threading.Thread(target=run, daemon=True, name='data-editor-xbox-sweep').start()
 
     def overview(self):
-        """The folders (Master, every archive, new archives) and each one's files with their status."""
-        if self.job['state'] != 'running':
-            self._sweep_in_background()
+        """The folders (Master, every archive, new archives) and each one's files with their status. (Xbox files
+        are no longer given PS2 copies here in the background: only the PS2 build makes them, where the mod has no PS2
+        file of its own -- dropped files stay exactly as given.)"""
         index, holders, fresh, loose, targeted, every, master = self.mod_files()
         last = self._last_build()
         try:                                       # Game: Xbox -- built or not as the last Xbox build had it
@@ -906,12 +906,25 @@ class DataEditor:
                 except OSError:
                     continue
                 sig.append((full, st.st_size, st.st_mtime_ns))
-        lb = os.path.join(self.cache, 'last_build.tsv')
+        # the game picked (each its own build record), the Xbox build's record, and the working disc (its edits go
+        # to the Xbox build too)
         try:
-            sig.append((lb, os.path.getsize(lb), os.stat(lb).st_mtime_ns))
-        except OSError:
-            pass
-        sig = tuple(sorted(sig))
+            from .xboxmode import xbox as _xbox
+            X = _xbox(self)
+            plat = X.platform()
+        except Exception:                                       # noqa: BLE001
+            X, plat = None, 'ps2'
+        records = [os.path.join(self.cache, 'last_build.tsv')]
+        if X is not None:
+            records += [X._record_path(), X._assets_record()]
+        records.append(self.s.modded_path)
+        for lb in records:
+            try:
+                sig.append((lb, os.path.getsize(lb), os.stat(lb).st_mtime_ns))
+            except OSError:
+                sig.append((lb, -1, -1))
+        sig.append(('platform', plat, 0))
+        sig = tuple(sorted(sig, key=str))
         c = getattr(self, '_wait_cache', None)
         if c and c[0] == sig:
             return c[1]
@@ -919,7 +932,15 @@ class DataEditor:
             ov = self.overview()
             files = [f for f in ov['files'] if f['status'] in ('new', 'changed')]
             folders = sorted({f['folder'] for f in files} | {k.split('/')[0] for k in ov['removed']})
-            res = (len(files) + len(ov['removed']), folders)
+            n = len(files) + len(ov['removed'])
+            if plat == 'xbox' and X is not None:
+                # never built for the Xbox, or the working disc (the Studio's other editors) changed since
+                rec = X._record_path()
+                if not os.path.isfile(rec):
+                    n, folders = max(n, 1), folders + ['the Xbox game (never built)']
+                elif os.path.getmtime(self.s.modded_path) > os.path.getmtime(rec):
+                    n, folders = n + 1, folders + ['the working disc\'s edits']
+            res = (n, folders)
         except Exception:                                       # noqa: BLE001
             res = (0, [])
         self._wait_cache = (sig, res)
@@ -1193,7 +1214,7 @@ class DataEditor:
                 kept += 1
         shutil.rmtree(tmp, ignore_errors=True)
         conv = []
-        if xbox:
+        if False and xbox:             # nothing converted on import: the PS2 build does it where a PS2 file is missing
             with self._sweep_lock:     # not while the background sweep converts the same files
                 try:                   # an Xbox level converted whole, then every other Xbox file given its PS2 copy
                     conv = mx.xbox_levels(self._log)
@@ -1309,6 +1330,11 @@ class DataEditor:
                 log('Showdown: ' + n)
         except Exception as ex:                                 # noqa: BLE001
             log('  (the players 2-4 alternates could not be checked: %s)' % ex)
+        try:                       # a Blender level export put into a level .dat under another name: its level
+            from .dataeditor_more import more as _more
+            _more(self).adopt_level_exports(log)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the level exports in the mods folder could not be checked: %s)' % ex)
         try:                       # Xbox levels (Coliseum, a mod, a new map): converted for the PS2, no Blender
             from .dataeditor_more import more as _more
             _more(self).xbox_levels(log)
@@ -1509,6 +1535,8 @@ class DataEditor:
                     # source path, as this did, put swat.dat/gbw/x in as gbw/x)
                     content[name if how == 'all' else k.lower()] = data
                     added.append(k)
+            for n in PB.fit_level_counts(content):     # counts of boxes kept in other files (crash on load)
+                log('  ' + n)
             for w in PB.check_view_rooms(content):
                 log('  ' + w)
             table = PB.file_table(base[:0x800 + sum(struct.unpack_from('<2I', base, 8))])
@@ -1530,12 +1558,15 @@ class DataEditor:
             if p in conflicts:
                 continue
             log('Building the new archive %s...' % p)
-            for w in PB.check_view_rooms(folder):
-                log('  ' + w)
             out = os.path.join(self.cache, 'new_' + _key(p))
             order = PB.new_archive_order(p, folder, _VanillaHeads(self.s.vanilla_path), _Dats(None, index),
                                          index['archives'])
-            new_built[p] = self.build_archive(self.pack_folder(folder), out, None, order)
+            packed = self.pack_folder(folder)
+            for n in PB.fit_level_counts(packed):      # in the built copy; the mods folder is left as it is
+                log('  ' + n)
+            for w in PB.check_view_rooms(packed):
+                log('  ' + w)
+            new_built[p] = self.build_archive(packed, out, None, order)
             log('  %s files, %s bytes' % (sum(len(f) for _r, _d, f in os.walk(folder)), format(len(new_built[p]), ',')))
         # inject: the Studio's disc handles closed, our writes, the handles back
         # Every backup on disk BEFORE the first write to the disc, and room checked: a Build that died on a full
@@ -2322,10 +2353,83 @@ class DataEditor:
 
     # ------------------------------------------------------------------ New .dat
 
-    def new_level(self, kind, name, template=None, title=None, subtitle=None, replace=False):
+    def delete_dat(self, archive, permanent=False, dry=False):
+        """A .dat folder taken out of the mods folder (Data Editor: Delete .dat). A new level (made by New .dat, no
+        archive of the stock disc): both its halves (a Showdown map's lvls_m2 and lvls_m4), its Showdown menu row
+        (postermultiview.swui), thumbnail (levelselect_<name>) and unlock (unlockables.csv) with it. A stock
+        archive's folder: its mod files (the disc keeps what was built until Restore). dry: only what would go.
+        -> {removed: [folders], cleaned: [what else], on_disc: [archives built onto the working disc]} (2026-11-18)"""
+        from .dataeditor_more import recycle
+        arc = (archive or '').strip().strip('/').replace('\\', '/').lower()
+        if not arc.endswith('.dat') or '/' not in arc and not arc.endswith('.dat'):
+            raise ValueError('pick a .dat folder')
+        index, _dats, _h = self.index()
+        stock = arc in index['archives']
+        folders, name = [arc], None
+        m = re.fullmatch(r'lvls_m([24])/([a-z0-9_]+?)([24])\.dat', arc)
+        if not stock and m and m.group(1) == m.group(3):
+            name = m.group(2)
+            folders = ['lvls_m2/%s2.dat' % name, 'lvls_m4/%s4.dat' % name]
+        elif not stock and re.fullmatch(r'lvls_sng/[a-z0-9_]+\.dat', arc):
+            name = arc.split('/')[1][:-4]
+
+        def find(rel):
+            cur = self.mods
+            for part in rel.split('/'):
+                if not os.path.isdir(cur):
+                    return None
+                hit = next((f for f in os.listdir(cur) if f.lower() == part.lower()), None)
+                if hit is None:
+                    return None
+                cur = os.path.join(cur, hit)
+            return cur
+        paths = [(f, find(f)) for f in folders]
+        removed = [f for f, pth in paths if pth and os.path.isdir(pth)]
+        cleaned, edits, extra = [], [], []
+        if name:
+            for arch in ('swat.dat', 'front.dat'):
+                top = find(arch)
+                if not top:
+                    continue
+                for r, _d, fs in os.walk(top):
+                    for f in fs:
+                        low = f.lower()
+                        full = os.path.join(r, f)
+                        if low == 'postermultiview.swui':
+                            text = open(full, encoding='latin-1', newline='').read()
+                            new = re.sub(r'(\r?\n)?<LOOKUPDATA:lvl_' + re.escape(name) + r',[^>]*>', '', text)
+                            if new != text:
+                                edits.append((full, new))
+                                cleaned.append('%s: its Showdown menu row' % arch)
+                        elif low in ('levelselect_%s.tex' % name, 'levelselect_%s.xtex' % name, 'levelselect_%s.pal' % name):
+                            extra.append(full)
+                            cleaned.append('%s: %s' % (arch, f))
+                        elif low == 'unlockables.csv':
+                            text = open(full, encoding='latin-1', newline='').read()
+                            new = re.sub(r'(?m)^lvl_' + re.escape(name) + r',[^\r\n]*(\r?\n)?', '', text)
+                            if new != text:
+                                edits.append((full, new))
+                                cleaned.append('%s: its unlock (unlockables.csv)' % arch)
+        st = self.state()
+        on_disc = [f for f in folders if f in st.get('archives', {})]
+        out = dict(removed=removed, cleaned=cleaned, on_disc=on_disc, new_level=bool(name), stock=stock)
+        if dry:
+            return out
+        if not removed and not cleaned:
+            raise ValueError('%s has no folder in the mods folder' % arc)
+        for full, new in edits:
+            with open(full, 'w', encoding='latin-1', newline='') as fh:
+                fh.write(new)
+        recycle([pth for f, pth in paths if f in removed] + extra, permanent=permanent)
+        self._log('Deleted %s%s' % (', '.join(removed) or arc, (' (and ' + '; '.join(cleaned) + ')') if cleaned else ''))
+        return out
+
+    def new_level(self, kind, name, template=None, title=None, subtitle=None, replace=False, no_geometry=False,
+                  blank=False):
         log = self._log
         index, dats, _h = self.index()
-        a = self._ns(new_level=kind, name=name, template=template, title=title, subtitle=subtitle, replace=replace)
+        a = self._ns(new_level=kind, name=name, template=template, title=title, subtitle=subtitle, replace=replace,
+                     no_geometry=no_geometry or blank, blank=blank)
         PB.XBOX[0] = False
         iso = PB.Iso(self.s.vanilla_path)
         import contextlib
@@ -2340,6 +2444,20 @@ class DataEditor:
             log(line)
         if r:
             raise ValueError('New .dat refused (see the log)')
+        if no_geometry or blank:
+            # its Xbox level bundle made now, beside the PS2 one: the editor keeps both, each game's build takes its
+            # own (2026-11-18)
+            nm = (name or '').strip().lower()
+            dirs = [('lvls_sng', nm)] if kind == 'sng' else [('lvls_m2', nm + '2'), ('lvls_m4', nm + '4')]
+            for group, stem in dirs:
+                folder = os.path.join(self.mods, group, stem + '.dat')
+                if not os.path.isdir(folder):
+                    continue
+                try:
+                    from .xboxmode import xbox as _xbox
+                    _xbox(self).make_level_xrsc(folder, 'lvl_' + stem, group, log)
+                except Exception as ex:                         # noqa: BLE001
+                    log('  %s: no Xbox level bundle made (%s) -- the Xbox build converts the PS2 one' % (stem, ex))
         return True
 
     # ------------------------------------------------------------------ Manual .dat/.zip extracting/building

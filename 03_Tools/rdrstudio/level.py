@@ -628,8 +628,34 @@ class Level:
 
     def links(self):
         """{uid: uid} both ways between a building and its collision shell."""
+        out = {}
+        # the exact name first: zone_ground_02 is bound_ground_02's. By the stem alone (numbers dropped) every copy of
+        # a placed model was "ground" and only the first had its collision: a second copy's scale / turn / delete left
+        # its shell behind (2026-11-18)
+        exact_z, exact_b = {}, {}
+        for n in self.nodes:
+            s0 = str(n.name or "")
+            while True:
+                nxt = re.sub(r'^(bound|zone)_', '', s0, flags=re.I)
+                if nxt == s0:
+                    break
+                s0 = nxt
+            key = s0.lower()
+            if not key or self._GRP.match(self.link_stem(n.name) or ""):
+                continue
+            if n.kind == "zone":
+                exact_z.setdefault(key, n)
+            elif n.kind == "bound":
+                exact_b.setdefault(key, n)
+        for key, z in exact_z.items():
+            b = exact_b.get(key)
+            if b is not None and z.uid not in out and b.uid not in out:
+                out[z.uid] = b.uid
+                out[b.uid] = z.uid
         zones, bounds = {}, {}
         for n in self.nodes:
+            if n.uid in out:
+                continue
             stem = self.link_stem(n.name)
             if not stem:
                 continue
@@ -637,7 +663,6 @@ class Level:
                 zones.setdefault(stem, n)
             elif n.kind == "bound" and not self._GRP.match(stem):
                 bounds.setdefault(stem, n)
-        out = {}
         for stem, z in zones.items():
             b = bounds.get(stem)
             if b is not None:
@@ -902,8 +927,25 @@ class Level:
         n = self.by_uid(uid)
         data = self._read(n.source)
         edits, new_name = scene.duplicate_block(data, n, offset)
-        edits += scene.bump_count(data, n.source, +1)
+        edits += scene.bump_count(data, n.source, +1) + self._spawn_count(data, n, +1)
         return {n.source: edits}, new_name
+
+    @staticmethod
+    def _spawn_count(data, n, delta):
+        """A player spawn's own NumSpawnPoints<players> count moved by delta (a .spwn has one count per player
+        number, not one for the file: deleting a spawn without it left the count, and the next section's first
+        point was read as the deleted one -- nothing seemed to go, 2026-11-18). [] for anything else."""
+        import re as _re
+        if n.kind != "spawn":
+            return []
+        m = _re.search(rb"NumSpawnPoints%d([ 	]*)(\d+)" % int(n.props.get("players", 1)), data)
+        if not m:
+            return []
+        new = int(m.group(2)) + delta
+        if new < 1:
+            raise ValueError("%s is the last spawn point for %s player(s): the game needs one, so it stays "
+                             "(move it instead)" % (n.name, n.props.get("players")))
+        return [(m.start(2), m.end(2), str(new).encode())]
 
     def roomiest(self, ext=None, like=None):
         """The placement file in this level with the most spare slot space.
@@ -953,7 +995,7 @@ class Level:
         n = self.by_uid(uid)
         data = self._read(n.source)
         edits = scene.delete_block(data, n)
-        edits += scene.bump_count(data, n.source, -1)
+        edits += scene.bump_count(data, n.source, -1) + self._spawn_count(data, n, -1)
         return {n.source: edits}
 
     def capacity(self, filename):

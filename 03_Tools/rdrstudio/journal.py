@@ -62,6 +62,7 @@ class Journal:
         self.entries = []
         self.redo_stack = []
         self._seq = 0
+        self.bases = {}         # (archive, file): its bytes before the first edit, for files the vanilla disc has not
         self._defer = 0          # >0 while a batch is in progress
         self._dirty = False
 
@@ -117,6 +118,10 @@ class Journal:
         for prev in reversed(self.entries[:index]):
             if prev.key == e.key:
                 return prev.data
+        # a level only the mods folder has: what its file held before the first edit (Studio.write keeps it here)
+        bases = getattr(self, "bases", None)
+        if bases and e.key in bases:
+            return bases[e.key]
         return self.vanilla_state(e.archive, e.file)
 
     # -------------------------------------------------------- undo / redo
@@ -129,14 +134,50 @@ class Journal:
     def can_redo(self):
         return bool(self.redo_stack)
 
-    def undo(self, write):
+    def undo(self, write, read=None):
         """Undo one user-visible action: the whole trailing group, or one entry.
 
-        write(archive, file, data) restores a previous state.
+        write(archive, file, data) restores a previous state. read(archive, file) -> its bytes now, or None: when
+        given, every file of the step must still hold what its entry says, or nothing is undone -- after a crash the
+        history on disk can be behind the files (its save waits two seconds), and Ctrl+Z put back a stale copy over
+        later work (2026-11-18).
         """
         if not self.entries:
             return None
         last = self.entries[-1]
+        if read is not None:
+            k = len(self.entries) - 1
+            seen = set()
+            while k >= 0:
+                e = self.entries[k]
+                if k < len(self.entries) - 1 and (e.group is None or e.group != last.group):
+                    break
+                if e.key not in seen:          # the newest entry of each file is the state it must be in
+                    seen.add(e.key)
+                    try:
+                        now = read(e.archive, e.file)
+                    except Exception:                       # noqa: BLE001
+                        now = None
+                    if now is not None and now != e.data:
+                        raise ValueError(
+                            "cannot undo %s :: %s -- the file is not as this history left it (changed outside it, or "
+                            "the history was saved before the Studio closed); nothing was undone" % (e.archive, e.file))
+                if e.group is None:
+                    break
+                k -= 1
+        # every file of the step checked before any is written back: one with nothing to go back to stopped the undo
+        # half way, the step's other files already undone (and that half state saved) -- 2026-11-18
+        k = len(self.entries) - 1
+        while k >= 0:
+            e = self.entries[k]
+            if k < len(self.entries) - 1 and (e.group is None or e.group != last.group):
+                break
+            if self.state_before(k) is None:
+                raise ValueError("cannot undo %s :: %s -- no earlier copy of it to go back to (nothing was undone)"
+                                 % (e.archive, e.file))
+            if e.group is None:
+                break
+            k -= 1
         undone: list[Any] = []
         while self.entries:
             e = self.entries[-1]
@@ -154,7 +195,9 @@ class Journal:
                 break
         # Reverse so redo replays them in original order.
         self.redo_stack.append(list(reversed(undone)))
-        self._autosave()
+        # at once, not debounced: an undo left owed when the Studio closed came back as a live entry on the next
+        # launch, and the next Ctrl+Z "restored" a file to the edit that had been undone (2026-11-18)
+        self._autosave(force=True)
         return dict(entry=last, count=len(undone), label=last.label,
                     archive=last.archive, file=last.file)
 
@@ -165,7 +208,7 @@ class Journal:
         for e in batch:
             write(e.archive, e.file, e.data)
             self.entries.append(e)
-        self._autosave()
+        self._autosave(force=True)
         last = batch[-1]
         return dict(entry=last, count=len(batch), label=last.label,
                     archive=last.archive, file=last.file)
@@ -259,6 +302,10 @@ class Journal:
             e.seq = i + 1
         self._seq = len(self.entries)
         self.redo_stack = []
+        # new groups numbered after the restored ones: g1 again for the first new action joined the last session's g1
+        # entries, and one Ctrl+Z took back both (2026-11-18)
+        nums = [int(e.group[1:]) for e in self.entries if isinstance(e.group, str) and e.group[1:].isdigit()]
+        self._group_seq = max([getattr(self, "_group_seq", 0)] + nums)
         return len(self.entries)
 
 

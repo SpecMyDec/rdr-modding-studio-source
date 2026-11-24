@@ -1184,7 +1184,7 @@ def renamed_original(low, stem, data, src, archive):
     for a in src.archives:
         if not a.startswith('lvls_'):
             continue
-        for k in src.index['archives'][a]['names']:
+        for k in src.index['archives'].get(a, {}).get('names', []):  # an Xbox-only archive (Coliseum): none
             kl = k.lower()
             if kl.startswith('lvl_') and kl.endswith('.lvl'):
                 cands.append((0 if a.startswith(group) else 1, a, kl[:-4]))
@@ -1227,6 +1227,52 @@ def zone_map_from_game(low, archive, src, tgt, to_xbox):
     return {k: t[n] for k, n in s.items() if n in t}
 
 
+def convert_level_ps2only(data, notes, stem='', xbox_pmt=None):
+    """A PS2 level bundle that is no level of the game (a new level from the Blender add-on) as an Xbox one, every
+    chunk at its number: textures and meshes encoded for the Xbox, collision (BND0: the same bytes on both games) and
+    the rest as they are; the physics materials (PMT0) the Xbox game's own when given (xbox_pmt: its PMT0 chunks, the
+    same table). Converting it as an edit of the stock level sharing the most chunks (only its physics materials)
+    mixed the two levels' chunks: stretched triangles all over the Xbox level (2026-11-17)."""
+    from rdrformats import rsc, ps2rsc, rscwrite
+    P = rsc.read_chunks(data)
+    chunks = [(c.tag, c.data) for c in P]
+    names = {}
+    for i, c in enumerate(P, 1):
+        if c.tag == 'TEX0':
+            raw = c.data[0xA0:]
+            names[i] = raw[:raw.index(b'\0')].decode('latin-1') if b'\0' in raw else ''
+    num_of = {n.lower(): i for i, n in names.items() if n}
+    ntex = nmesh = 0
+    for i, c in enumerate(P, 1):
+        if c.tag != 'TEX0':
+            continue
+        pal_num, mip_num = struct.unpack_from('<II', c.data, 0x90)
+        name, rgba = ps2rsc.texture_of(P, i)
+        h, w = rgba.shape[:2]
+        if w & (w - 1) or h & (h - 1):
+            notes.append(f'{stem}: texture {name} is {w} x {h}, not powers of two: left as it was')
+            continue
+        mip, pal, tex0 = rscwrite.texture_chunks(name, rgba, pal_num, mip_num)
+        chunks[mip_num - 1], chunks[pal_num - 1], chunks[i - 1] = mip, pal, tex0
+        ntex += 1
+    for i, c in enumerate(P, 1):
+        if c.tag != 'MOD0':
+            continue
+        model = ps2rsc.to_model(ps2rsc.read_mod0(c.data), names)
+        chunks[i - 1] = ('MOD0', rscwrite.mod0(model, lambda t: num_of.get((t or '').lower(), 0), level=True,
+                                               keep_uv2=False))
+        nmesh += 1
+    pmt = [d for t, d in (xbox_pmt or [])]
+    k = 0
+    for i, (t, d) in enumerate(chunks):
+        if t == 'PMT0' and k < len(pmt):
+            chunks[i] = ('PMT0', pmt[k])
+            k += 1
+    notes.append(f'{stem}: a new level (no level of the game is its base): made for the Xbox chunk by chunk -- '
+                 f'{ntex} textures, {nmesh} meshes, collision as it is')
+    return rscwrite.write_bundle(chunks, rscwrite.ALIGN)
+
+
 def level_convert(stem, path, data, archive, new_arch, every, src, tgt, to_xbox, notes):
     sx, tx = ('.xrsc', '.rsc') if not to_xbox else ('.rsc', '.xrsc')
     zs, zt = ('.xznes', '.znes') if not to_xbox else ('.znes', '.xznes')
@@ -1239,7 +1285,7 @@ def level_convert(stem, path, data, archive, new_arch, every, src, tgt, to_xbox,
         for a in src.archives:
             if not a.startswith('lvls_'):
                 continue
-            for k in src.index['archives'][a]['names']:
+            for k in src.index['archives'].get(a, {}).get('names', []):  # an Xbox-only archive (Coliseum): none
                 kl = k.lower()
                 if kl.startswith('lvl_') and kl.endswith(sx) and '_' not in kl[4:-len(sx)]:
                     raw = src.get(a, kl)
@@ -1250,6 +1296,19 @@ def level_convert(stem, path, data, archive, new_arch, every, src, tgt, to_xbox,
                     same = sum(1 for x, y in zip(S, C) if x.data == y.data)
                     if same > best[0]:
                         best = (same, a, kl[:-len(sx)])
+        # a new level (the Blender add-on's): it shares only the physics materials with any level of the game
+        base_mats = sum(1 for c in S if c.tag == 'PMT0')
+        if to_xbox and (not best[1] or best[0] <= base_mats):
+            xbox_pmt = None
+            if best[1]:
+                try:
+                    xbox_pmt = [(c.tag, c.data) for c in rsc.read_chunks(tgt.get(best[1], best[2] + tx))
+                                if c.tag == 'PMT0']
+                except Exception:                               # noqa: BLE001
+                    xbox_pmt = None
+            # every chunk keeps its number, so the zone and bound files keep theirs: an empty map turned every zone's
+            # number into 0 and the Xbox game crashed loading the level (a model placed in a New .dat level, 2026-11-18)
+            return convert_level_ps2only(data, notes, stem, xbox_pmt), _Same()
         if not best[1]:
             notes.append(f'{stem}: no level of the game is its base: left out')
             return None, None
@@ -1263,7 +1322,7 @@ def level_convert(stem, path, data, archive, new_arch, every, src, tgt, to_xbox,
         return tgt_clean, {}
 
     def zones(game, ext, xbox_side):
-        return [game.get(sarch, n).decode('latin-1') for n in game.index['archives'][sarch]['names']
+        return [game.get(sarch, n).decode('latin-1') for n in game.index['archives'].get(sarch, {}).get('names', [])
                 if n.lower().startswith(sstem + '_') and n.lower().endswith(ext) or n.lower() == sstem + ext]
     mod_zones = [open(p, encoding='latin-1').read() for k, p in every.items()
                  if os.path.dirname(p) == os.path.dirname(path) and k.endswith(zs)]

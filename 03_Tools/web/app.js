@@ -706,6 +706,7 @@ const renderPlain = new THREE.MeshStandardMaterial({
   color: 0xb8a68c, roughness: 0.95, flatShading: true, side: THREE.DoubleSide,
 });
 let renderMode = 'textured';   // textured | vertexcolor | plain | off
+var lastRenderMode = 'textured';  // what the Layers' Models switch turns back on
 // LOD 1 by default: a level can hold 20+ actors, and LOD 0 is the model
 // meant for a close-up of one.
 let castLod = 1;
@@ -1063,10 +1064,35 @@ function endRmb() {
   if (navMode !== 'fly') fly.keys.clear();
 }
 
+// Every key held down, wherever focus was: when the right button goes down, the fly keys already held start
+// flying at once. Holding Shift+S and then clicking to fly did nothing -- a lone Shift+S is the Scale shortcut, so
+// it was set aside, and pressing the button after it never picked it up (2026-11-24).
+const heldKeys = new Set();
+// and which mouse buttons are down (any of them): the G / R / Shift+S / T keys do nothing while one is held
+// (2026-11-24, the user's: Shift+S switched to Scale while a click was held)
+let mouseButtonsHeld = 0;
+for (const t of ['pointerdown', 'pointerup', 'pointermove'])
+  addEventListener(t, (e) => {
+    if (e.pointerType !== 'mouse') return;
+    const was = mouseButtonsHeld;
+    mouseButtonsHeld = e.buttons;
+    // a button going down while fly keys are held (one set aside as the Scale shortcut before it): they fly now,
+    // where flying is allowed (fly navigation, or the right button)
+    if (e.buttons & ~was && level && !walk.on && (navMode === 'fly' || (e.buttons & 2)))
+      for (const c of heldKeys)
+        if (/^(KeyW|KeyA|KeyS|KeyD|KeyQ|KeyE|ShiftLeft)$/.test(c)) fly.keys.add(c);
+  }, true);
+addEventListener('blur', () => { mouseButtonsHeld = 0; });
+addEventListener('keydown', (e) => { heldKeys.add(e.code); }, true);
+addEventListener('keyup', (e) => { heldKeys.delete(e.code); }, true);
+addEventListener('blur', () => heldKeys.clear());
+
 watchButtons(window, (kind, btn) => {
   if (btn !== 2) return;
   if (kind === 'down') {
     rmbDown = true;
+    for (const c of heldKeys)
+      if (/^(KeyW|KeyA|KeyS|KeyD|KeyQ|KeyE|ShiftLeft)$/.test(c)) fly.keys.add(c);
     // While the right button is down, dragging LOOKS (steers the camera)
     // instead of panning. OrbitControls maps RIGHT to PAN, so the advertised
     // "hold RMB and fly with WASD" gesture shoved the world sideways under
@@ -1130,6 +1156,11 @@ addEventListener('keydown', (e) => {
     }
     return;
   }
+  // Shift+S on its own -- not already flying (no right button, no other fly key held) -- is the Scale shortcut, not
+  // "fly backwards fast": in fly navigation it switched to Scale AND moved the camera (2026-11-24, the user's)
+  // (any mouse button held is navigating too: with the left one held Shift+S stopped the camera instead of flying)
+  if (e.code === 'KeyS' && e.shiftKey && !rmbDown && !mouseButtonsHeld && !e.repeat
+      && ![...fly.keys].some((c) => /^Key[WADQE]$/.test(c))) return;
   if (/^(KeyW|KeyA|KeyS|KeyD|KeyQ|KeyE|ShiftLeft)$/.test(e.code))
     fly.keys.add(e.code);
 });
@@ -1161,6 +1192,7 @@ function draw() {
   // the next drag turn on the spot rather than orbit something distant.
   else { stepFly(); controls.update(); }
   if (gridOn && uiReady) updateGrid();
+  ccTick();
   renderer.render(scene, camera);
 }
 
@@ -2273,6 +2305,7 @@ async function loadGeometry(archive) {
       // appeared to grab something far away.
       if (m.uid != null) mesh.userData.uid = m.uid;
       worldGroup.add(mesh);
+      ccOutline(mesh);
     }
     worldGroup.visible = worldMode !== 'off';
     worldInfo = g;
@@ -2293,6 +2326,7 @@ function setWorldMode(mode) {
   for (const m of worldGroup.children)
     m.material = mode === 'wire' ? worldWire : worldMat;
   syncVpBar();
+  if (window.__cc) ccApplyOutlines();
 }
 
 // The viewport chips and the View-fold selects are the same switches; both
@@ -2441,6 +2475,10 @@ async function loadRenderGeometry(archive, attempt = 0) {
     setRenderMode(renderMode);
     renderGroup.visible = renderMode !== 'off';
     renderInfo = g;
+    // A level with no models yet (a New .dat blank slate): the ground grid on, so there is somewhere to see and
+    // to place against -- its spawns, volumes and collision float in an empty view otherwise
+    if (!g.meshes.length && !gridOn) setGrid(true);
+    try { renderAddPanel(); } catch {}
     // The surfaces have only just appeared. Both of these ran earlier, when
     // renderGroup was still empty, so the chunk-to-car join and the outliner's
     // "unassigned surfaces" group had nothing to work with.
@@ -2512,6 +2550,7 @@ function setRenderMode(mode) {
   refreshDeletedChunks();
   addInstanceCopies();
   applyHidden();
+  applyArtOpacity();
 }
 
 function frameLevel(b) {
@@ -2648,6 +2687,8 @@ watchButtons(renderer.domElement, (kind, btn, e) => {
   const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
   downAt = null;
   if (moved > 4 || gizmo.dragging) return;
+  if (window.__cc && window.__cc.giz.dragging) return;
+  if (ccClick(e)) return;               // the collision creator's tools first
 
   if (placeMode) {
     if (placeBusy) return;             // a reload is in flight; one at a time
@@ -2839,7 +2880,7 @@ function select(uid, add = false) {
   // No separate collision entity: a shell that belongs to a model IS that
   // model. Clicking one (Collision pick filter, or the layer) selects the
   // model, whose panel carries the solid / walk-through switch.
-  if (uid != null && !collisionAlone) {
+  if (uid != null && !collisionAlone && pickFilter !== 'collision') {
     const bn = nodeOf(uid);
     if (bn && bn.kind === 'bound' && bn.linked !== undefined && bn.linked !== null
         && nodeOf(bn.linked)) uid = bn.linked;
@@ -2873,6 +2914,9 @@ function select(uid, add = false) {
 }
 
 function syncSelectionUI(scroll = true) {
+  // a new selection starts on Move (G)
+  if (selected !== window.__ccLastSel) { window.__ccLastSel = selected; gizmo.setMode('translate'); }
+  try { renderCollCreator(); } catch (e) { console.warn('collision creator', e); }
   // A world surface gets the anchor at its own centre; everything else keeps
   // the marker it always had. One selection can only be one of the two, and
   // multi-select stays on the node path -- reshape ops are per chunk.
@@ -3378,6 +3422,7 @@ function revert(uid) {
 // ------------------------------------------------------------------- panels
 
 function renderLayers() {
+  try { renderCollCreator(); } catch (e) { console.warn('collision creator', e); }
   const box = $('#layers');
   // How the view is DRAWN is a different question from what the level
   // CONTAINS, and the first used to be stacked on top of the second: eight
@@ -3613,6 +3658,25 @@ function renderLayers() {
   wb.onclick = () => (walk.on ? setWalk(false) : standAtSpawn());
   vbox.append(wb);
 
+  {
+    // The level's models (the drawn surfaces) as a layer of their own: shown
+    // or hidden here, and left out of a box select while hidden.
+    const ml = el('label', 'row');
+    ml.style.cursor = 'pointer';
+    const mcb = el('input');
+    mcb.type = 'checkbox';
+    mcb.checked = renderGroup.visible;
+    mcb.onchange = () => {
+      if (mcb.checked) setRenderMode(lastRenderMode || 'textured');
+      else { if (renderMode !== 'off') lastRenderMode = renderMode; setRenderMode('off'); }
+      renderLayers();
+    };
+    const md = el('span', 'dot');
+    md.style.background = '#b8a68c';
+    ml.append(mcb, md, el('span', 'nm', 'Models'), el('span', 'tag', String(renderGroup.children.length)));
+    ml.title = 'The level\'s drawn models (buildings, props, ground)';
+    box.append(ml);
+  }
   for (const [k, spec] of Object.entries(KINDS)) {
     const lab = el('label', 'row');
     lab.style.cursor = 'pointer';
@@ -3875,6 +3939,23 @@ function eyeButton(hidden, onToggle) {
   return b;
 }
 
+let objAnchor = null;          // the Objects list row last clicked (no Shift): where a Shift+click range starts
+
+// Several objects selected at once (the Objects list's Shift+click range): added as they are -- select() toggles
+// one already selected, which would punch holes in a range. keep: added to what is selected.
+function selectMany(uids, keep, last) {
+  if (!keep) {
+    for (const u of selection) setHighlight(u, false);
+    selection.clear();
+  }
+  for (const u of uids) {
+    if (!selection.has(u)) { selection.add(u); setHighlight(u, true); }
+  }
+  selected = last != null ? last : (uids.length ? uids[uids.length - 1] : selected);
+  chunkSel = null;
+  syncSelectionUI(false);
+}
+
 function renderObjectList() {
   const box = $('#objList');
   const filter = $('#objFilter').value.trim().toLowerCase();
@@ -3979,7 +4060,20 @@ function renderObjectList() {
       // Single click SELECTS and nothing else. It used to fly the camera too,
       // which for a building meant flying to the origin -- away from it.
       // Double click frames, which is the gesture every 3D tool uses.
-      row.onclick = (e) => select(n.uid, e.shiftKey || e.ctrlKey);
+      // Click selects; Ctrl+click adds / takes away one; Shift+click selects every row from the last click to
+      // this one, as a file list does (2026-11-24, the user's)
+      row.onclick = (e) => {
+        if (e.shiftKey && objAnchor != null) {
+          const order = [...document.querySelectorAll('#objList .row[data-uid]')].map((r) => +r.dataset.uid);
+          const a = order.indexOf(objAnchor), b = order.indexOf(n.uid);
+          if (a >= 0 && b >= 0) {
+            selectMany(order.slice(Math.min(a, b), Math.max(a, b) + 1), e.ctrlKey, n.uid);
+            return;
+          }
+        }
+        if (!e.shiftKey) objAnchor = n.uid;
+        select(n.uid, e.shiftKey || e.ctrlKey);
+      };
       row.ondblclick = () => { select(n.uid); focusOn(n.uid); };
       box.append(row);
     }
@@ -4248,7 +4342,7 @@ async function applyShape(chunk, label) {
   try {
     const r = await post('geom_edit', {
       archive: level.archive, area: level.area, chunk, label, ops,
-      set: moveAsSet });
+      set: moveAsSet, alone: collisionAlone });
     if (r.changed === false) toast('Nothing to change — it is already there', 'good');
     else {
       let m = `Reshaped ${label} — Ctrl+Z to undo`;
@@ -4297,7 +4391,7 @@ async function applyMassShape(chunks, t, label) {
     // centre and leave the arrangement untouched, and it would be N writes
     // and N undo steps for one action.
     const r = await post('mass_edit', {
-      archive: level.archive, area: level.area, chunks, label, ops });
+      archive: level.archive, area: level.area, chunks, label, ops, alone: collisionAlone });
     if (r.changed === false) {
       toast('Back to the original shapes', 'good');
     } else {
@@ -4539,6 +4633,1912 @@ function addCollisionBoxDialog(n) {
   back.addEventListener('mousedown', (e) => { if (e.target === back) back.remove(); });
   document.body.append(back);
 }
+
+
+// ------------------------------------------------------- the collision creator
+//
+// 2026-11-18. Blocks, ramps and floor plates placed where you click and shaped
+// with their own gizmo (G / R / T) or by their corners; the faces of an existing
+// shell deleted (click, or Ctrl+drag a box); its corners dragged; a shell
+// removed. Everything goes to the server as game-space points and faces
+// (route coll_edit, rdrstudio/collcreate.py), which writes it on every bundle
+// the level has -- the mods folder's .rsc and/or .xrsc, each at its own chunk
+// number, or the disc's .rsc. The art can be faded (Art opacity) to line the
+// collision up with it.
+//
+// State lives on one lazily made object: renderLayers runs before this part of
+// the file has been evaluated, and a `let` here would still be in its TDZ.
+function cc() {
+  if (window.__cc) return window.__cc;
+  const g = new THREE.Group();
+  scene.add(g);
+  const giz = new TransformControls(camera, renderer.domElement);
+  giz.setSize(0.9);
+  giz.addEventListener('dragging-changed', (e) => { controls.enabled = !e.value; });
+  giz.addEventListener('objectChange', () => ccGizmoMoved());
+  scene.add(giz);
+  window.__cc = {
+    group: g, giz,
+    tool: null,          // 'place' | 'faces' | 'corners' | null
+    shape: 'block',      // what 'place' drops
+    draft: null,         // { mesh, verts: [Vector3 local], faces: [[i..]] }
+    handles: [],         // corner spheres (draft or existing shell)
+    handleOf: null,      // 'draft' | 'shell'
+    target: null,        // the worldGroup mesh being edited (faces / corners)
+    shellVerts: null,    // welded corners of the target: [Vector3]
+    shellTris: null,     // its triangles over shellVerts
+    faceSel: new Set(),  // selected triangle numbers of the target
+    selMesh: null,
+    solid: true, name: 'custom',
+    lastWhere: null,     // 'folder' | 'disc': what the Undo button takes back
+    artOpacity: 1,
+    outlines: true,      // each shell's own coloured outline in the solid view
+    hideOthers: false,   // only the shell being edited shown
+    addPoint: false,     // clicks on the shape add a corner (edge or face)
+    busy: false,
+  };
+  try {
+    const v = parseFloat(localStorage.getItem('rdr.artOpacity'));
+    if (v >= 0 && v <= 1) window.__cc.artOpacity = v;
+    window.__cc.outlines = localStorage.getItem('rdr.ccOutlines') !== '0';
+    window.__cc.hideOthers = localStorage.getItem('rdr.ccHideOthers') === '1';
+  } catch {}
+  return window.__cc;
+}
+
+var CC_DRAFT_MAT = new THREE.MeshStandardMaterial({
+  color: 0x5fd07a, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+  depthWrite: false, flatShading: true,
+});
+var CC_EDGE_MAT = new THREE.LineBasicMaterial({ color: 0x7dffa0, depthTest: false, transparent: true, opacity: 0.95 });
+var CC_HANDLE_MAT = new THREE.MeshBasicMaterial({ color: 0xffb040, depthTest: false });
+var CC_HANDLE_ON = new THREE.MeshBasicMaterial({ color: 0xff4040, depthTest: false });
+var CC_SEL_MAT = new THREE.MeshBasicMaterial({
+  color: 0xff3a3a, transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+  depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2,
+});
+
+// Unit shapes standing on y = 0 (y is up in the level), faces turned outward
+// by ccOrient. Sizes are the object's scale.
+var CC_SHAPES = {
+  block: { size: [2, 2, 2], label: 'Block',
+    v: [[-.5, 0, -.5], [.5, 0, -.5], [.5, 0, .5], [-.5, 0, .5],
+        [-.5, 1, -.5], [.5, 1, -.5], [.5, 1, .5], [-.5, 1, .5]],
+    f: [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]] },
+  // rises toward +z: walk up it from the low edge
+  ramp: { size: [2, 1, 3], label: 'Ramp',
+    v: [[-.5, 0, -.5], [.5, 0, -.5], [.5, 0, .5], [-.5, 0, .5], [.5, 1, .5], [-.5, 1, .5]],
+    f: [[0, 1, 2, 3], [3, 2, 4, 5], [0, 5, 4, 1], [1, 4, 2], [0, 3, 5]] },
+  plate: { size: [3, 0.25, 3], label: 'Floor plate',
+    v: [[-.5, 0, -.5], [.5, 0, -.5], [.5, 0, .5], [-.5, 0, .5],
+        [-.5, 1, -.5], [.5, 1, -.5], [.5, 1, .5], [-.5, 1, .5]],
+    f: [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]] },
+};
+
+function ccNormal(vs, f) {
+  const n = new THREE.Vector3();
+  for (let i = 0; i < f.length; i++) {
+    const a = vs[f[i]], b = vs[f[(i + 1) % f.length]];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n;
+}
+
+// Each face turned to point away from the shape's middle (the shapes are
+// convex): the game collides with a face from its front.
+function ccOrient(vs, faces) {
+  const mid = new THREE.Vector3();
+  vs.forEach((v) => mid.add(v));
+  mid.multiplyScalar(1 / vs.length);
+  return faces.map((f) => {
+    const c = new THREE.Vector3();
+    f.forEach((i) => c.add(vs[i]));
+    c.multiplyScalar(1 / f.length);
+    return ccNormal(vs, f).dot(c.sub(mid)) < 0 ? [...f].reverse() : [...f];
+  });
+}
+
+function ccTriangles(faces) {
+  const out = [];
+  for (const f of faces) for (let i = 1; i < f.length - 1; i++) out.push(f[0], f[i], f[i + 1]);
+  return out;
+}
+
+function ccBuildDraftGeometry() {
+  const s = cc(), d = s.draft;
+  if (!d) return;
+  const pos = [];
+  d.verts.forEach((v) => pos.push(v.x, v.y, v.z));
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(ccTriangles(d.faces));
+  geo.computeVertexNormals();
+  d.mesh.geometry.dispose();
+  d.mesh.geometry = geo;
+  d.edges.geometry.dispose();
+  d.edges.geometry = new THREE.EdgesGeometry(geo, 1);
+  d.edges.renderOrder = 9;
+  d.edges.visible = s.outlines;
+}
+
+function ccStartDraft(kind, at) {
+  const s = cc();
+  ccClearDraft();
+  const sh = CC_SHAPES[kind];
+  const verts = sh.v.map((p) => new THREE.Vector3(...p));
+  const mesh = new THREE.Mesh(new THREE.BufferGeometry(), CC_DRAFT_MAT);
+  const edges = new THREE.LineSegments(new THREE.BufferGeometry(), CC_EDGE_MAT);
+  mesh.add(edges);
+  mesh.position.copy(at);
+  mesh.scale.set(...sh.size);
+  // facing the camera: a ramp rises away from you
+  const look = new THREE.Vector3().subVectors(at, camera.position);
+  mesh.rotation.y = Math.atan2(look.x, look.z);
+  s.group.add(mesh);
+  s.draft = { mesh, edges, verts, faces: ccOrient(verts, sh.f), kind };
+  ccBuildDraftGeometry();
+  s.giz.setMode('translate');
+  s.giz.attach(mesh);
+  s.tool = null;
+  renderer.domElement.style.cursor = '';
+  renderCollCreator();
+}
+
+function ccClearDraft() {
+  const s = cc();
+  ccClearHandles();
+  if (s.draft) {
+    s.giz.detach();
+    s.group.remove(s.draft.mesh);
+    s.draft.mesh.geometry.dispose();
+    s.draft = null;
+  }
+}
+
+// Corner handles: every point a dot of one point cloud (any number of them:
+// a mesh per corner capped an edit at 600), the one being dragged a sphere the
+// gizmo holds. s.handles is the points' world positions.
+function ccClearHandles() {
+  const s = cc();
+  if (s.cloud) { s.group.remove(s.cloud); s.cloud.geometry.dispose(); s.cloud = null; }
+  if (s.activeHandle) { s.group.remove(s.activeHandle); s.activeHandle = null; }
+  s.handles = [];
+  s.handleOf = null;
+  if (s.giz.object && s.giz.object.userData.ccHandle !== undefined) s.giz.detach();
+}
+
+var CC_CLOUD_MAT = new THREE.PointsMaterial({ color: 0xffb040, size: 9, sizeAttenuation: false, depthTest: false });
+
+function ccMakeHandles(points, of) {
+  const s = cc();
+  ccClearHandles();
+  s.handles = points.map((p) => p.clone());
+  s.handleOf = of;
+  setTimeout(ccModeBox, 0);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(s.handles.flatMap((p) => [p.x, p.y, p.z]), 3));
+  s.cloud = new THREE.Points(geo, CC_CLOUD_MAT);
+  s.cloud.renderOrder = 10;
+  s.cloud.raycast = () => {};
+  s.group.add(s.cloud);
+}
+
+function ccCloudMoved(i) {
+  const s = cc();
+  if (!s.cloud) return;
+  const a = s.cloud.geometry.getAttribute('position');
+  a.setXYZ(i, s.handles[i].x, s.handles[i].y, s.handles[i].z);
+  a.needsUpdate = true;
+}
+
+// The handle nearest the click on screen, within 12 px. -> its number or -1.
+function ccPickHandle(e) {
+  const s = cc();
+  const r = renderer.domElement.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  let best = -1, bd = 144;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < s.handles.length; i++) {
+    v.copy(s.handles[i]).project(camera);
+    if (v.z < -1 || v.z > 1) continue;
+    const dx = (v.x + 1) / 2 * r.width - x, dy = (1 - v.y) / 2 * r.height - y;
+    const d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+
+function ccActivateHandle(i) {
+  const s = cc();
+  if (i < 0 || i >= s.handles.length) return;
+  if (!s.activeHandle) {
+    s.activeHandle = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), CC_HANDLE_ON);
+    s.activeHandle.renderOrder = 11;
+    s.group.add(s.activeHandle);
+  }
+  s.activeHandle.position.copy(s.handles[i]);
+  s.activeHandle.userData.ccHandle = i;
+  s.activeHandle.userData.ccOf = s.handleOf;
+  s.giz.setMode('translate');
+  s.giz.attach(s.activeHandle);
+}
+
+// The dragged handle sized to stay about the same on screen.
+function ccSizeHandles() {
+  const s = window.__cc;
+  if (!s || !s.activeHandle) return;
+  const d = s.activeHandle.position.distanceTo(camera.position);
+  s.activeHandle.scale.setScalar(Math.max(0.04, d * 0.008));
+}
+
+function ccDraftCorners(quiet) {
+  const s = cc();
+  if (!s.draft) return;
+  ccClearHandles();
+  s.draft.mesh.updateMatrixWorld(true);
+  ccMakeHandles(s.draft.verts.map((v) => v.clone().applyMatrix4(s.draft.mesh.matrixWorld)), 'draft');
+  s.giz.detach();
+  s.tool = 'corners';
+  if (!quiet) toast('Click a corner, then drag its arrows. Esc goes back to moving the whole shape.', 'good');
+  renderCollCreator();
+}
+
+function ccGizmoMoved() {
+  const s = cc();
+  const o = s.giz.object;
+  if (o && o === s.facePivot) { ccFacePivotMoved(); return; }
+  if (!o || o.userData.ccHandle === undefined) return;
+  const i = o.userData.ccHandle;
+  if (s.handles[i]) { s.handles[i].copy(o.position); ccCloudMoved(i); }
+  if (o.userData.ccOf === 'draft' && s.draft) {
+    s.draft.mesh.updateMatrixWorld(true);
+    const inv = s.draft.mesh.matrixWorld.clone().invert();
+    s.draft.verts[i].copy(o.position.clone().applyMatrix4(inv));
+    ccBuildDraftGeometry();
+  } else if (o.userData.ccOf === 'shell' && s.shellVerts) {
+    s.shellVerts[i].copy(o.position);
+    ccShellPreview();
+  } else if (o.userData.ccOf === 'spline' && s.spline) {
+    s.spline.verts[i].copy(o.position);
+    s.spline.moved.add(i);
+    ccSplinePreview();
+  }
+}
+
+// ----------------------------------------------------- an existing shell
+
+function ccSelectedShell() {
+  const s = cc();
+  if (s.target && s.target.parent) return s.target;
+  let m = null;
+  if (selected != null)
+    m = worldGroup.children.find((c) => c.userData.uid === selected) || null;
+  // Clicking a shell that belongs to a model selects the model (select()):
+  // its shell is the one meant.
+  if (!m && selected != null && level)
+    for (const bn of level.nodes)
+      if (bn.kind === 'bound' && bn.linked === selected) {
+        m = worldGroup.children.find((c) => c.userData.uid === bn.uid) || null;
+        if (m) break;
+      }
+  if (!m && chunkSel != null)
+    m = worldGroup.children.find((c) => c.userData.world?.resourceIndex === chunkSel) || null;
+  return m;
+}
+
+function ccShellData(mesh) {
+  // corners welded (1 mm): a shell's triangles keep their own copies
+  const w = mesh.userData.world, P = w.positions, key = new Map(), verts = [], remap = [];
+  for (let i = 0; i < P.length; i += 3) {
+    const k = `${Math.round(P[i] * 1000)},${Math.round(P[i + 1] * 1000)},${Math.round(P[i + 2] * 1000)}`;
+    if (!key.has(k)) { key.set(k, verts.length); verts.push(new THREE.Vector3(P[i], P[i + 1], P[i + 2])); }
+    remap.push(key.get(k));
+  }
+  const tris = [];
+  for (let i = 0; i < w.indices.length; i += 3)
+    tris.push([remap[w.indices[i]], remap[w.indices[i + 1]], remap[w.indices[i + 2]]]);
+  return { verts, tris };
+}
+
+function ccBeginShell(mode) {
+  const s = cc();
+  gizmo.setMode('translate');
+  s.giz.setMode('translate');
+  const m = ccSelectedShell();
+  if (!m) return toast('Select a collision shell first (pick filter: Collision, or the Collision view on).', 'bad');
+  ccClearDraft();
+  ccEndShell(false);
+  s.target = m;
+  const d = ccShellData(m);
+  s.shellVerts = d.verts;
+  s.shellTris = d.tris;
+  s.faceSel = new Set();
+  if (mode === 'corners') {
+    ccMakeHandles(d.verts, 'shell');
+    s.tool = 'corners';
+    ccShellPreview();
+    toast('Click a corner, then drag its arrows. Add point puts a new corner on an edge or a face. Save corners writes the shell.', 'good');
+  } else {
+    s.tool = 'faces';
+    toast('Click faces to select them (again to unselect); Ctrl+drag selects every face in a box. Delete removes them.', 'good');
+  }
+  if (worldMode === 'off') setWorldMode('solid');
+  ccApplyHideOthers();
+  renderCollCreator();
+}
+
+function ccEndShell(redraw = true) {
+  const s = cc();
+  if (s.spline) ccEndSpline(false);
+  if (s.facePivot && s.giz.object === s.facePivot) s.giz.detach();
+  s.faceStart = null; s.faceMoved = false;
+  ccClearHandles();
+  if (s.selMesh) { s.group.remove(s.selMesh); s.selMesh.geometry.dispose(); s.selMesh = null; }
+  if (s.preview) { s.group.remove(s.preview); s.preview.geometry.dispose(); s.preview = null; }
+  if (s.target) s.target.visible = true;
+  s.target = null; s.shellVerts = null; s.shellTris = null; s.faceSel = new Set();
+  s.addPoint = false;
+  if (s.tool === 'faces' || (s.tool === 'corners' && !s.draft)) s.tool = null;
+  ccApplyHideOthers();
+  if (redraw) renderCollCreator();
+}
+
+function ccShowSel() {
+  const s = cc();
+  if (s.selMesh) { s.group.remove(s.selMesh); s.selMesh.geometry.dispose(); s.selMesh = null; }
+  if (!s.target || !s.faceSel.size) return;
+  const pos = [];
+  for (const t of s.faceSel) for (const i of s.shellTris[t]) { const v = s.shellVerts[i]; pos.push(v.x, v.y, v.z); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  s.selMesh = new THREE.Mesh(geo, CC_SEL_MAT);
+  s.selMesh.renderOrder = 5;
+  s.group.add(s.selMesh);
+}
+
+function ccShellPreview() {
+  const s = cc();
+  if (s.preview) { s.group.remove(s.preview); s.preview.geometry.dispose(); }
+  const pos = [];
+  s.shellVerts.forEach((v) => pos.push(v.x, v.y, v.z));
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(s.shellTris.flat());
+  geo.computeVertexNormals();
+  s.preview = new THREE.Mesh(geo, CC_DRAFT_MAT);
+  // the shell's own outline, as "Outline each shell" draws it -- every edge drawn over everything, so the shape
+  // reads while its corners are dragged (that box switches it here too)
+  const ol = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 1), new THREE.LineBasicMaterial({
+    color: ccShellColour(s.target ? (s.target.userData.world || {}).name || '' : ''), depthTest: false,
+    transparent: true, opacity: 0.95 }));
+  ol.renderOrder = 9;
+  ol.userData.ccOutline = true;
+  ol.visible = s.outlines;
+  ol.raycast = () => {};
+  s.preview.add(ol);
+  s.group.add(s.preview);
+  ccApplyHideOthers();
+}
+
+// Select faces: the selected faces' corners moved, turned or scaled together round their middle (G, R, Shift+S)
+// with a gizmo on a pivot there; Save faces writes the shell.
+function ccFaceGizmo(mode) {
+  const s = cc();
+  if (s.tool !== 'faces' || !s.faceSel.size) { toast('Select faces first (click them, or Ctrl+drag a box).'); return; }
+  const ids = new Set();
+  for (const t of s.faceSel) for (const i of s.shellTris[t]) ids.add(i);
+  const mid = new THREE.Vector3();
+  ids.forEach((i) => mid.add(s.shellVerts[i]));
+  mid.multiplyScalar(1 / ids.size);
+  if (!s.facePivot) { s.facePivot = new THREE.Object3D(); s.group.add(s.facePivot); }
+  s.facePivot.position.copy(mid);
+  s.facePivot.rotation.set(0, 0, 0);
+  s.facePivot.scale.set(1, 1, 1);
+  s.facePivot.updateMatrixWorld(true);
+  s.faceStart = { inv: s.facePivot.matrixWorld.clone().invert(), pts: new Map([...ids].map((i) => [i, s.shellVerts[i].clone()])) };
+  if (!s.preview) ccShellPreview();
+  s.giz.setMode(mode);
+  s.giz.attach(s.facePivot);
+  s.faceMoved = true;
+  renderCollCreator();
+}
+
+function ccFacePivotMoved() {
+  const s = cc();
+  if (!s.faceStart) return;
+  s.facePivot.updateMatrixWorld(true);
+  const m = s.facePivot.matrixWorld.clone().multiply(s.faceStart.inv);
+  for (const [i, p] of s.faceStart.pts) s.shellVerts[i].copy(p).applyMatrix4(m);
+  ccShellPreview();
+  ccShowSel();
+}
+
+function ccFacePick(e) {
+  const s = cc();
+  const r = renderer.domElement.getBoundingClientRect();
+  ptr.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  ptr.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObject(s.target, false)[0];
+  if (!hit) return;
+  const t = hit.faceIndex;
+  if (s.faceSel.has(t)) s.faceSel.delete(t); else s.faceSel.add(t);
+  ccShowSel();
+  renderCollCreator();
+}
+
+function ccBoxSelect(x0, y0, x1, y1, remove) {
+  const s = cc();
+  const r = renderer.domElement.getBoundingClientRect();
+  const lo = [Math.min(x0, x1) - r.left, Math.min(y0, y1) - r.top];
+  const hi = [Math.max(x0, x1) - r.left, Math.max(y0, y1) - r.top];
+  const c = new THREE.Vector3();
+  s.shellTris.forEach((t, k) => {
+    c.set(0, 0, 0);
+    t.forEach((i) => c.add(s.shellVerts[i]));
+    c.multiplyScalar(1 / 3).project(camera);
+    if (c.z < -1 || c.z > 1) return;
+    const sx = (c.x + 1) / 2 * r.width, sy = (1 - c.y) / 2 * r.height;
+    if (sx >= lo[0] && sx <= hi[0] && sy >= lo[1] && sy <= hi[1]) {
+      if (remove) s.faceSel.delete(k); else s.faceSel.add(k);
+    }
+  });
+  ccShowSel();
+  renderCollCreator();
+}
+
+// Ctrl+drag a box in face mode. Own listeners, capture phase, so the orbit
+// controls never see the drag.
+(function ccBoxDrag() {
+  let start = null, box = null;
+  const dom = renderer.domElement;
+  dom.addEventListener('pointerdown', (e) => {
+    const s = window.__cc;
+    if (!s || s.tool !== 'faces' || !e.ctrlKey || e.button !== 0) return;
+    start = [e.clientX, e.clientY];
+    box = document.createElement('div');
+    box.style.cssText = 'position:fixed;border:1px dashed #ff6060;background:rgba(255,60,60,.12);pointer-events:none;z-index:50';
+    document.body.append(box);
+    controls.enabled = false;
+    e.stopImmediatePropagation();
+  }, true);
+  window.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    const x = Math.min(start[0], e.clientX), y = Math.min(start[1], e.clientY);
+    box.style.left = x + 'px'; box.style.top = y + 'px';
+    box.style.width = Math.abs(e.clientX - start[0]) + 'px';
+    box.style.height = Math.abs(e.clientY - start[1]) + 'px';
+  }, true);
+  window.addEventListener('pointerup', (e) => {
+    if (!start) return;
+    const a = start;
+    start = null;
+    box.remove();
+    controls.enabled = true;
+    if (Math.hypot(e.clientX - a[0], e.clientY - a[1]) > 4)
+      ccBoxSelect(a[0], a[1], e.clientX, e.clientY, e.altKey);
+    ccSwallowClick = true;
+  }, true);
+})();
+var ccSwallowClick = false;
+
+// The viewport's left click, first refusal (the picker calls this before its
+// own selection). -> true when the creator used the click.
+function ccClick(e) {
+  const s = window.__cc;
+  if (!s) return false;
+  if (ccSwallowClick) { ccSwallowClick = false; return true; }
+  if (s.boxSel) return true;
+  if (s.tool === 'draw' && s.draw) { ccDrawClick(e); return true; }
+  if (s.tool === 'importplace') {
+    const p = surfacePoint(e, true);
+    if (p) ccImportAt(p);
+    else toast('Aim at a surface: the model stands where you click.');
+    return true;
+  }
+  if (s.tool === 'addnode') {
+    const p = surfacePoint(e, true);
+    if (p) ccAddComponent(p, e.shiftKey);
+    else toast('Aim at a surface: it goes where you click.');
+    return true;
+  }
+  if (s.tool === 'place') {
+    const p = surfacePoint(e, true);
+    if (p) ccStartDraft(s.shape, p);
+    else toast('Aim at a surface: the shape stands where you click.');
+    return true;
+  }
+  if (s.addPoint && (s.handleOf === 'draft' || s.handleOf === 'shell')) {
+    // a click on a corner still picks the corner; anywhere else on the shape adds one
+    const r0 = renderer.domElement.getBoundingClientRect();
+    ptr.x = ((e.clientX - r0.left) / r0.width) * 2 - 1;
+    ptr.y = -((e.clientY - r0.top) / r0.height) * 2 + 1;
+    ray.setFromCamera(ptr, camera);
+    if (ccPickHandle(e) < 0) { ccAddPointClick(e); return true; }
+  }
+  if (s.handles.length) {
+    const i = ccPickHandle(e);
+    if (i >= 0) { ccActivateHandle(i); return true; }
+    return s.tool === 'corners';
+  }
+  if (s.tool === 'faces' && s.target) { ccFacePick(e); if (s.faceStart) ccFaceGizmo(s.giz.mode); return true; }
+  if (s.draft) return true;            // a click beside the shape keeps it
+  return false;
+}
+
+// ----------------------------------------------------- saving
+
+async function ccSend(body, what) {
+  const s = cc();
+  if (s.busy) return null;
+  s.busy = true;
+  try {
+    const r = await post('coll_edit', Object.assign({
+      archive: level.archive, manifest: level.manifest, area: level.area }, body));
+    if (r.ok === false) throw new Error(r.error_text);
+    s.lastWhere = r.where;
+    const plat = (r.platforms || []).map((p) => (p === 'ps2' ? 'PS2' : 'Xbox')).join(' + ');
+    toast(`${what}${r.name ? ' ' + r.name : ''}` + (plat ? ` (${plat}` + (r.where === 'disc' ? ', disc)' : ', mods folder)') : '')
+          + (r.where === 'folder' ? '. Undo collision edit takes it back.' : '. Ctrl+Z undoes it.'), 'good');
+    await reloadLevel(true, true);
+    refreshHistory();
+    return r;
+  } catch (err) {
+    toast(err.message, 'bad');
+    return null;
+  } finally {
+    s.busy = false;
+  }
+}
+
+async function ccSaveDraft() {
+  const s = cc(), d = s.draft;
+  if (!d) return;
+  d.mesh.updateMatrixWorld(true);
+  const verts = d.verts.map((v) => v.clone().applyMatrix4(d.mesh.matrixWorld).toArray().map((x) => +x.toFixed(4)));
+  // a mirrored scale turns every face inside out
+  const faces = d.mesh.matrixWorld.determinant() < 0 ? d.faces.map((f) => [...f].reverse()) : d.faces;
+  const r = await ccSend({ op: 'add', verts, faces, name: s.name || 'custom', solid: s.solid },
+                         `Added ${CC_SHAPES[d.kind].label.toLowerCase()}`);
+  if (r) ccClearDraft();
+  renderCollCreator();
+}
+
+function ccNodeOf(mesh) {
+  const w = mesh.userData.world;
+  return { node: w.name, chunk: w.resourceIndex };
+}
+
+async function ccDeleteFaces() {
+  const s = cc();
+  if (!s.target || !s.faceSel.size) return;
+  const keep = s.shellTris.filter((_t, k) => !s.faceSel.has(k));
+  const id = ccNodeOf(s.target);
+  let r;
+  if (!keep.length) {
+    if (!confirm(`That is every face of ${id.node}: remove the whole shell?`)) return;
+    r = await ccSend({ op: 'remove', node: id.node }, 'Removed');
+  } else {
+    r = await ccSend({ op: 'replace', node: id.node, chunk: id.chunk,
+                       verts: s.shellVerts.map((v) => v.toArray()), faces: keep },
+                     `Deleted ${s.faceSel.size} face(s) of`);
+  }
+  if (r) ccEndShell();
+}
+
+async function ccSaveCorners() {
+  const s = cc();
+  if (!s.target) return;
+  const id = ccNodeOf(s.target);
+  const r = await ccSend({ op: 'replace', node: id.node, chunk: id.chunk,
+                           verts: s.shellVerts.map((v) => v.toArray()), faces: s.shellTris },
+                         'Reshaped');
+  if (r) ccEndShell();
+}
+
+async function ccRemoveShell() {
+  const m = cc().target || ccSelectedShell();
+  if (!m) return toast('Select a collision shell first.', 'bad');
+  const id = ccNodeOf(m);
+  if (!confirm(`Remove the collision ${id.node}? (Undo collision edit brings it back.)`)) return;
+  const r = await ccSend({ op: 'remove', node: id.node }, 'Removed');
+  if (r) ccEndShell();
+}
+
+async function ccUndo() {
+  const s = cc();
+  if (!s.lastWhere) return toast('No collision edit to undo in this session.');
+  if (s.lastWhere === 'journal' || s.lastWhere === 'disc') { s.lastWhere = null; await doUndo(); renderCollCreator(); return; }
+  await ccSend({ op: 'undo', where: s.lastWhere }, 'Undid the last collision edit');
+  s.lastWhere = null;
+  renderCollCreator();
+}
+
+// ----------------------------------------------------- art opacity
+
+function applyArtOpacity() {
+  const s = window.__cc;
+  const a = s ? s.artOpacity : 1;
+  const seen = new Set();
+  const fade = (mat) => {
+    if (!mat || seen.has(mat)) return;
+    seen.add(mat);
+    const u = mat.userData;
+    if (u.ccOp === undefined) {
+      u.ccOp = mat.opacity; u.ccTr = mat.transparent; u.ccDw = mat.depthWrite;
+      u.ccAt = mat.alphaTest || 0; u.ccVis = mat.visible;
+    }
+    if (a >= 0.999) {
+      if (mat.transparent !== u.ccTr || mat.alphaTest !== u.ccAt) mat.needsUpdate = true;
+      mat.transparent = u.ccTr; mat.opacity = u.ccOp; mat.depthWrite = u.ccDw;
+      mat.alphaTest = u.ccAt; mat.visible = u.ccVis;
+      return;
+    }
+    // A multiply-blended pass (decals, shadows, glows) ignores opacity: it is
+    // left out while the art is faded. Before, it stayed at full strength.
+    if (mat.blending === THREE.MultiplyBlending) { mat.visible = false; return; }
+    // The cut-out threshold scaled with the fade: at 0.35 of a fully opaque
+    // texel, every surface vanished at once below 35% instead of fading.
+    const at = u.ccAt * a;
+    if (!mat.transparent || mat.alphaTest !== at) mat.needsUpdate = true;
+    mat.visible = u.ccVis;
+    mat.transparent = true;
+    mat.opacity = u.ccOp * a;
+    mat.alphaTest = at;
+    mat.depthWrite = false;
+  };
+  for (const grp of [renderGroup, instanceGroup, castGroup])
+    grp.traverse((o) => {
+      if (!o.material || o.isLineSegments) return;
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach(fade);
+    });
+  const hide = a <= 0.001;
+  renderGroup.visible = !hide && renderMode !== 'off';
+  instanceGroup.visible = !hide && renderMode !== 'off';
+  if (s) { s.fadedMats = texMats.size; s.fadedMeshes = renderGroup.children.length; }
+}
+
+// Every frame: corner handles kept a steady size on screen, and surfaces that
+// loaded after the slider moved (their materials are made as they come into
+// view) faded too.
+function ccTick() {
+  const s = window.__cc;
+  if (!s) return;
+  ccSizeHandles();
+  ccModeBox();
+  if (s.artOpacity < 0.999 && (s.fadedMats !== texMats.size || s.fadedMeshes !== renderGroup.children.length))
+    applyArtOpacity();
+}
+
+// ----------------------------------------------------- outlines
+//
+// Each shell drawn with an outline of its own colour (solid view): where one
+// shell ends and the next begins reads at a glance in a murk of overlapping
+// translucent hulls.
+function ccShellColour(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return new THREE.Color().setHSL((h % 360) / 360, 0.75, 0.62);
+}
+
+function ccOutline(mesh) {
+  const w = mesh.userData.world || {};
+  const line = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 20),
+    new THREE.LineBasicMaterial({ color: ccShellColour(w.name || ''), transparent: true, opacity: 0.9 }));
+  line.userData.ccOutline = true;
+  line.raycast = () => {};                    // never a click target
+  mesh.add(line);
+  const s = window.__cc;
+  line.visible = (s ? s.outlines : true) && worldMode === 'solid';
+}
+
+function ccApplyOutlines() {
+  const s = cc();
+  for (const m of worldGroup.children)
+    for (const c of m.children)
+      if (c.userData.ccOutline) c.visible = s.outlines && worldMode === 'solid';
+  // the shape being edited (its corners, or a new shape): the same switch, whatever the collision view
+  if (s.preview) for (const c of s.preview.children) if (c.userData.ccOutline) c.visible = s.outlines;
+  if (s.draft) s.draft.edges.visible = s.outlines;
+}
+
+function ccApplyHideOthers() {
+  // each shell's own visibility kept and put back: the outliner can hide one
+  const s = cc();
+  for (const m of worldGroup.children) {
+    if (s.target) {
+      if (m.userData.ccVis === undefined) m.userData.ccVis = m.visible;
+      m.visible = m === s.target ? !s.preview : (s.hideOthers ? false : m.userData.ccVis);
+    } else if (m.userData.ccVis !== undefined) {
+      m.visible = m.userData.ccVis;
+      delete m.userData.ccVis;
+    }
+  }
+}
+
+// ----------------------------------------------------- adding points
+//
+// A click on a shape in Add point mode: near an edge (within an eighth of it,
+// 5 cm at least) the edge is split there -- both triangles that share it --
+// else the face is split into three round the point. The new corner is
+// selected, ready to drag. verts: [Vector3], tris: [[a, b, c]] (changed in
+// place). -> the new corner's number.
+function ccSplitAt(verts, tris, ti, P) {
+  const t = tris[ti];
+  let best = null;
+  for (let k = 0; k < 3; k++) {
+    const a = verts[t[k]], b = verts[t[(k + 1) % 3]];
+    const ab = new THREE.Vector3().subVectors(b, a);
+    const len = ab.length();
+    if (len < 1e-6) continue;
+    const u = Math.max(0, Math.min(1, new THREE.Vector3().subVectors(P, a).dot(ab) / (len * len)));
+    const q = a.clone().addScaledVector(ab, u);
+    const d = q.distanceTo(P);
+    if (!best || d < best.d) best = { d, k, q, len, u };
+  }
+  const ni = verts.length;
+  if (best && best.d < Math.max(0.05, best.len / 8) && best.u > 0.02 && best.u < 0.98) {
+    verts.push(best.q);
+    const ia = t[best.k], ib = t[(best.k + 1) % 3];
+    const out = [];
+    for (const tri of tris) {
+      let j = -1;
+      for (let k = 0; k < 3; k++) {
+        const x = tri[k], y = tri[(k + 1) % 3];
+        if ((x === ia && y === ib) || (x === ib && y === ia)) j = k;
+      }
+      if (j < 0) { out.push(tri); continue; }
+      const e0 = tri[j], e1 = tri[(j + 1) % 3], c = tri[(j + 2) % 3];
+      out.push([e0, ni, c], [ni, e1, c]);        // same turn as the triangle it was
+    }
+    tris.length = 0;
+    tris.push(...out);
+  } else {
+    verts.push(P.clone());
+    const [a, b, c] = t;
+    tris.splice(ti, 1, [a, b, ni], [b, c, ni], [c, a, ni]);
+  }
+  return ni;
+}
+
+function ccAddPointClick(e) {
+  const s = cc();
+  const r = renderer.domElement.getBoundingClientRect();
+  ptr.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  ptr.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  ray.setFromCamera(ptr, camera);
+  let ni;
+  if (s.handleOf === 'draft' && s.draft) {
+    const d = s.draft;
+    const hit = ray.intersectObject(d.mesh, false)[0];
+    if (!hit) return toast('Click on the shape: near an edge splits the edge, inside a face splits the face.');
+    // the shape's faces as triangles from here on (a quad split down one side
+    // is no longer a quad)
+    const tris = [];
+    for (const f of d.faces) for (let k = 1; k < f.length - 1; k++) tris.push([f[0], f[k], f[k + 1]]);
+    d.mesh.updateMatrixWorld(true);
+    const local = hit.point.clone().applyMatrix4(d.mesh.matrixWorld.clone().invert());
+    ni = ccSplitAt(d.verts, tris, hit.faceIndex, local);
+    d.faces = tris;
+    ccBuildDraftGeometry();
+    ccDraftCorners(true);
+  } else if (s.handleOf === 'shell' && s.preview) {
+    const hit = ray.intersectObject(s.preview, false)[0];
+    if (!hit) return toast('Click on the shell: near an edge splits the edge, inside a face splits the face.');
+    ni = ccSplitAt(s.shellVerts, s.shellTris, hit.faceIndex, hit.point);
+    ccShellPreview();
+    ccMakeHandles(s.shellVerts, 'shell');
+  } else return;
+  ccActivateHandle(ni);
+  renderCollCreator();
+}
+
+// ----------------------------------------------------- spline points
+//
+// T on a selected spline: a handle on each point, dragged with the arrows,
+// written with Save points (route vertex_move -> Level.set_vertex; Ctrl+Z).
+// A spline's points are world positions offset by its node's position.
+var CC_SPLINE_MAT = new THREE.LineBasicMaterial({ color: 0xffb040, depthTest: false });
+
+function ccSplinePoints() {
+  const s = cc();
+  const n = selected != null ? nodeOf(selected) : null;
+  if (!n || n.kind !== 'line' || !(n.verts || []).length) return false;
+  if (n.readonly) { toast(n.name + ' cannot be edited here.', 'bad'); return true; }
+  ccClearDraft();
+  ccEndShell(false);
+  const base = n.pos || [0, 0, 0];
+  s.spline = { uid: n.uid, name: n.name, base: [...base],
+    verts: n.verts.map((v) => new THREE.Vector3(v[0] + base[0], v[1] + base[1], v[2] + base[2])),
+    moved: new Set(), line: null };
+  ccMakeHandles(s.spline.verts, 'spline');
+  s.tool = 'corners';
+  ccSplinePreview();
+  toast(`Click a point of ${n.name}, then drag its arrows. Save points writes the spline.`, 'good');
+  renderCollCreator();
+  return true;
+}
+
+function ccSplinePreview() {
+  const s = cc(), sp = s.spline;
+  if (!sp) return;
+  if (sp.line) { s.group.remove(sp.line); sp.line.geometry.dispose(); }
+  sp.line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(sp.verts), CC_SPLINE_MAT);
+  sp.line.renderOrder = 9;
+  s.group.add(sp.line);
+}
+
+function ccEndSpline(redraw = true) {
+  const s = cc();
+  if (!s.spline) return;
+  if (s.spline.line) { s.group.remove(s.spline.line); s.spline.line.geometry.dispose(); }
+  s.spline = null;
+  ccClearHandles();
+  if (s.tool === 'corners' && !s.draft && !s.target) s.tool = null;
+  if (redraw) renderCollCreator();
+}
+
+async function ccSaveSpline() {
+  const s = cc(), sp = s.spline;
+  if (!sp) return;
+  if (!sp.moved.size) { ccEndSpline(); return; }
+  const changes = [...sp.moved].map((i) => ({ index: i,
+    xyz: [0, 1, 2].map((k) => +(sp.verts[i].getComponent(k) - sp.base[k]).toFixed(4)) }));
+  try {
+    const r = await post('vertex_move', { archive: level.archive, manifest: level.manifest, area: level.area,
+                                          uid: sp.uid, changes });
+    if (!r.applied) throw new Error(r.error || 'not written');
+    toast(`${sp.name}: ${changes.length} point(s) moved. Ctrl+Z undoes it.`, 'good');
+    ccEndSpline();
+    await reloadLevel(true);
+    refreshHistory();
+  } catch (err) { toast('Could not save the points: ' + err.message, 'bad'); }
+}
+
+// The level editor's keys (2026-11-18, the user's): G move, R rotate,
+// Shift+S scale, T edit points -- a collision shell's corners, a new shape's
+// corners, a spline's points.
+function ccKeyBind(k) {
+  setTimeout(ccModeBox, 0);
+  const s = window.__cc;
+  const mode0 = { move: 'translate', rotate: 'rotate', scale: 'scale' }[k];
+  // selected faces: the keys move, turn and scale them
+  if (s && s.tool === 'faces' && mode0) { ccFaceGizmo(mode0); return; }
+  // editing points: T goes back to the whole shape; G picks up the dragged point's arrows
+  if (s && s.handles && s.handles.length) {
+    if (k === 'points') {
+      if (s.handleOf === 'draft') { ccClearHandles(); s.tool = null; s.giz.attach(s.draft.mesh); s.giz.setMode('translate'); }
+      else if (s.handleOf === 'spline') ccEndSpline();
+      else ccEndShell();
+      renderCollCreator();
+      return;
+    }
+    if (k === 'move') { if (s.activeHandle) s.giz.setMode('translate'); return; }
+    toast('Points move one at a time (G): T goes back to turning or scaling the whole shape.');
+    return;
+  }
+  if (k === 'points') {
+    if (s && s.draft) { ccDraftCorners(); return; }
+    const sel = selected != null ? nodeOf(selected) : null;
+    if (sel && sel.kind === 'line') { ccSplinePoints(); return; }
+    if (ccSelectedShell()) { ccBeginShell('corners'); return; }
+    toast('T edits points: select a collision shell, a spline, or a new collision shape first.');
+    return;
+  }
+  const mode = { move: 'translate', rotate: 'rotate', scale: 'scale' }[k];
+  gizmo.setMode(mode);
+  if (s && s.draft) {
+    ccClearHandles();
+    s.addPoint = false;
+    s.tool = null;
+    s.giz.attach(s.draft.mesh);
+    s.giz.setMode(mode);
+    renderCollCreator();
+  }
+}
+
+// ----------------------------------------------------- adding level components
+//
+// Anything a level holds, put where you click: volumes, splines, player
+// spawns, enemies (route node_add: a copy of one of this level's own of that
+// type, else of one from a level of the disc) and the event markers -- light
+// glows, AI spawn points, camera shots, doors (route event_edit). Buildings and
+// props: Place copies; collision: the Collision creator.
+var CC_ADD_KINDS = [
+  ['box', 'Volume (trigger, AI room …)'], ['line', 'Spline (path, rail …)'], ['spawn', 'Player spawn'],
+  ['enemy', 'Enemy'], ['glow', 'Light glow'], ['aispt', 'AI spawn point'], ['camera', 'Camera shot'],
+  ['transition', 'Door to another area'],
+];
+
+function ccEventKind(ev) {
+  return { transition: 'transition', camera: 'camera', glow: 'glow', spawn_point: 'aispt' }[ev.kind] || ev.kind;
+}
+
+async function ccAddComponent(p, keep) {
+  const s = cc(), a = s.add;
+  if (!a || !level) return;
+  const pos = [p.x, p.y, p.z].map((v) => +v.toFixed(4));
+  const base = { archive: level.archive, manifest: level.manifest, area: level.area };
+  try {
+    let r, what;
+    if (['box', 'line', 'spawn', 'enemy'].includes(a.kind)) {
+      r = await post('node_add', Object.assign(base, { kind: a.kind, pos,
+        token: a.kind === 'box' || a.kind === 'line' ? (a.sub || '') : '',
+        players: a.kind === 'spawn' ? +(a.sub || 1) : undefined }));
+      if (!r.applied) throw new Error(r.error || 'not added');
+      what = r.new_name;
+    } else {
+      const selN = selected != null ? nodeOf(selected) : null;
+      const tpl = selN && selN.event && ccEventKind(selN.event) === a.kind ? selN.event : null;
+      const grp = a.kind === 'aispt' ? (levelEvents?.spawn_groups || []).find((g) => g.group === a.sub) : null;
+      r = await post('event_edit', Object.assign(base, { kind: a.kind, op: 'add', pos,
+        source: tpl ? tpl.source : (grp ? grp.source : undefined),
+        index: tpl && tpl.data ? tpl.data.index : undefined, group: a.kind === 'aispt' ? a.sub : undefined }));
+      if (r.ok === false) throw new Error(r.error_text);
+      what = r.name || CC_ADD_KINDS.find((k) => k[0] === a.kind)[1].toLowerCase();
+      eventsFor = null;                 // the markers come from these files: read them again
+    }
+    toast(`Added ${what}. Ctrl+Z undoes it.`, 'good');
+    if (!keep) { s.tool = null; renderer.domElement.style.cursor = ''; }
+    await reloadLevel(true);
+    refreshHistory();
+  } catch (err) {
+    toast('Could not add: ' + err.message, 'bad');
+  }
+  renderAddPanel();
+}
+
+function renderAddPanel() {
+  const box = document.querySelector('#addPanel');
+  if (!box || !CC_ADD_KINDS) return;
+  const s = cc();
+  box.innerHTML = '';
+  if (!level) { box.append(el('div', 'muted', 'Open a level to add to it.')); return; }
+  if (renderInfo && renderInfo.meshes && !renderInfo.meshes.length) {
+    const e0 = el('div', 'muted', 'This level has no models yet (a blank slate): import one below, draw collision in the '
+      + 'Collision editor, and place spawns and the rest here. The grid shows the ground plane.');
+    e0.style.cssText = 'font-size:11px;margin-bottom:4px;color:var(--gold)';
+    box.append(e0);
+  }
+  s.add = s.add || { kind: 'box', sub: '' };
+  const sel = el('select');
+  sel.style.cssText = 'width:100%;font-size:11px';
+  for (const [k, t] of CC_ADD_KINDS) {
+    const o = el('option', null, t); o.value = k; if (k === s.add.kind) o.selected = true; sel.append(o);
+  }
+  sel.onchange = () => { s.add = { kind: sel.value, sub: '' }; renderAddPanel(); };
+  box.append(sel);
+  let subs = null;
+  if (s.add.kind === 'box') subs = [['', 'any type']].concat(Object.keys(BOX_TYPES).map((k) => [k.toLowerCase(), BOX_TYPES[k].label]));
+  if (s.add.kind === 'line') subs = [['', 'any type']].concat(Object.keys(LINE_TYPES).map((k) => [k.toLowerCase(), LINE_TYPES[k].label]));
+  if (s.add.kind === 'spawn') subs = [['1', '1 player'], ['2', '2 players'], ['3', '3 players'], ['4', '4 players']];
+  if (s.add.kind === 'aispt') {
+    const gs = [...new Set((levelEvents?.spawn_groups || []).map((g) => g.group))];
+    subs = gs.length ? gs.map((g) => [g, g]) : [['', '(this level has no AI spawn groups)']];
+  }
+  if (subs) {
+    if (!subs.some((x) => x[0] === s.add.sub)) s.add.sub = subs[0][0];
+    const ss = el('select');
+    ss.style.cssText = 'width:100%;font-size:11px;margin-top:3px';
+    for (const [k, t] of subs) { const o = el('option', null, t); o.value = k; if (k === s.add.sub) o.selected = true; ss.append(o); }
+    ss.onchange = () => { s.add.sub = ss.value; };
+    box.append(ss);
+  }
+  const b = el('button', s.tool === 'addnode' ? 'primary' : '',
+               s.tool === 'addnode' ? 'Placing — click in the level (Esc)' : 'Place — click in the level');
+  b.style.cssText = 'width:100%;font-size:11px;margin-top:4px';
+  b.onclick = () => {
+    ccClearDraft(); ccEndShell(false);
+    s.tool = s.tool === 'addnode' ? null : 'addnode';
+    renderer.domElement.style.cursor = s.tool ? 'crosshair' : '';
+    renderAddPanel(); renderCollCreator();
+  };
+  box.append(b);
+  const note = el('div', 'muted');
+  note.style.cssText = 'font-size:11px;margin-top:3px';
+  note.textContent = 'Shift+click keeps placing. A copy of one of this level\'s own (a selected marker of the kind is the one copied), '
+    + 'else of one from another level. Select anything and press Delete to remove it. Buildings & props: Place copies… '
+    + 'on a selected one; collision: the Collision editor.';
+  box.append(note);
+
+  ccImportPanel(box);
+
+  // AI nav paths over the whole walkable ground (route navpath_generate)
+  const nh = el('div', null, 'AI nav paths');
+  nh.style.cssText = 'font-size:11px;color:var(--gold);margin-top:8px';
+  box.append(nh);
+  const nr = el('div');
+  nr.style.cssText = 'display:flex;gap:6px;align-items:center;font-size:11px;margin:3px 0';
+  const sp = el('input'); sp.type = 'number'; sp.min = '1'; sp.max = '20'; sp.step = '0.5';
+  sp.value = String(s.navSpacing || 10); sp.style.width = '60px';
+  sp.oninput = () => { s.navSpacing = Math.max(1, +sp.value || 10); };
+  nr.append(document.createTextNode('Point spacing (m)'), sp);
+  box.append(nr);
+  const rl = el('label');
+  rl.style.cssText = 'display:block;font-size:11px';
+  const rc = el('input'); rc.type = 'checkbox'; rc.checked = s.navReplace !== false;
+  rc.onchange = () => { s.navReplace = rc.checked; };
+  rl.append(rc, document.createTextNode(' Replace the nav paths already there (a new map keeps the nav paths of the level it started from)'));
+  box.append(rl);
+  const gb = el('button', null, 'Generate AI nav paths');
+  gb.style.cssText = 'width:100%;font-size:11px;margin-top:4px';
+  gb.title = 'Paths for the AI over all the ground the player can walk (from the collision): every storey, joined where '
+    + 'the rise is walkable and nothing is in the way';
+  gb.onclick = async () => {
+    gb.disabled = true; gb.textContent = 'Generating…';
+    try {
+      const r = await post('navpath_generate', { archive: level.archive, manifest: level.manifest, area: level.area,
+                                                 spacing: s.navSpacing || 10, replace: s.navReplace !== false });
+      if (r.ok === false) throw new Error(r.error_text);
+      toast(`${r.added} AI nav paths (${r.points} points) written to ${r.file}` + (r.removed ? `, ${r.removed} old ones out` : '')
+            + ` in ${r.seconds} s. Ctrl+Z undoes it.`, 'good');
+      await reloadLevel(true);
+      refreshHistory();
+    } catch (err) { toast('Could not generate: ' + err.message, 'bad'); }
+    gb.disabled = false; gb.textContent = 'Generate AI nav paths';
+  };
+  box.append(gb);
+}
+
+// ----------------------------------------------------- the edit mode box
+//
+// Beside the Controls box: which of Move / Rotate / Scale / Transform (edit
+// points) the keys and the gizmo are on -- G, R, Shift+S, T.
+function ccModeLabel() {
+  const s = window.__cc;
+  if (s && s.boxSel) return 'Box select — drag a box';
+  if (s && s.tool === 'draw') return 'Draw shape — Shift+click points';
+  if (s && (s.tool === 'corners' || s.handles?.length)) return 'Transform — edit points (T)';
+  if (s && s.tool === 'faces') return 'Select faces — ' + ({ translate: 'Move (G)', rotate: 'Rotate (R)', scale: 'Scale (Shift+S)' }[s.giz.mode] || 'Move (G)');
+  const giz = s && s.draft && s.giz.object === s.draft.mesh ? s.giz : gizmo;
+  return { translate: 'Move (G)', rotate: 'Rotate (R)', scale: 'Scale (Shift+S)' }[giz.mode] || 'Move (G)';
+}
+
+function ccModeBox() {
+  let b = document.querySelector('#modeBox');
+  const lg = document.querySelector('#legend');
+  if (!lg) return;
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'modeBox';
+    b.style.cssText = 'position:absolute;z-index:6;background:var(--sheet-a);border:1px solid var(--line);'
+      + 'border-radius:4px;font-size:11px;color:var(--gold);padding:4px 9px;pointer-events:none;white-space:nowrap';
+    lg.parentElement.append(b);
+  }
+  const label = 'Mode: ' + ccModeLabel();
+  if (b.textContent !== label) b.textContent = label;
+  const left = lg.offsetLeft + lg.offsetWidth + 6, top = lg.offsetTop;
+  if (b.style.left !== left + 'px') b.style.left = left + 'px';
+  if (b.style.top !== top + 'px') b.style.top = top + 'px';
+}
+
+// ----------------------------------------------------- box select
+//
+// B (or the button), then drag a box: everything inside it is selected (Shift
+// or Ctrl: added to the selection). "Only what the Layers show" keeps hidden
+// layers and volume types out. Ctrl+click and Shift+click add one at a time.
+function ccSetBoxSel(on) {
+  const s = cc();
+  s.boxSel = on;
+  renderer.domElement.style.cursor = on ? 'crosshair' : '';
+  renderCollCreator();
+  ccModeBox();
+}
+
+function ccBoxSelectObjects(x0, y0, x1, y1, add) {
+  const s = cc();
+  const r = renderer.domElement.getBoundingClientRect();
+  const lo = [Math.min(x0, x1) - r.left, Math.min(y0, y1) - r.top];
+  const hi = [Math.max(x0, x1) - r.left, Math.max(y0, y1) - r.top];
+  const inside = (p) => {
+    const v = p.clone().project(camera);
+    if (v.z < -1 || v.z > 1) return false;
+    const sx = (v.x + 1) / 2 * r.width, sy = (1 - v.y) / 2 * r.height;
+    return sx >= lo[0] && sx <= hi[0] && sy >= lo[1] && sy <= hi[1];
+  };
+  const only = s.boxOnlyShown !== false;
+  const uids = new Set();
+  const consider = (o) => {
+    if (only && o.visible === false) return;
+    const uid = o.userData.uid ?? o.userData.instanceOf;
+    if (uid === undefined || uid === null) return;
+    const c = new THREE.Vector3();
+    if (o.geometry) {
+      if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      c.copy(o.geometry.boundingSphere.center).applyMatrix4(o.matrixWorld);
+    } else o.getWorldPosition(c);
+    if (inside(c)) uids.add(uid);
+  };
+  for (const [k, g] of Object.entries(groups)) {
+    if (only && !g.visible) continue;
+    for (const o of g.children) consider(o);
+  }
+  if (!only || renderGroup.visible) for (const o of renderGroup.children) consider(o);
+  if (!only || worldGroup.visible) for (const o of worldGroup.children) consider(o);
+  if (!add) select(null);
+  let n = 0;
+  for (const u of uids) {
+    if (!nodeOf(u)) continue;
+    if (!selection.has(u)) { select(u, true); n++; }
+  }
+  toast(`${selection.size} selected` + (n ? ` (${n} from the box)` : ''), 'good');
+}
+
+(function ccBoxSelDrag() {
+  let start = null, box = null;
+  const dom = renderer.domElement;
+  dom.addEventListener('pointerdown', (e) => {
+    const s = window.__cc;
+    if (!s || !s.boxSel || e.button !== 0) return;
+    start = [e.clientX, e.clientY, e.shiftKey || e.ctrlKey];
+    box = document.createElement('div');
+    box.style.cssText = 'position:fixed;border:1px dashed #ffd27a;background:rgba(255,210,120,.10);pointer-events:none;z-index:50';
+    document.body.append(box);
+    controls.enabled = false;
+    e.stopImmediatePropagation();
+  }, true);
+  window.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    box.style.left = Math.min(start[0], e.clientX) + 'px'; box.style.top = Math.min(start[1], e.clientY) + 'px';
+    box.style.width = Math.abs(e.clientX - start[0]) + 'px'; box.style.height = Math.abs(e.clientY - start[1]) + 'px';
+  }, true);
+  window.addEventListener('pointerup', (e) => {
+    if (!start) return;
+    const a = start;
+    start = null;
+    box.remove();
+    controls.enabled = true;
+    if (Math.hypot(e.clientX - a[0], e.clientY - a[1]) > 4) ccBoxSelectObjects(a[0], a[1], e.clientX, e.clientY, a[2]);
+    ccSwallowClick = true;
+  }, true);
+})();
+
+// ----------------------------------------------------- drawing a shape
+//
+// Draw shape: Shift+click puts a point on whatever is under the cursor,
+// Ctrl+click two points joins them; with Auto connect each new point joins its
+// two nearest. Every three points joined to each other make a face. Saved as a
+// new shell -- flat (a floor, a ramp, a wall), or raised by Extrude.
+var CC_DRAW_LINE = new THREE.LineBasicMaterial({ color: 0x9effb0, depthTest: false });
+
+function ccDrawStart() {
+  const s = cc();
+  ccClearDraft(); ccEndShell(false);
+  s.tool = 'draw';
+  s.draw = { pts: [], edges: new Set(), pick: -1, objs: [] };
+  if (s.drawAuto === undefined) s.drawAuto = true;
+  if (s.drawExtrude === undefined) s.drawExtrude = 0;
+  renderer.domElement.style.cursor = 'crosshair';
+  toast('Shift+click to put points (3 or more), Ctrl+click two points to join them. Save shape writes it.', 'good');
+  renderCollCreator();
+}
+
+function ccDrawEnd() {
+  const s = cc();
+  if (s.draw) for (const o of s.draw.objs) { s.group.remove(o); o.geometry?.dispose?.(); }
+  s.draw = null;
+  if (s.tool === 'draw') { s.tool = null; renderer.domElement.style.cursor = ''; }
+  renderCollCreator();
+}
+
+function ccEdgeKey(a, b) { return a < b ? a + '-' + b : b + '-' + a; }
+
+function ccDrawFaces() {
+  const d = cc().draw;
+  const adj = d.pts.map(() => new Set());
+  for (const k of d.edges) { const [a, b] = k.split('-').map(Number); adj[a].add(b); adj[b].add(a); }
+  const out = [];
+  for (let a = 0; a < d.pts.length; a++)
+    for (const b of adj[a]) if (b > a)
+      for (const c of adj[b]) if (c > b && adj[a].has(c)) out.push([a, b, c]);
+  return out;
+}
+
+function ccDrawRefresh() {
+  const s = cc(), d = s.draw;
+  if (!d) return;
+  for (const o of d.objs) { s.group.remove(o); o.geometry?.dispose?.(); }
+  d.objs = [];
+  if (d.pts.length) {
+    const pg = new THREE.BufferGeometry().setFromPoints(d.pts);
+    const pts = new THREE.Points(pg, new THREE.PointsMaterial({ color: 0x9effb0, size: 10, sizeAttenuation: false, depthTest: false }));
+    pts.renderOrder = 12;
+    d.objs.push(pts);
+  }
+  if (d.pick >= 0) {
+    const pg = new THREE.BufferGeometry().setFromPoints([d.pts[d.pick]]);
+    d.objs.push(new THREE.Points(pg, new THREE.PointsMaterial({ color: 0xff4040, size: 14, sizeAttenuation: false, depthTest: false })));
+  }
+  const seg = [];
+  for (const k of d.edges) { const [a, b] = k.split('-').map(Number); seg.push(d.pts[a], d.pts[b]); }
+  if (seg.length) d.objs.push(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg), CC_DRAW_LINE));
+  const faces = ccDrawFaces();
+  if (faces.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(d.pts.flatMap((p) => [p.x, p.y, p.z]), 3));
+    g.setIndex(faces.flat());
+    g.computeVertexNormals();
+    d.objs.push(new THREE.Mesh(g, CC_DRAFT_MAT));
+  }
+  for (const o of d.objs) { o.raycast = () => {}; s.group.add(o); }
+}
+
+function ccDrawClick(e) {
+  const s = cc(), d = s.draw;
+  if (e.shiftKey) {
+    const p = surfacePoint(e, true);
+    if (!p) { toast('Aim at a surface: a point goes where you click.'); return; }
+    const ni = d.pts.length;
+    if (s.drawAuto && ni >= 1) {
+      const near = d.pts.map((q, i) => [q.distanceTo(p), i]).sort((x, y) => x[0] - y[0]).slice(0, 2);
+      for (const [, i] of near) d.edges.add(ccEdgeKey(i, ni));
+    }
+    d.pts.push(p.clone());
+  } else if (e.ctrlKey) {
+    const old = s.handles;
+    s.handles = d.pts;
+    const i = ccPickHandle(e);
+    s.handles = old;
+    if (i < 0) { toast('Ctrl+click a point (the green dots) to join it to another.'); return; }
+    if (d.pick < 0) d.pick = i;
+    else {
+      if (d.pick !== i) {
+        const k = ccEdgeKey(d.pick, i);
+        if (d.edges.has(k)) d.edges.delete(k); else d.edges.add(k);
+      }
+      d.pick = -1;
+    }
+  } else return;
+  ccDrawRefresh();
+  renderCollCreator();
+}
+
+async function ccDrawSave() {
+  const s = cc(), d = s.draw;
+  if (!d) return;
+  const tris = ccDrawFaces();
+  if (d.pts.length < 3 || !tris.length) return toast('A shape needs at least 3 points joined into a face.', 'bad');
+  const up = new THREE.Vector3(0, 1, 0);
+  const h = +s.drawExtrude || 0;
+  // the drawn points, then (extruded) the same raised by h: face numbers past the first set are the raised ones
+  const allPts = d.pts.concat(h > 0 ? d.pts.map((p) => p.clone().add(new THREE.Vector3(0, h, 0))) : []);
+  const toward = (f, want) => {
+    const n = new THREE.Vector3().subVectors(allPts[f[1]], allPts[f[0]])
+      .cross(new THREE.Vector3().subVectors(allPts[f[2]], allPts[f[0]]));
+    return n.dot(want) < 0 ? [f[0], f[2], f[1]] : f;
+  };
+  // flat faces turned up (a floor, a ramp) or toward the camera (a wall)
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir).negate();
+  let faces = tris.map((f) => {
+    const n = new THREE.Vector3().subVectors(d.pts[f[1]], d.pts[f[0]])
+      .cross(new THREE.Vector3().subVectors(d.pts[f[2]], d.pts[f[0]])).normalize();
+    return toward(f, Math.abs(n.y) > 0.3 ? up : camDir);
+  });
+  let verts = d.pts.map((p) => p.toArray());
+  if (h > 0) {
+    // raised: the drawn faces as the top, a copy as the bottom, walls round the outside edges
+    const n = d.pts.length;
+    verts = verts.concat(d.pts.map((p) => [p.x, p.y + h, p.z]));
+    const top = tris.map((f) => toward(f.map((i) => i + n), up));
+    const bottom = tris.map((f) => toward(f, up.clone().negate()));
+    const use = new Map();
+    for (const f of tris) for (let k = 0; k < 3; k++) {
+      const key = ccEdgeKey(f[k], f[(k + 1) % 3]);
+      use.set(key, (use.get(key) || 0) + 1);
+    }
+    const mid = new THREE.Vector3();
+    d.pts.forEach((p) => mid.add(p));
+    mid.multiplyScalar(1 / n);
+    const sides = [];
+    for (const [key, cnt] of use) {
+      if (cnt !== 1) continue;
+      const [a, b] = key.split('-').map(Number);
+      const q = [a, b, b + n, a + n];
+      const out = new THREE.Vector3().addVectors(d.pts[a], d.pts[b]).multiplyScalar(0.5).sub(mid);
+      out.y = 0;
+      const nrm = new THREE.Vector3().subVectors(d.pts[b], d.pts[a]).cross(new THREE.Vector3(0, h, 0));
+      sides.push(nrm.dot(out) < 0 ? [a + n, b + n, b, a] : q);
+    }
+    faces = top.concat(bottom, sides);
+  }
+  const r = await ccSend({ op: 'add', verts, faces, name: s.name || 'custom', solid: s.solid }, 'Added drawn shape');
+  if (r) ccDrawEnd();
+}
+
+
+// ----------------------------------------------------- importing a model
+//
+// Import a model… (Add to level): an .obj (with its .mtl and pictures picked
+// alongside), a .glb, or a game model (.rsc .xrsc .mod .xmod), then a click
+// where it stands. The page reads .obj / .glb into a plain mesh; the server
+// (route model_add, rdrstudio/modeladd.py) writes it on every bundle the level
+// has, with a zone node and, if asked, collision from its own triangles.
+function ccB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+async function ccPictureRGBA(blob) {
+  const bmp = await createImageBitmap(blob);
+  const p2 = (n) => { let k = 16; while (k < n && k < 256) k *= 2; return k; };
+  const w = p2(bmp.width), h = p2(bmp.height);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.drawImage(bmp, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  return { w, h, rgba: ccB64(new Uint8Array(d.buffer)) };
+}
+
+async function ccReadObj(text, files) {
+  const v = [], vt = [], vn = [];
+  const byMat = new Map();
+  let mat = 'default';
+  let mtlName = null;
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim().split(/\s+/);
+    if (p[0] === 'v') v.push([+p[1], +p[2], +p[3]]);
+    else if (p[0] === 'vt') vt.push([+p[1], +(p[2] || 0)]);
+    else if (p[0] === 'vn') vn.push([+p[1], +p[2], +p[3]]);
+    else if (p[0] === 'usemtl') mat = p.slice(1).join(' ') || 'default';
+    else if (p[0] === 'mtllib') mtlName = p.slice(1).join(' ');
+    else if (p[0] === 'f') {
+      const cs = p.slice(1).map((s) => {
+        const [a, b, c] = s.split('/');
+        const fix = (n, len) => (n < 0 ? len + n : n - 1);
+        return [fix(+a, v.length), b ? fix(+b, vt.length) : -1, c ? fix(+c, vn.length) : -1];
+      });
+      if (!byMat.has(mat)) byMat.set(mat, []);
+      for (let k = 1; k < cs.length - 1; k++) byMat.get(mat).push(cs[0], cs[k], cs[k + 1]);
+    }
+  }
+  const pics = new Map();
+  const mtlFile = files.find((f) => /\.mtl$/i.test(f.name) && (!mtlName || f.name.toLowerCase() === mtlName.split(/[\\/]/).pop().toLowerCase()))
+    || files.find((f) => /\.mtl$/i.test(f.name));
+  if (mtlFile) {
+    let cur = null;
+    for (const line of (await mtlFile.text()).split(/\r?\n/)) {
+      const p = line.trim().split(/\s+/);
+      if (p[0] === 'newmtl') cur = p.slice(1).join(' ');
+      else if (p[0] === 'map_Kd' && cur) pics.set(cur, p[p.length - 1].split(/[\\/]/).pop().toLowerCase());
+    }
+  }
+  const positions = [], uvs = [], normals = [], groups = [], materials = [];
+  for (const [name, corners] of byMat) {
+    const start = positions.length / 3;
+    for (const [a, b, c] of corners) {
+      positions.push(...v[a]);
+      const t = b >= 0 ? vt[b] : [0, 0];
+      uvs.push(t[0], 1 - t[1]);                 // an .obj counts v from the bottom, the game from the top
+      normals.push(...(c >= 0 ? vn[c] : [0, 1, 0]));
+    }
+    let tex = null;
+    const want = pics.get(name);
+    const f = want && files.find((x) => x.name.toLowerCase() === want);
+    if (f) tex = await ccPictureRGBA(f);
+    groups.push({ start, count: corners.length, material: materials.length });
+    materials.push({ name, tex });
+  }
+  const indices = positions.map((_x, i) => i).slice(0, positions.length / 3);
+  return { positions, uvs, normals, indices, groups, materials };
+}
+
+async function ccReadGlb(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('not a .glb (binary glTF)');
+  let off = 12, json = null, bin = null;
+  while (off < buf.byteLength) {
+    const len = dv.getUint32(off, true), type = dv.getUint32(off + 4, true);
+    const body = buf.slice(off + 8, off + 8 + len);
+    if (type === 0x4E4F534A) json = JSON.parse(new TextDecoder().decode(body));
+    else if (type === 0x004E4942) bin = body;
+    off += 8 + len;
+  }
+  if (!json) throw new Error('the .glb has no scene description');
+  const acc = (i) => {
+    const a = json.accessors[i], bv = json.bufferViews[a.bufferView];
+    const n = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[a.type];
+    const T = { 5126: Float32Array, 5125: Uint32Array, 5123: Uint16Array, 5121: Uint8Array }[a.componentType];
+    const stride = bv.byteStride || n * T.BYTES_PER_ELEMENT;
+    const base = (bv.byteOffset || 0) + (a.byteOffset || 0);
+    const out = [];
+    const view = new DataView(bin);
+    const get = { 5126: 'getFloat32', 5125: 'getUint32', 5123: 'getUint16', 5121: 'getUint8' }[a.componentType];
+    for (let k = 0; k < a.count; k++)
+      for (let c = 0; c < n; c++) out.push(view[get](base + k * stride + c * T.BYTES_PER_ELEMENT, true));
+    return out;
+  };
+  const texOf = new Map();
+  const matTex = async (mi) => {
+    if (mi == null) return null;
+    if (texOf.has(mi)) return texOf.get(mi);
+    let tex = null;
+    const ti = json.materials?.[mi]?.pbrMetallicRoughness?.baseColorTexture?.index;
+    const img = ti != null ? json.images?.[json.textures[ti].source] : null;
+    if (img && img.bufferView != null) {
+      const bv = json.bufferViews[img.bufferView];
+      tex = await ccPictureRGBA(new Blob([bin.slice(bv.byteOffset || 0, (bv.byteOffset || 0) + bv.byteLength)], { type: img.mimeType || 'image/png' }));
+    }
+    texOf.set(mi, tex);
+    return tex;
+  };
+  const positions = [], uvs = [], normals = [], groups = [], materials = [];
+  const matIndex = new Map();
+  const visit = async (ni, parent) => {
+    const nd = json.nodes[ni];
+    const m = new THREE.Matrix4();
+    if (nd.matrix) m.fromArray(nd.matrix);
+    else m.compose(new THREE.Vector3(...(nd.translation || [0, 0, 0])), new THREE.Quaternion(...(nd.rotation || [0, 0, 0, 1])),
+                   new THREE.Vector3(...(nd.scale || [1, 1, 1])));
+    const world = parent.clone().multiply(m);
+    const nm = new THREE.Matrix3().getNormalMatrix(world);
+    if (nd.mesh != null) for (const pr of json.meshes[nd.mesh].primitives) {
+      if (pr.mode != null && pr.mode !== 4) continue;
+      const P = acc(pr.attributes.POSITION);
+      const N = pr.attributes.NORMAL != null ? acc(pr.attributes.NORMAL) : null;
+      const U = pr.attributes.TEXCOORD_0 != null ? acc(pr.attributes.TEXCOORD_0) : null;
+      const I = pr.indices != null ? acc(pr.indices) : P.map((_x, i) => i).slice(0, P.length / 3);
+      const key = pr.material ?? -1;
+      if (!matIndex.has(key)) {
+        matIndex.set(key, materials.length);
+        materials.push({ name: json.materials?.[pr.material]?.name || 'material' + materials.length, tex: await matTex(pr.material) });
+      }
+      const start = positions.length / 3;
+      const p = new THREE.Vector3(), q = new THREE.Vector3();
+      for (const i of I) {
+        p.set(P[3 * i], P[3 * i + 1], P[3 * i + 2]).applyMatrix4(world);
+        positions.push(p.x, p.y, p.z);
+        if (N) { q.set(N[3 * i], N[3 * i + 1], N[3 * i + 2]).applyMatrix3(nm).normalize(); normals.push(q.x, q.y, q.z); }
+        else normals.push(0, 1, 0);
+        uvs.push(U ? U[2 * i] : 0, U ? U[2 * i + 1] : 0);
+      }
+      groups.push({ start, count: I.length, material: matIndex.get(key) });
+    }
+    for (const c of nd.children || []) await visit(c, world);
+  };
+  const scene = json.scenes?.[json.scene || 0];
+  for (const r of (scene ? scene.nodes : json.nodes.map((_n, i) => i))) await visit(r, new THREE.Matrix4());
+  const indices = positions.map((_x, i) => i).slice(0, positions.length / 3);
+  if (!indices.length) throw new Error('the .glb holds no triangles');
+  return { positions, uvs, normals, indices, groups, materials };
+}
+
+async function ccPickModelFiles() {
+  const s = cc();
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = '.obj,.mtl,.png,.jpg,.jpeg,.glb,.rsc,.xrsc,.mod,.xmod';
+  inp.onchange = async () => {
+    const files = [...inp.files];
+    const main = files.find((f) => /\.(glb|obj|rsc|xrsc|mod|xmod)$/i.test(f.name));
+    if (!main) return toast('Pick a model: .obj (with its .mtl and pictures), .glb, .rsc, .xrsc, .mod or .xmod', 'bad');
+    try {
+      toast('Reading ' + main.name + '…');
+      let payload;
+      if (/\.obj$/i.test(main.name)) payload = { mesh: await ccReadObj(await main.text(), files) };
+      else if (/\.glb$/i.test(main.name)) payload = { mesh: await ccReadGlb(await main.arrayBuffer()) };
+      else payload = { native: { filename: main.name, data: ccB64(new Uint8Array(await main.arrayBuffer())) } };
+      s.importData = { file: main.name, payload };
+      if (s.importTurn === undefined) s.importTurn = 0;
+      if (s.importScale === undefined) s.importScale = 1;
+      if (s.importSolid === undefined) s.importSolid = true;
+      s.importName = main.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_]+/g, '_').slice(0, 20);
+      s.tool = 'importplace';
+      renderer.domElement.style.cursor = 'crosshair';
+      const tri = payload.mesh ? payload.mesh.indices.length / 3 : null;
+      toast(`${main.name}${tri ? ` (${tri} triangles)` : ''}: click where it stands.`, 'good');
+      renderAddPanel();
+    } catch (err) { toast('Could not read ' + main.name + ': ' + err.message, 'bad'); }
+  };
+  inp.click();
+}
+
+async function ccImportAt(p) {
+  const s = cc(), d = s.importData;
+  if (!d) return;
+  try {
+    toast('Adding ' + d.file + '…');
+    const r = await post('model_add', Object.assign({ archive: level.archive, manifest: level.manifest, area: level.area,
+      pos: p ? [p.x, p.y, p.z] : [0, 0, 0], turn: s.importTurn || 0, scale: s.importScale || 1,
+      collision: s.importSolid !== false, keep_place: !!s.importKeep, name: s.importName || 'custom' }, d.payload));
+    if (r.ok === false) throw new Error(r.error_text);
+    toast(`Added ${r.name}: ${r.triangles} triangles, ${r.textures} texture(s)` + (r.collision ? `, collision ${r.collision}` : '')
+          + '. Ctrl+Z undoes it.', 'good');
+    s.tool = null; s.importData = null;
+    renderer.domElement.style.cursor = '';
+    await reloadLevel(true, true);
+    refreshHistory();
+  } catch (err) { toast('Could not add the model: ' + err.message, 'bad'); }
+  renderAddPanel();
+}
+
+function ccImportPanel(box) {
+  const s = cc();
+  const h = el('div', null, 'Custom models');
+  h.style.cssText = 'font-size:11px;color:var(--gold);margin-top:8px';
+  box.append(h);
+  const b = el('button', s.tool === 'importplace' ? 'primary' : '',
+               s.tool === 'importplace' ? `Placing ${s.importData?.file} — click (Esc)` : 'Import a model… (.obj .glb .rsc .xrsc .mod .xmod)');
+  b.style.cssText = 'width:100%;font-size:11px';
+  b.title = 'Pick the model (an .obj with its .mtl and pictures together), then click where it stands';
+  b.onclick = () => (s.tool === 'importplace' ? (s.tool = null, s.importData = null, renderer.domElement.style.cursor = '', renderAddPanel()) : ccPickModelFiles());
+  box.append(b);
+  if (s.tool !== 'importplace') return;
+  const row = el('div');
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;margin-top:3px';
+  const num = (label, val, fn, step) => {
+    const l = el('label', 'muted'); l.style.cssText = 'display:flex;flex-direction:column';
+    const i = el('input'); i.type = 'number'; i.step = step; i.value = String(val);
+    i.oninput = () => fn(+i.value);
+    l.append(el('span', null, label), i);
+    return l;
+  };
+  row.append(num('Turn (degrees)', s.importTurn || 0, (v) => { s.importTurn = v || 0; }, '15'),
+             num('Scale', s.importScale || 1, (v) => { s.importScale = v > 0 ? v : 1; }, '0.1'));
+  box.append(row);
+  const nm = el('input'); nm.value = s.importName || ''; nm.placeholder = 'name';
+  nm.style.cssText = 'width:100%;font-size:11px;margin-top:3px';
+  nm.oninput = () => { s.importName = nm.value; };
+  box.append(nm);
+  for (const [label, key, def] of [['Solid (collision from the model)', 'importSolid', true],
+                                   ['Keep its own place (a model already in level space: no click needed)', 'importKeep', false]]) {
+    const l = el('label'); l.style.cssText = 'display:block;font-size:11px';
+    const c = el('input'); c.type = 'checkbox'; c.checked = s[key] === undefined ? def : s[key];
+    c.onchange = () => { s[key] = c.checked; renderAddPanel(); };
+    l.append(c, document.createTextNode(' ' + label));
+    box.append(l);
+  }
+  if (s.importKeep) {
+    const go = el('button', 'primary', 'Add it where it is');
+    go.style.cssText = 'width:100%;font-size:11px;margin-top:3px';
+    go.onclick = () => ccImportAt(null);
+    box.append(go);
+  }
+}
+
+// ----------------------------------------------------- the panel
+
+function renderCollCreator() {
+  const box = document.querySelector('#collCreator');
+  if (!box || !CC_SHAPES) return;          // not evaluated yet (renderLayers runs early)
+  try { renderAddPanel(); } catch (e) { console.warn('add panel', e); }
+  const s = cc();
+  box.innerHTML = '';
+  const small = (t) => { const d = el('div', 'muted', t); d.style.cssText = 'font-size:11px;margin:3px 0'; return d; };
+  const row = () => { const d = el('div'); d.style.cssText = 'display:flex;gap:4px;margin:3px 0;flex-wrap:wrap'; return d; };
+  const chk = (label, val, fn, title) => {
+    const l = el('label');
+    l.style.cssText = 'display:block;font-size:11px;margin:2px 0';
+    if (title) l.title = title;
+    const c = el('input'); c.type = 'checkbox'; c.checked = val;
+    c.onchange = () => fn(c.checked);
+    l.append(c, document.createTextNode(' ' + label));
+    return l;
+  };
+  const btn = (t, fn, title, on) => {
+    const b = el('button', on ? 'primary' : '', t);
+    b.style.cssText = 'font-size:11px;flex:1 1 auto';
+    if (title) b.title = title;
+    b.onclick = fn;
+    return b;
+  };
+
+  // art opacity: line the collision up with the models
+  const op = el('div');
+  op.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11px';
+  const opl = el('span', null, 'Model opacity');
+  const rng = el('input');
+  rng.type = 'range'; rng.min = '0'; rng.max = '100'; rng.value = String(Math.round(s.artOpacity * 100));
+  rng.style.flex = '1';
+  const opv = el('span', 'muted', rng.value + '%');
+  opv.style.width = '34px';
+  rng.oninput = () => {
+    s.artOpacity = +rng.value / 100;
+    opv.textContent = rng.value + '%';
+    try { localStorage.setItem('rdr.artOpacity', String(s.artOpacity)); } catch {}
+    applyArtOpacity();
+  };
+  op.title = 'Fade the level\'s models to see the collision inside them. 0% hides them.';
+  op.append(opl, rng, opv);
+  box.append(op);
+  const cv = row();
+  for (const [v, t] of [['solid', 'Collision: solid'], ['wire', 'wireframe'], ['off', 'hidden']])
+    cv.append(btn(t, () => { setWorldMode(v); renderCollCreator(); }, null, worldMode === v));
+  box.append(cv);
+  box.append(chk('Move collision with its model', !collisionAlone, (v) => {
+    collisionAlone = !v;
+    toast(v ? 'A model and its own collision move together (and the other way round).'
+            : 'Collision and models move on their own: click a shell to move it by itself.', 'good');
+    renderCollCreator();
+  }, 'A model and the collision shell that belongs to it move as one (a placed or imported model has its own); off: '
+     + 'each moves by itself'));
+  box.append(chk('Outline each shell (solid view)', s.outlines, (v) => {
+    s.outlines = v;
+    try { localStorage.setItem('rdr.ccOutlines', v ? '1' : '0'); } catch {}
+    ccApplyOutlines();
+  }, 'Every collision shell drawn with an outline of its own colour'));
+
+  if (!level) { box.append(small('Open a level to add collision.')); return; }
+  // A Showdown map is two levels (m2, m4): edits made in both while they are the same
+  if (/^LVLS_M[24]\//i.test(level.archive || '')) {
+    let pref = false;
+    try { pref = localStorage.getItem('rdr.syncMp') === '1'; } catch {}
+    if (s.mpSent !== pref) { s.mpSent = pref; post('mp_sync', { on: pref, archive: level.archive }).catch(() => {}); }
+    box.append(chk('Edit both Multiplayer level variants (m2 + m4)', pref, (v) => {
+      try { localStorage.setItem('rdr.syncMp', v ? '1' : '0'); } catch {}
+      s.mpSent = v;
+      post('mp_sync', { on: v, archive: level.archive })
+        .then((r) => toast(v ? `Edits are made in ${r.partner || 'the other variant'} too, file by file, while it is the same as this one.`
+                             : 'Edits go to this variant only.', 'good'))
+        .catch((e) => toast(e.message, 'bad'));
+    }, 'Every edit of this map is made in its other player-count level as well, for each file the two have exactly the same'));
+  }
+
+  // the selected collision first: what you clicked is what you edit
+  const selShell = !s.target && !s.draft && !s.draw ? ccSelectedShell() : null;
+  if (selShell) {
+    const id0 = ccNodeOf(selShell);
+    const hd = el('div', null, 'Selected collision: ' + id0.node);
+    hd.style.cssText = 'font-size:11px;color:var(--gold);margin:4px 0 2px';
+    box.append(hd);
+    const er0 = row();
+    er0.append(btn('Move (G)', () => { ccKeyBind('move'); }), btn('Rotate (R)', () => { ccKeyBind('rotate'); }),
+               btn('Scale (Shift+S)', () => { ccKeyBind('scale'); }));
+    box.append(er0);
+    const er1 = row();
+    er1.append(btn('Edit corners (T)', () => ccBeginShell('corners'), 'Drag its corners, add points'),
+               btn('Select faces', () => ccBeginShell('faces'), 'Pick faces of it: move, turn, scale or delete them'),
+               btn('Remove shell', ccRemoveShell, 'Take this collision out of the level'));
+    box.append(er1);
+    const sep0 = el('div');
+    sep0.style.cssText = 'border-top:1px solid var(--line);margin:6px 0 2px';
+    box.append(sep0);
+  }
+  const bs = row();
+  bs.append(btn(s.boxSel ? 'Box select — drag a box (Esc)' : 'Box select (B)', () => ccSetBoxSel(!s.boxSel),
+                'Drag a box to select everything in it (Shift/Ctrl: add). Ctrl+click adds one at a time.', s.boxSel));
+  box.append(bs);
+  box.append(chk('Box select only what the Layers show', s.boxOnlyShown !== false, (v) => { s.boxOnlyShown = v; },
+                 'Hidden layers and volume types are left out of a box'));
+
+  // collision made from the models, at any time: a start to edit (route coll_autogen)
+  const ag = el('div', null, 'Auto-generate collision from the models');
+  ag.style.cssText = 'font-size:11px;color:var(--gold);margin-top:6px';
+  box.append(ag);
+  const agr = el('div');
+  agr.style.cssText = 'display:flex;gap:6px;align-items:center;font-size:11px;margin:2px 0';
+  const agc = el('input'); agc.type = 'number'; agc.min = '0.05'; agc.max = '5'; agc.step = '0.05';
+  agc.value = String(s.autoCell || 0.3); agc.style.width = '60px';
+  agc.oninput = () => { s.autoCell = Math.max(0.05, +agc.value || 0.3); };
+  agc.title = 'Corners closer than this are made one: bigger is lighter and rougher, smaller follows the models closer';
+  agr.append(document.createTextNode('Detail (m)'), agc);
+  box.append(agr);
+  box.append(chk('Replace the last auto collision', s.autoReplace !== false, (v) => { s.autoReplace = v; },
+                 'The shells an earlier run made (bound_auto_*) are taken out first; ones you added or edited by hand stay'));
+  const agb = btn('Auto-generate collision', async () => {
+    agb.disabled = true; agb.textContent = 'Generating…';
+    try {
+      const r = await post('coll_autogen', { archive: level.archive, manifest: level.manifest, area: level.area,
+                                             cell: s.autoCell || 0.3, replace: s.autoReplace !== false });
+      if (r.ok === false) throw new Error(r.error_text);
+      s.lastWhere = r.where;
+      toast(`Collision made from the models: ${r.shells} shell(s), ${r.faces} faces (from ${r.source} model triangles)`
+            + (r.removed ? `, ${r.removed} earlier auto shell(s) replaced` : '') + '. Ctrl+Z undoes it.', 'good');
+      if (worldMode === 'off') setWorldMode('solid');
+      await reloadLevel(true, true);
+      refreshHistory();
+    } catch (err) { toast('Could not generate collision: ' + err.message, 'bad'); }
+    agb.disabled = false; agb.textContent = 'Auto-generate collision';
+  }, 'Collision for everything the level draws, as new shells to edit and fix: run it again after adding models');
+  agb.style.width = '100%';
+  box.append(agb);
+
+  // new shapes
+  box.append(small('New shape: pick one, then click where it stands — or draw one point by point.'));
+  const sr = row();
+  for (const k of Object.keys(CC_SHAPES))
+    sr.append(btn(CC_SHAPES[k].label, () => {
+      ccEndShell(false);
+      ccClearDraft();
+      s.shape = k;
+      s.tool = 'place';
+      renderer.domElement.style.cursor = 'crosshair';
+      renderCollCreator();
+    }, `Click a surface to drop a ${CC_SHAPES[k].label.toLowerCase()}`, s.tool === 'place' && s.shape === k));
+  box.append(sr);
+  const dr0 = row();
+  dr0.append(btn(s.tool === 'draw' ? 'Drawing…' : 'Draw shape (points)', () => (s.tool === 'draw' ? ccDrawEnd() : ccDrawStart()),
+                 'Shift+click points, Ctrl+click to join them; every three joined points make a face', s.tool === 'draw'));
+  box.append(dr0);
+  if (s.tool === 'place') box.append(small(`Click a surface to drop the ${CC_SHAPES[s.shape].label.toLowerCase()} (Esc cancels).`));
+  if (s.tool === 'draw' && s.draw) {
+    const nf = ccDrawFaces().length;
+    box.append(small(`${s.draw.pts.length} point(s), ${s.draw.edges.size} join(s), ${nf} face(s). Shift+click: point · Ctrl+click two points: join (again: unjoin).`));
+    box.append(chk('Auto connect new points to the two nearest', s.drawAuto, (v) => { s.drawAuto = v; }));
+    const ex = el('label');
+    ex.style.cssText = 'display:flex;gap:6px;align-items:center;font-size:11px;margin:2px 0';
+    const exi = el('input'); exi.type = 'number'; exi.step = '0.1'; exi.min = '0'; exi.value = String(s.drawExtrude || 0);
+    exi.style.width = '70px';
+    exi.oninput = () => { s.drawExtrude = Math.max(0, +exi.value || 0); };
+    ex.append(document.createTextNode('Extrude up (m, 0 = flat)'), exi);
+    box.append(ex);
+    const nm2 = el('input'); nm2.value = s.name; nm2.placeholder = 'name';
+    nm2.style.cssText = 'width:100%;font-size:11px;margin-top:2px';
+    nm2.oninput = () => { s.name = nm2.value; };
+    box.append(nm2);
+    box.append(chk('Solid (off: walk through it)', s.solid, (v) => { s.solid = v; }));
+    const dr1 = row();
+    dr1.append(btn('Save shape', ccDrawSave, 'Writes it as a new collision shell', nf > 0),
+               btn('Undo point', () => {
+                 const d = s.draw; if (!d.pts.length) return;
+                 const last = d.pts.length - 1;
+                 d.pts.pop();
+                 for (const k of [...d.edges]) if (k.split('-').map(Number).includes(last)) d.edges.delete(k);
+                 d.pick = -1; ccDrawRefresh(); renderCollCreator();
+               }),
+               btn('Cancel', ccDrawEnd));
+    box.append(dr1);
+  }
+
+  if (s.draft) {
+    const d = s.draft;
+    box.append(small(`${CC_SHAPES[d.kind].label}: G move · R rotate · Shift+S scale · T corners.`));
+    const gr = row();
+    const whole = (mode) => () => { ccClearHandles(); s.addPoint = false; s.giz.attach(d.mesh); s.giz.setMode(mode); s.tool = null; renderCollCreator(); };
+    gr.append(btn('Move (G)', whole('translate')), btn('Rotate (R)', whole('rotate')), btn('Scale (Shift+S)', whole('scale')),
+              btn('Corners (T)', () => ccDraftCorners(), 'Drag single corners (a skewed roof, an uneven wall)', s.handleOf === 'draft'));
+    box.append(gr);
+    if (s.handleOf === 'draft') {
+      const ar = row();
+      ar.append(btn(s.addPoint ? 'Adding points — click the shape' : 'Add point', () => { s.addPoint = !s.addPoint; renderCollCreator(); },
+                    'Click near an edge to split it there, or inside a face to split the face', s.addPoint));
+      box.append(ar);
+    }
+    const dims = el('div');
+    dims.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:4px;font-size:11px';
+    ['X', 'Y (up)', 'Z'].forEach((t, i) => {
+      const lab = el('label', 'muted');
+      lab.style.cssText = 'display:flex;flex-direction:column';
+      const inp = el('input');
+      inp.type = 'number'; inp.step = '0.1'; inp.min = '0.05';
+      inp.value = d.mesh.scale.getComponent(i).toFixed(2);
+      inp.onchange = () => { const v = Math.max(0.05, +inp.value || 1); d.mesh.scale.setComponent(i, v); };
+      lab.append(el('span', null, 'size ' + t), inp);
+      dims.append(lab);
+    });
+    box.append(dims);
+    const nm = el('input');
+    nm.value = s.name; nm.placeholder = 'name';
+    nm.style.cssText = 'width:100%;margin-top:4px;font-size:11px';
+    nm.oninput = () => { s.name = nm.value; };
+    box.append(nm);
+    const sl = el('label');
+    sl.style.cssText = 'display:block;font-size:11px;margin-top:3px';
+    const scb = el('input'); scb.type = 'checkbox'; scb.checked = s.solid;
+    scb.onchange = () => { s.solid = scb.checked; };
+    sl.append(scb, document.createTextNode(' Solid (off: walk through it; it still stops bullets and the camera)'));
+    box.append(sl);
+    const sv = row();
+    sv.append(btn('Save to level', ccSaveDraft, 'Writes it as a new collision shell', true),
+              btn('Cancel', () => { ccClearDraft(); renderCollCreator(); }));
+    box.append(sv);
+  }
+
+  if (s.spline) {
+    box.append(small(`Points of ${s.spline.name}: ${s.spline.verts.length} (${s.spline.moved.size} moved). Click a point, drag its arrows.`));
+    const sr2 = row();
+    sr2.append(btn('Save points', ccSaveSpline, 'Writes the spline with its points where they are now', true),
+               btn('Cancel', () => ccEndSpline()));
+    box.append(sr2);
+  }
+
+  // an existing shell
+  const m = ccSelectedShell();
+  const sep = el('div', null, '');
+  sep.style.cssText = 'border-top:1px solid var(--line);margin:6px 0 2px';
+  box.append(sep);
+  if (s.target) {
+    const id = ccNodeOf(s.target);
+    box.append(small(`Editing ${id.node} (${s.shellTris.length} faces).`));
+    box.append(chk('Hide other collision while editing', s.hideOthers, (v) => {
+      s.hideOthers = v;
+      try { localStorage.setItem('rdr.ccHideOthers', v ? '1' : '0'); } catch {}
+      ccApplyHideOthers();
+    }));
+    if (s.tool === 'faces') {
+      box.append(small(`${s.faceSel.size} face(s) selected. Click faces · Ctrl+drag a box (Alt: unselect). G move · R rotate · Shift+S scale them.`));
+      const tr = row();
+      tr.append(btn('Move (G)', () => ccFaceGizmo('translate')), btn('Rotate (R)', () => ccFaceGizmo('rotate')),
+                btn('Scale (Shift+S)', () => ccFaceGizmo('scale')));
+      box.append(tr);
+      const fr = row();
+      fr.append(btn(`Delete ${s.faceSel.size} face(s)`, ccDeleteFaces, 'Writes the shell without them', s.faceSel.size > 0 && !s.faceMoved),
+                btn('Save faces', ccSaveCorners, 'Writes the shell with the faces where they are now', !!s.faceMoved),
+                btn('Clear', () => { s.faceSel = new Set(); ccShowSel(); renderCollCreator(); }),
+                btn('Done', () => ccEndShell()));
+      box.append(fr);
+    } else if (s.tool === 'corners') {
+      box.append(small(`${s.shellVerts.length} corners, ${s.shellTris.length} faces.`));
+      const ar = row();
+      ar.append(btn(s.addPoint ? 'Adding points — click the shell' : 'Add point', () => { s.addPoint = !s.addPoint; renderCollCreator(); },
+                    'Click near an edge to split it there, or inside a face to split the face', s.addPoint));
+      box.append(ar);
+      const fr = row();
+      fr.append(btn('Save corners', ccSaveCorners, 'Writes the shell with its corners where they are now', true),
+                btn('Cancel', () => ccEndShell()));
+      box.append(fr);
+    }
+    const dr = row();
+    dr.append(btn('Remove this shell', ccRemoveShell, 'Take the collision being edited out of the level'));
+    box.append(dr);
+  } else if (m && !selShell) {
+    const id = ccNodeOf(m);
+    box.append(small(`Selected collision: ${id.node}`));
+    const er = row();
+    er.append(btn('Select faces', () => ccBeginShell('faces'), 'Pick faces of this shell: move, turn, scale or delete them'),
+              btn('Edit corners (T)', () => ccBeginShell('corners'), 'Drag this shell\'s corners'),
+              btn('Remove shell', ccRemoveShell, 'Take this collision out of the level'));
+    box.append(er);
+  } else if (!m) {
+    box.append(small('Select a collision shell (click it with the Collision view on; pick filter Collision for shells inside models) to edit it here.'));
+  }
+  const ur = row();
+  ur.append(btn('Undo collision edit', ccUndo, 'Takes back the last collision edit', false));
+  ur.lastChild.disabled = !s.lastWhere;
+  box.append(ur);
+}
+
+addEventListener('keydown', (e) => {
+  const s = window.__cc;
+  if (!s) return;
+  if (isTypingTarget(e.target)) return;
+  // the level editor's G / R / Shift+S / T, here first: the editor's own key handler returns early in several
+  // states (a sheet open, walk mode ...), and the keys did nothing in the collision editor
+  // not while flying: Shift+S is fast-backwards then. The right button held, a fly key still held (fly mode, or a
+  // button let go before the keys), or a key's auto-repeat -- each switched to Scale mid-flight (2026-11-24)
+  // (this key itself does not count: in fly navigation S is a fly key too, and a lone Shift+S tap still scales)
+  const flying = rmbDown || mouseButtonsHeld || e.repeat || (typeof fly !== 'undefined' && fly.keys
+    && [...fly.keys].some((c) => c !== e.code && /^Key[WASDQE]$/.test(c)));
+  if (document.querySelector('#tab-editor.on') && !e.ctrlKey && !e.metaKey && !e.altKey && !flying) {
+    const k = e.key === 'g' || e.key === 'G' ? 'move' : e.key === 'r' || e.key === 'R' ? 'rotate'
+      : (e.key === 'S' || e.key === 's') && e.shiftKey ? 'scale' : e.key === 't' || e.key === 'T' ? 'points' : null;
+    if (k && !(k === 'rotate' && e.shiftKey)) { ccKeyBind(k); e.preventDefault(); return; }
+  }
+  if (e.key === 'Escape') {
+    if (s.boxSel) { ccSetBoxSel(false); return; }
+    if (s.tool === 'draw') { ccDrawEnd(); return; }
+    if (s.addPoint) { s.addPoint = false; renderCollCreator(); return; }
+    if (s.tool === 'addnode' || s.tool === 'importplace') { s.tool = null; s.importData = null; renderer.domElement.style.cursor = ''; renderAddPanel(); return; }
+    if (s.tool === 'place') { s.tool = null; renderer.domElement.style.cursor = ''; renderCollCreator(); }
+    else if (s.handleOf === 'draft') { ccClearHandles(); s.tool = null; if (s.draft) s.giz.attach(s.draft.mesh); renderCollCreator(); }
+    else if (s.spline) ccEndSpline();
+    else if (s.target) ccEndShell();
+    else if (s.draft) { ccClearDraft(); renderCollCreator(); }
+  }
+  if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && document.querySelector('#tab-editor.on')) {
+    ccSetBoxSel(!s.boxSel);
+  }
+  if (e.code === 'NumpadDecimal') return;                  // the number pad's Del/. frames the selection (below)
+  if ((e.key === 'Delete' || e.key === 'Backspace') && s.tool === 'faces' && s.faceSel.size) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    ccDeleteFaces();
+    return;
+  }
+  // Delete on a collision shell being edited, or one picked with no node selected (a bare shell): remove it,
+  // asking first. With a node selected the editor's own Delete runs (it asks too) -- 2026-11-18
+  if (e.key === 'Delete' && document.querySelector('#tab-editor.on')
+      && ((s.target && s.target.parent) || (selected == null && ccSelectedShell()))) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    ccRemoveShell();
+  }
+}, true);
 
 function renderShapeControls(box, n) {
   const ri = n.props && n.props.resourceIndex;
@@ -5357,26 +7357,63 @@ async function duplicateSelected() {
 
 async function deleteSelected() {
   if (selected == null || !level) return;
-  const targets = [...selection];
+  // Event markers (doors, camera shots, light glows, AI spawn points) live in
+  // their own files and are removed through event_edit: they used to go to the
+  // node delete, which does not know them, and nothing happened.
+  const nodeTargets = [...selection].filter((u) => !nodeOf(u)?.event);
+  const evs = [...selection].map((u) => nodeOf(u)).filter((n) => n && n.event);
+  if (evs.length) {
+    const what = evs.length === 1 ? evs[0].name : `${evs.length} markers`;
+    if (!confirm(`Delete ${what}?`)) return;
+    // the highest index first in each file, so the ones before it keep theirs
+    evs.sort((a, b) => (b.event.data?.index ?? 0) - (a.event.data?.index ?? 0));
+    let done = 0;
+    for (const n of evs) {
+      const ev = n.event;
+      try {
+        const r = await post('event_edit', { archive: level.archive, manifest: level.manifest, area: level.area,
+          kind: ccEventKind(ev), op: 'remove', source: ev.source, index: ev.data?.index, group: ev.group });
+        if (r.ok === false) throw new Error(r.error_text);
+        done++;
+      } catch (e) { toast('Could not delete ' + n.name + ': ' + e.message, 'bad'); }
+    }
+    if (done) toast(`Deleted ${done} marker(s). Ctrl+Z undoes it.`, 'good');
+    eventsFor = null;
+    select(null);
+    await reloadLevel(true);
+    refreshHistory();
+    if (!nodeTargets.length) return;
+  }
+  const targets = nodeTargets;
+  if (!targets.length) return;
   const names = targets.map((u) => nodeOf(u)?.name).filter(Boolean);
   const what = names.length === 1 ? names[0] : `${names.length} objects`;
   if (!confirm(`Delete ${what}?`)) return;
-
-  let n = 0;
-  for (const uid of targets) {
-    // Re-resolve by name: earlier deletions renumber the uids.
-    const node = level.nodes.find((x) => x.name === names[n]);
-    const target = node ? node.uid : uid;
-    try {
-      const res = await post('delete', { archive: level.archive, manifest: level.manifest, area: level.area, uid: target });
-      if (!res.applied) { toast('Could not delete: ' + (res.error || '?'), 'bad'); break; }
-      n++;
-      await reloadLevel(true);
-    } catch (e) { toast('Delete failed: ' + e.message, 'bad'); break; }
+  // A model with its own collision shell: asked, every time, whether the shell goes too -- it used to follow the
+  // "Move collision with its model" box silently, and with that off a deleted model left its collision standing
+  // (2026-11-18)
+  const shells = targets.map((u) => nodeOf(u)).filter((n) => n && n.kind === 'zone' && n.linked != null
+    && nodeOf(n.linked) && !targets.includes(n.linked)).map((n) => nodeOf(n.linked).name);
+  let withShell = false;
+  if (shells.length) {
+    withShell = confirm((shells.length === 1 ? `It has its own collision, ${shells[0]}.`
+      : `${shells.length} of them have their own collision (${shells.slice(0, 3).join(', ')}${shells.length > 3 ? ' …' : ''}).`)
+      + '\n\nDelete the attached collision too?\n\nOK: delete it too.   Cancel: keep the collision.');
   }
-  if (n) toast(`Deleted ${n} object(s)`, 'good');
+
+  // ONE call for the whole selection: the server names every target up front and deletes from the highest uid
+  // down (one Ctrl+Z). One delete per object, found again by name after each, deleted some twice and stopped at
+  // the first refusal -- a box select left most of what it held (2026-11-18).
+  try {
+    const res = await post('delete_many', { archive: level.archive, manifest: level.manifest, area: level.area,
+                                            uids: targets, links: withShell });
+    const n = (res.deleted || []).length, bad = res.failed || [];
+    if (n) toast(`Deleted ${n} object(s). Ctrl+Z undoes it.`, 'good');
+    if (bad.length) toast(`${bad.length} could not be deleted: `
+      + bad.slice(0, 4).map((f) => `${f.name} (${f.error})`).join('; ') + (bad.length > 4 ? ' …' : ''), 'bad');
+  } catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
   select(null);
-  await reloadLevel(true);
+  await reloadLevel(true, true);
   refreshHistory();
 }
 
@@ -6536,36 +8573,131 @@ function fillAssetDockCats() {
   sel.onchange = renderAssetDock;
 }
 
+// The Library's level filter: the assets one level has (2026-11-18).
+async function fillAssetDockLevels() {
+  const sel = $('#assetDockLevel');
+  if (!sel || sel.options.length) return;
+  const any = el('option', '', 'From any level');
+  any.value = '';
+  sel.append(any);
+  sel.onchange = renderAssetDock;
+  try {
+    if (!levelCatalog.length) levelCatalog = await api('levels');
+  } catch { return; }
+  const groups = {};
+  for (const l of levelCatalog) (groups[l.mode_label || l.group || 'Levels'] ||= []).push(l);
+  for (const [g, ls] of Object.entries(groups)) {
+    const og = document.createElement('optgroup');
+    og.label = g;
+    for (const l of ls.sort((a, b) => a.name.localeCompare(b.name))) {
+      const o = el('option', '', l.name);
+      o.value = l.archive;
+      og.append(o);
+    }
+    sel.append(og);
+  }
+}
+
+function placeLabel(p) {
+  const lv = p.archive.split('/').pop().replace(/\.DAT$/i, '');
+  return lv + (p.area_name && p.area_name.toLowerCase() !== lv.toLowerCase() ? ' · ' + p.area_name : '');
+}
+
+// Hovering a map in an asset's list: that map's copy in the Inspector's 3D view (each map's model and textures
+// can differ); leaving it puts the selection's own preview back.
+let libPreviewViewer = null, libPreviewKey = null;
+function libPreview(p) {
+  const host = $('#inspView'), bar = $('#inspViewBar');
+  if (!host) return;
+  if (!p) {
+    libPreviewKey = null;
+    inspShown = null;
+    const n = selected != null ? nodeOf(selected) : null;
+    if (n) showInspectorModel(n); else { host.style.display = 'none'; if (bar) bar.style.display = 'none'; }
+    return;
+  }
+  const key = `${p.archive}|${p.area}|${p.chunk}`;
+  if (libPreviewKey === key) return;
+  libPreviewKey = key;
+  inspShown = 'lib:' + key;
+  host.style.display = 'block';
+  if (bar) bar.style.display = 'flex';
+  const chunk = p.chunk != null ? p.chunk : (p.resourceIndex - 1);
+  previewChunk(host, $('#inspViewInfo'), p.archive, p.area, chunk,
+               () => inspViewer, (v) => { inspViewer = v; }, () => $('#inspSpin')?.checked !== false)
+    .then(() => { const i = $('#inspViewInfo'); if (i && libPreviewKey === key) i.textContent = placeLabel(p) + ' — ' + i.textContent; });
+}
+
 async function renderAssetDock() {
   const box = $('#assetDock');
   if (!box) return;
   if (!level) { box.innerHTML = ''; return; }
   fillAssetDockCats();
+  fillAssetDockLevels();
   const q = $('#assetDockFilter').value.trim();
   const cat = $('#assetDockCat') ? $('#assetDockCat').value : '';
-  const here = $('#assetDockHere').checked;
+  const from = $('#assetDockLevel') ? $('#assetDockLevel').value : '';
+  const here = $('#assetDockHere').checked && !from;
   box.innerHTML = '<p class="muted" style="padding:8px">Loading…</p>';
   let r;
   try {
-    r = await api('assets?limit=300'
+    // every asset, before any search (it showed the first 300 only)
+    r = await api('assets?limit=100000'
       + (q ? '&q=' + encodeURIComponent(q) : '')
       + (cat ? '&category=' + encodeURIComponent(cat) : '')
       + (here ? '&archive=' + encodeURIComponent(level.archive)
               + (level.area ? '&area=' + encodeURIComponent(level.area) : '')
-              : ''));
+              : from ? '&archive=' + encodeURIComponent(from) : ''));
   } catch (e) { box.innerHTML = ''; return; }
 
   box.innerHTML = '';
+  if (r.assets.length) {
+    const cnt = el('div', 'muted', `${r.assets.length} asset(s)` + (from ? ' in ' + from.split('/').pop()
+      : q || cat || here ? ' match' : ' on the disc'));
+    cnt.style.cssText = 'font-size:11px;padding:2px 8px';
+    box.append(cnt);
+  }
   if (!r.assets.length) {
     box.innerHTML = '<p class="muted" style="padding:8px;font-size:11px">'
-      + 'Nothing matches. Untick the filter to search the whole disc.</p>';
+      + (here ? 'Nothing in this area matches. Untick the filter to see every asset on the disc.' : 'Nothing matches.') + '</p>';
     return;
   }
   for (const a of r.assets) {
     const row = el('div', 'row');
-    row.append(el('span', 'nm', a.name),
-               el('span', 'tag', here ? assetLabelFor('category', a.category)
-                                      : a.maps + ' maps'));
+    // models only: the index lists collision shells of the same name too, and those are not something to place
+    const models = (a.places || []).filter((p) => p.kind !== 'bound');
+    const places = models.filter((p) => !from || p.archive === from);
+    // "17 maps" opens the list of every map it is in: each one's copy placed by its own button, previewed in the
+    // Inspector on hover (the model and its textures can differ map to map) -- 2026-11-18
+    const tag = el('span', 'tag', here ? assetLabelFor('category', a.category)
+                                       : (from ? places.length + ' here · ' : '') + a.maps + ' maps ▾');
+    if (places.length > 1 || (!here && models.length > 1)) {
+      tag.style.cursor = 'pointer';
+      tag.title = 'List every map it is in';
+      tag.onclick = (ev) => {
+        ev.stopPropagation();
+        const open = row.nextSibling && row.nextSibling.classList && row.nextSibling.classList.contains('libplaces');
+        if (open) { row.nextSibling.remove(); libPreview(null); return; }
+        const list = el('div', 'libplaces');
+        list.style.cssText = 'padding:2px 0 4px 14px;border-left:2px solid var(--line, #444);margin:0 0 4px 6px';
+        for (const p of (from ? places : models)) {
+          const pr = el('div', 'row');
+          pr.style.cssText = 'font-size:11px;padding:1px 4px';
+          pr.append(el('span', 'nm', placeLabel(p)), el('span', 'muted', `chunk ${p.resourceIndex}`));
+          const b = el('button', '', 'Place this');
+          b.style.cssText = 'font-size:10px;padding:0 6px;flex:none';
+          b.title = `Put ${placeLabel(p)}'s ${a.name} at the centre of the view`;
+          b.onclick = (e2) => { e2.stopPropagation(); placeAsset(a.name, false, p); };
+          pr.append(b);
+          pr.onmouseenter = () => libPreview(p);
+          pr.onmouseleave = () => libPreview(null);
+          list.append(pr);
+        }
+        if ((a.places || []).length >= 40) list.append(el('div', 'muted', 'first 40 shown'));
+        row.after(list);
+      };
+    }
+    row.append(el('span', 'nm', a.name), tag);
     // A browse click never writes. This row used to POST place_asset the
     // moment it was clicked -- the only list row in the product whose click
     // wrote to the disc -- while its own tooltip said "click to check".
@@ -6582,7 +8714,7 @@ async function renderAssetDock() {
 
 // Place an asset at the middle of the view. With dryOnly, only report
 // whether it would fit -- the browse click's job.
-async function placeAsset(name, dryOnly) {
+async function placeAsset(name, dryOnly, source) {
   if (!level) return toast('Load a level first.', 'bad');
   const target = controls.target;
   const pos = [ +target.x.toFixed(3), +target.y.toFixed(3), +target.z.toFixed(3) ];
@@ -6598,11 +8730,13 @@ async function placeAsset(name, dryOnly) {
     }
     const res = await post('place_asset', {
       archive: level.archive, area: level.area, name, pos,
+      source: source ? { archive: source.archive, area: source.area, resourceIndex: source.resourceIndex } : undefined,
     });
     if (!res.applied) return toast('Could not place ' + name, 'bad');
     toast(`Placed ${res.new_name} in ${res.target_file} at `
-          + pos.map((v) => v.toFixed(1)).join(', '), 'good');
-    await reloadLevel(true);
+          + pos.map((v) => v.toFixed(1)).join(', ')
+          + (res.new_model ? ` (copied in from ${res.copied_from} with its textures${res.collision ? ', collision ' + res.collision : ''}). Ctrl+Z undoes it.` : ''), 'good');
+    await reloadLevel(true, !!res.new_model);   // a new model: its surface has to be read too
     refreshHistory();
   } catch (e) {
     toast(e.message, 'bad');
@@ -8956,6 +11090,14 @@ async function loadLevels() {
     box.append(el('div', 'pad muted', 'no levels match'));
     return;
   }
+  // A new level from here: the Data Editor's New .dat (a Showdown map or a story level in the mods folder); the
+  // list refreshes when it is made
+  const nb = el('button', null, '+ New level…');
+  nb.style.cssText = 'width:calc(100% - 16px);margin:6px 8px 2px;font-size:12px';
+  nb.title = 'Make a new level (the Data Editor New .dat): a Showdown map or a story level, from a template map, '
+    + 'without its geometry, or a blank slate. It shows in this list when it is made.';
+  nb.onclick = () => (window.rdrNewDat ? window.rdrNewDat() : toast('The Data Editor is not ready yet: try again in a moment.', 'bad'));
+  box.append(nb);
   let mode = null;
   for (const l of list) {
     if (l.mode !== mode) {
@@ -10020,22 +12162,54 @@ async function withProgress(label, fn) {
   }
 }
 
-// Which game Reset to stock is for: with a backup of the unedited Xbox game files ("unedited assets") there are two
-// stocks, so it asks; without one it is the PS2's, as it always was. -> 'ps2' | 'xbox' | null.
-function chooseReset() {
+// Reset to stock's one dialog: which game (with a backup of the unedited Xbox game files there are two stocks; without
+// one only the PS2's is offered), and what happens to the Data Editor's mod files -- kept and built again, or taken
+// out, saved first under a name of your own (with or without the new .dat files) or not saved at all (2026-11-18,
+// the user's). -> 'ps2' | 'xbox' | 'both' | null; the mod choices in window.__resetClearMods / window.__resetSave.
+function chooseReset(hasXbox) {
   return new Promise((res) => {
     const back = document.createElement('div');
     back.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center';
     const box = document.createElement('div');
-    box.style.cssText = 'margin-top:16vh;width:min(460px,92vw);background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:14px 16px';
-    box.innerHTML = '<div style="font:var(--t-head);color:var(--title);margin-bottom:8px">Reset to stock: which game?</div>'
-      + '<p class="muted" style="margin:0 0 12px">PS2: the working disc copied again from the stock disc (PCSX2).<br>'
-      + 'Xbox: the recomp\'s game files put back as "unedited assets" has them, and the Studio\'s files taken out of its mods folder.<br>'
-      + 'Either way every change to that game is lost; the Data Editor\'s mod files are kept as a Saved Mod.</p>';
+    box.style.cssText = 'margin-top:12vh;width:min(520px,92vw);background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:14px 16px';
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const defName = 'Before reset ' + now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()) + ' '
+      + pad(now.getHours()) + pad(now.getMinutes());
+    box.innerHTML = '<div style="font:var(--t-head);color:var(--title);margin-bottom:8px">Reset to stock' + (hasXbox ? ': which game?' : '') + '</div>'
+      + '<p class="muted" style="margin:0 0 12px">PS2: the working disc copied again from the stock disc (PCSX2).'
+      + (hasXbox ? '<br>Xbox: the recomp game files put back as "unedited assets" has them, and the Studio files taken out of its mods folder.' : '')
+      + '<br>Either way the game files come back as they shipped.</p>'
+      + '<label style="display:flex;gap:6px;align-items:center;margin:0 0 8px;cursor:pointer"><input type="checkbox" id="resetKeepMod">'
+      + '<span>Keep my mod and build it again into the reset game</span></label>'
+      + '<div id="resetSaveBox" style="border-left:2px solid var(--line);padding:2px 0 2px 10px;margin:0 0 12px">'
+      + '<label style="display:flex;gap:6px;align-items:center;margin:0 0 6px;cursor:pointer"><input type="checkbox" id="resetSave" checked>'
+      + '<span>Save my mod files first, as a Saved Mod (Data Editor &gt; Saved Mods)</span></label>'
+      + '<div id="resetSaveOpts"><div style="display:flex;gap:6px;align-items:center;margin:0 0 6px"><span class="muted" style="flex:none">Name</span>'
+      + '<input id="resetSaveName" style="flex:1" maxlength="80"></div>'
+      + '<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="resetSaveNew" checked>'
+      + '<span>Include the new .dat files (levels made with New .dat)</span></label></div>'
+      + '<p class="muted" id="resetNoSave" style="display:none;margin:4px 0 0;color:var(--bad)">Not saved: the mod files are emptied out of the mods folder and gone.</p>'
+      + '</div>';
+    const keep = box.querySelector('#resetKeepMod'), sv = box.querySelector('#resetSave');
+    box.querySelector('#resetSaveName').value = defName;
+    const sync = () => {
+      box.querySelector('#resetSaveBox').style.display = keep.checked ? 'none' : '';
+      box.querySelector('#resetSaveOpts').style.display = sv.checked ? '' : 'none';
+      box.querySelector('#resetNoSave').style.display = sv.checked ? 'none' : '';
+    };
+    keep.onchange = sync; sv.onchange = sync; sync();
     const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end';
-    const done = (v) => { back.remove(); document.removeEventListener('keydown', esc); res(v); };
+    const done = (v) => {
+      window.__resetClearMods = !keep.checked;
+      window.__resetSave = { save: sv.checked, save_name: box.querySelector('#resetSaveName').value.trim() || defName,
+                             include_new: box.querySelector('#resetSaveNew').checked };
+      back.remove(); document.removeEventListener('keydown', esc); res(v);
+    };
     const esc = (e) => { if (e.key === 'Escape') done(null); };
-    for (const [label, v, cls] of [['Cancel', null, ''], ['PS2 (PCSX2)', 'ps2', 'danger'], ['Xbox (recomp)', 'xbox', 'danger']]) {
+    const buttons = hasXbox ? [['Cancel', null, ''], ['PS2 (PCSX2)', 'ps2', 'danger'], ['Xbox (recomp)', 'xbox', 'danger'], ['Both', 'both', 'danger']]
+                            : [['Cancel', null, ''], ['Reset the PS2 disc', 'ps2', 'danger']];
+    for (const [label, v, cls] of buttons) {
       const btn = document.createElement('button'); btn.textContent = label; if (cls) btn.className = cls;
       btn.onclick = () => done(v); row.append(btn);
     }
@@ -10050,34 +12224,55 @@ $('#btnRestore').onclick = async () => {
   if (!window.__resetConfirmed) {
     let xs = null;
     try { xs = await post('de_x_xbox_state', {}); } catch { /* no Xbox side */ }
-    if (xs && xs.backup_exists) {
-      const which = await chooseReset();
+    {
+      const which = await chooseReset(!!(xs && xs.backup_exists));
       if (!which) return;
-      if (which === 'xbox') {
+      if (which === 'both') {
+        // the Xbox side first (a job here), then the PS2 reset below, which reloads and rebuilds both
         if (!window.rdrDEStartJob) return toast('The Data Editor is not ready yet', 'bad');
-        const ok = await window.rdrDEStartJob('de_x_xbox_reset', { clear_mods: true }, 'Reset to stock (Xbox)');
-        toast(ok ? 'The Xbox game is back to its unedited files.' : 'The Xbox reset stopped (see the Log)', ok ? 'good' : 'bad');
+        // the Xbox reset (first) saves and empties the mods folder as chosen; the PS2 one after it finds it empty
+        const okx = await window.rdrDEStartJob('de_x_xbox_reset', Object.assign({ clear_mods: window.__resetClearMods !== false },
+          window.__resetSave || {}), 'Reset to stock (Xbox)');
+        if (!okx) return toast('The Xbox reset stopped (see the Log)', 'bad');
+        window.__resetBoth = true;
+        window.__resetConfirmed = true;
+      } else if (which === 'xbox') {
+        if (!window.rdrDEStartJob) return toast('The Data Editor is not ready yet', 'bad');
+        const clearX = window.__resetClearMods !== false;
+        window.__resetClearMods = undefined;
+        const ok = await window.rdrDEStartJob('de_x_xbox_reset', Object.assign({ clear_mods: clearX }, window.__resetSave || {}),
+          'Reset to stock (Xbox)');
+        toast(ok ? 'The Xbox game is back to its unedited files. Building it again…' : 'The Xbox reset stopped (see the Log)', ok ? 'good' : 'bad');
         if (ok && window.RDR && window.RDR.refreshLists) window.RDR.refreshLists();
+        // rebuilt at once: the Studio's own files (Script Hooks ...) back in the reset game
+        if (ok) {
+          const built = await window.rdrDEStartJob('de_x_xbox_build', {}, 'Build into the Xbox game');
+          toast(built ? 'Reset and rebuilt (Xbox).' : 'The rebuild after the reset stopped (see the Log)', built ? 'good' : 'bad');
+        }
         return;
       }
       window.__resetConfirmed = true;                   // PS2 chosen in the dialog: no second question
     }
   }
-  if (!window.__resetConfirmed
-      && !confirm('Overwrite the working disc from the stock disc?\n' +
-                  'Every change is lost. The stock disc is untouched.')) return;
+  if (!window.__resetConfirmed) return;
   window.__resetConfirmed = false;
   const clearMods = window.__resetClearMods !== false;
+  const saveOpts = window.__resetSave || {};
   window.__resetClearMods = undefined;
+  window.__resetSave = undefined;
   let res = null;
   try {
     res = await withProgress('Restoring the working ISO from vanilla — copying 2.2 GB',
-                             () => post('restore', { clear_mods: clearMods }));
+                             () => post('restore', Object.assign({ clear_mods: clearMods }, saveOpts)));
   } catch (e) { return toast('Restore failed: ' + e.message, 'bad'); }
+  // rebuilt once the page is back (it reloads below): the Studio's own changes (Script Hooks ...) on the new disc
+  try { localStorage.setItem('rdr.buildAfterReset', window.__resetBoth ? 'both' : 'ps2'); } catch { /* no storage: no rebuild */ }
+  window.__resetBoth = false;
   const saved = res && res.saved_mod;
   if (saved) alert(`Working ISO restored to vanilla.
 
 The Data Editor's ${res.cleared} mod file(s) were taken out too, so the next Build will not put them back. They are kept as the Saved Mod "${saved}" (DATA EDITOR > Data Editor, Saved Mods) if you want them again.`);
+  else if (res && res.cleared) toast(`Working ISO restored to vanilla. The Data Editor's ${res.cleared} mod file(s) were taken out, not saved (as chosen).`, 'good');
   else toast('Working ISO restored to vanilla.', 'good');
   level = null;
   chunkUid = uidChunk = null;
@@ -10100,8 +12295,13 @@ function renderBuildButton(w) {
   const q = (w && w.queued) || [];
   const n = (w && w.data_editor) || 0;
   const xbox = window.rdrPlatform && window.rdrPlatform() === 'xbox';
-  b.disabled = building || (w && w.running);
+  const nothing = !!w && !w.any && !building && !w.running;
+  b.disabled = building || (w && w.running) || nothing;
   b.textContent = building ? 'Building…' : (xbox ? 'Build (Xbox)' : 'Build (PS2)');
+  if (nothing) {
+    b.title = 'Nothing new to build: the ' + (xbox ? 'Xbox' : 'PS2') + ' game has everything of the mod already';
+    return;
+  }
   if (xbox && !building && !(w && w.running)) {
     b.title = 'Build into the Xbox game: the mod made the Xbox\'s files, into the recomp\'s mods folder'
       + (q.length ? ' (first ' + q.length + ' .dat file(s) with Studio changes are rebuilt on the working disc)' : '');
@@ -11362,8 +13562,18 @@ $('#capLevel').onchange = (e) => loadCapacity(e.target.value);
 // #btnSaveMod, #btnShareMod and #btnImportMod are wired by export.js: one
 // way to make a mod file, shared with the Export dialog and Versions.
 
+// Typing: a text box has the keys. A checkbox, radio or button keeps focus after it is clicked, and counting those
+// as typing swallowed Delete (and every editor key) until the user clicked the viewport (2026-11-18).
+function isTypingTarget(t) {
+  if (!t) return false;
+  if (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return true;
+  if (t.tagName !== 'INPUT') return false;
+  return !['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']
+    .includes((t.type || 'text').toLowerCase());
+}
+
 addEventListener('keydown', (e) => {
-  const typing = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
+  const typing = isTypingTarget(e.target);
   // Ctrl+K works even mid-typing -- it is the escape hatch, so it must not
   // depend on where the caret happens to be.
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
@@ -11446,15 +13656,20 @@ addEventListener('keydown', (e) => {
   // WASD now moves the camera wherever it is pointing, all the time -- see
   // stepFly in the render loop.
   if (walk.on) return;   // movement keys belong to the walker
-  if (e.key === 'g') gizmo.setMode('translate');
-  if (e.key === 'r') gizmo.setMode('rotate');
-  if (e.key === 't') gizmo.setMode('scale');
+  // G move · R rotate · Shift+S scale · T edit points: handled by the
+  // collision editor's own key listener (capture), which runs first.
   if (e.key === 'f' && selected != null) focusOn(selected);
   // No bare letter ever mutates the level. Ctrl+D and Delete are the whole
   // list. Bare `d` is the strafe-right key and used to duplicate on repeat.
   if ((e.key === 'd' || e.key === 'D') && (e.ctrlKey || e.metaKey)
       && selected != null && $('#tab-editor').classList.contains('on')) {
     e.preventDefault(); duplicateSelected();
+  }
+  // the number pad's Del/. key frames the selected object (as in Blender) -- with Num Lock off it reports itself as
+  // Delete, which must not delete (2026-11-24, the user's)
+  if (e.code === 'NumpadDecimal') {
+    if (selected != null) { e.preventDefault(); focusOn(selected); }
+    return;
   }
   if (e.key === 'Delete' && selected != null) deleteSelected();
   if (e.key === 'Escape') select(null);
@@ -13332,6 +15547,17 @@ for (const [sel, contSel, rowSel] of FILTERS) {
     surfacePoint, setPlaceMode, openTextFile, typeInfo, loadCapacity,
     loadLevelByRef, levelQuery, pushChange, pushChanges, renderAttributes,
     addInspectorSection, watchButtons, loadToc,
+    // the collision creator, for scripts and tests
+    coll: { state: () => cc(), startDraft: ccStartDraft, saveDraft: ccSaveDraft, beginShell: ccBeginShell,
+            deleteFaces: ccDeleteFaces, saveCorners: ccSaveCorners, removeShell: ccRemoveShell, undo: ccUndo,
+            artOpacity: applyArtOpacity, panel: renderCollCreator, selectedShell: ccSelectedShell,
+            splitAt: ccSplitAt, addPointClick: ccAddPointClick, applyHideOthers: ccApplyHideOthers,
+            keyBind: ccKeyBind, splinePoints: ccSplinePoints, saveSpline: ccSaveSpline,
+            addComponent: ccAddComponent, addPanel: renderAddPanel, readObj: ccReadObj, readGlb: ccReadGlb,
+            importAt: ccImportAt, drawStart: ccDrawStart, drawSave: ccDrawSave, boxSelect: ccBoxSelectObjects,
+            setBoxSel: ccSetBoxSel, modeLabel: ccModeLabel, faceGizmo: ccFaceGizmo },
+    get worldInfo() { return worldInfo; },
+    get flyState() { return { rmb: rmbDown, keys: [...fly.keys], nav: navMode }; },   // for tests
     get level() { return level; },
     get selected() { return selected; },
     get placeMode() { return placeMode; },

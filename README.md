@@ -6,7 +6,7 @@ and streams, Flash menus, cutscenes, mod packs and executable "code mods". Windo
 (Python + pywebview).
 
 **Download:** the ready-made app is on this repository's [Releases](../../releases) page
-(`RDR-Modding-Studio-2.1.0-full.zip`: unzip anywhere and run `RDR Modding Studio.exe`).
+(`RDR-Modding-Studio-2.2.0-full.zip`: unzip anywhere and run `RDR Modding Studio.exe`).
 
 This is a fork of [RDR Modding Studio 1.4.0](https://github.com/pop123321pop/rdr-modding-studio) by
 pop123321pop. It adds, among other things, the RDR Data Editor built in (a mods folder built into the

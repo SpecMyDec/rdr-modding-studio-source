@@ -110,18 +110,31 @@ function askTextInPage(title, text, value) {
 }
 
 let backupAsked = false;
-// The first time the Xbox game is edited: a copy of its game files as they are now ("unedited assets")
-async function maybeAskBackup() {
-  if (backupAsked || state.platform !== 'xbox' || !state.assets_ok || state.backup_exists || state.backup_asked) return;
+// The Xbox game's backup of its unedited files: asked when the Xbox side is first set up (force) and again the first
+// time it is edited while there is none -- made now ("unedited assets" beside the game files), or one the user has
+// already pointed at (2026-11-24, the user's), or not now.
+async function maybeAskBackup(force) {
+  if (state.platform !== 'xbox' || state.backup_exists) return;
+  if (!force && (backupAsked || !state.assets_ok || state.backup_asked)) return;
   backupAsked = true;
   // asked in the page itself: the app's own confirm() closed the whole window on Cancel, and a check run's headless
   // page answered it by itself. Only a click on "Don't ask again" is remembered.
-  const answer = await askInPage('First time editing the Xbox game',
-    'Make a backup of its unedited game files first? They are copied, as they are now, to:\n' + state.backup
-    + '\n\nfrom the recomp\'s game files:\n' + state.assets + '\n\nReset to stock (Xbox) puts the game back from it.',
-    [['Don\'t ask again', 'never'], ['Not now', 'later'], ['Back up now', 'yes', 'primary']]);
+  const answer = await askInPage(force ? 'Xbox set-up: a backup of the game files' : 'First time editing the Xbox game',
+    'Reset to stock (Xbox) puts the game back from a backup of its unedited files. Make one now? The recomp\'s game files'
+    + (state.assets ? ':\n' + state.assets + '\n' : ' ') + 'are copied, as they are now, to:\n' + (state.backup || '"unedited assets" beside them')
+    + '\n\nOr point the Studio at a backup you have already (a copy of the unedited game files).',
+    [['Don\'t ask again', 'never'], ['Not now', 'later'], ['Use a backup I have…', 'have'], ['Back up now', 'yes', 'primary']]);
   if (answer === 'never') {
     try { await call('de_x_xbox_set', { backup_asked: true }); } catch { /* asked again next time */ }
+    return;
+  }
+  if (answer === 'have') {
+    const dir = await askTextInPage('A backup you have', 'The folder holding the unedited Xbox game files (default.xbe, lvls_m2, swat.dat ...)', '');
+    if (!dir) return;
+    try {
+      apply(await call('de_x_xbox_set', { backup: dir }));
+      toast('Reset to stock (Xbox) now puts the game back from ' + state.backup, 'good');
+    } catch (e) { toast(e.message, 'bad'); backupAsked = false; }
     return;
   }
   if (answer !== 'yes') return;                            // not now: asked again next start
@@ -148,10 +161,13 @@ async function pick(p) {
       if (!exe) { back(); return; }
       st = await call('de_x_xbox_set', { exe });
     }
+    const firstSetup = p === 'xbox' && !state.exe_ok;
     apply(await call('de_x_xbox_set', { platform: p }));
-    maybeAskBackup();
+    maybeAskBackup(firstSetup);
+    // the Data Editor's statuses (Built / changed / new) are each game's own: shown for the one picked now
+    if (window.rdrRefreshDE) { try { window.rdrRefreshDE(); } catch { /* the page is not open */ } }
     toast(p === 'xbox'
-      ? 'Xbox: Build writes the mod into the recomp\'s mods folder and Play starts RDR.exe.'
+      ? 'Xbox: Build puts the mod into the recomp\'s game files, and Play builds first, then starts RDR.exe.'
       : 'PS2: Build puts the mod on the working disc and Play starts PCSX2.', 'good');
   } catch (e) { back(); toast(e.message, 'bad'); }
 }
@@ -201,7 +217,28 @@ document.addEventListener('click', async (e) => {
   finally { playing = false; }
 }, true);
 
+// Reset to stock (PS2) reloads the page: the build it asked for runs once the Data Editor is ready again
+function buildAfterReset() {
+  let want = null;
+  try { want = localStorage.getItem('rdr.buildAfterReset'); localStorage.removeItem('rdr.buildAfterReset'); } catch { return; }
+  if (want !== 'ps2' && want !== 'both') return;
+  let tries = 0;
+  const go = async () => {
+    if (!window.rdrDEStartJob) { if (++tries < 60) setTimeout(go, 500); return; }
+    toast('Reset to stock done: building the PS2 game again…');
+    let ok = await window.rdrDEStartJob('de_build', {}, 'Build into the PS2 game');
+    if (ok && want === 'both') {
+      toast('Building the Xbox game again…');
+      ok = await window.rdrDEStartJob('de_x_xbox_build', {}, 'Build into the Xbox game');
+    }
+    toast(ok ? 'Reset and rebuilt (' + (want === 'both' ? 'PS2 and Xbox' : 'PS2') + ').'
+      : 'The rebuild after the reset stopped (see the Log)', ok ? 'good' : 'bad');
+  };
+  setTimeout(go, 800);
+}
+
 function init() {
+  buildAfterReset();
   const sw = $('#deGameSel');
   if (!sw) return;
   sw.addEventListener('change', () => pick(sw.value));

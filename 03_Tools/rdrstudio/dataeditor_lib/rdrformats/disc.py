@@ -19,17 +19,23 @@ CHARS = "\x00 #$()-./?0123456789_abcdefghijklmnopqrstuvwxyz~\x7F"  # Dave packed
 class Folder:
     def __init__(self, path):
         self.root = path
+        self._files = None
 
     def files(self):
-        out = {}
-        for d, _dirs, names in os.walk(self.root):
-            for n in names:
-                p = os.path.join(d, n)
-                out[os.path.relpath(p, self.root).replace(os.sep, '/').lower()] = p
-        return out
+        # walked once (each read walked the whole game folder twice: minutes on an export)
+        if self._files is None:
+            out = {}
+            for d, _dirs, names in os.walk(self.root):
+                rel = os.path.relpath(d, self.root).replace(os.sep, '/').lower()
+                pre = '' if rel == '.' else rel + '/'
+                for n in names:
+                    out[pre + n.lower()] = os.path.join(d, n)
+            self._files = out
+        return self._files
 
     def read(self, path):
-        with open(self.files()[path] if path in self.files() else os.path.join(self.root, path), 'rb') as f:
+        files = self.files()
+        with open(files[path] if path in files else os.path.join(self.root, path), 'rb') as f:
             return f.read()
 
 
@@ -132,13 +138,47 @@ class Xiso:
         return self.f.read(length)
 
 
+_OPENED = {}
+
+
 def open_reference(path: str):
-    if os.path.isdir(path):
-        return Folder(path)
+    """The reference game at path, opened once (kept while it is unchanged: its listing and level index are
+    reused by every export)."""
     try:
-        return Iso9660(path)
-    except ValueError:
-        return Xiso(path)
+        stamp = os.path.getmtime(path)
+    except OSError:
+        stamp = None
+    got = _OPENED.get(path)
+    if got is not None and got[0] == stamp:
+        return got[1]
+    if os.path.isdir(path):
+        ref = Folder(path)
+    else:
+        try:
+            ref = Iso9660(path)
+        except ValueError:
+            ref = Xiso(path)
+    _OPENED[path] = (stamp, ref)
+    return ref
+
+
+def bundle_index(ref) -> dict:
+    """{level bundle name (lower case): [level archives holding it]} of a reference game, made once: a name the
+    game has not (a new level) no longer reads every level archive each time it is looked up."""
+    idx = getattr(ref, '_bundle_index', None)
+    if idx is None:
+        idx = {}
+        for arch in sorted(p for p in ref.files() if p.endswith('.dat') and p.split('/')[0].startswith('lvls_')):
+            try:
+                names = dave_names(ref.read(arch))
+            except (ValueError, OSError, struct.error):
+                continue
+            for n in names:
+                low = n.lower().rsplit('/', 1)[-1]
+                if low.endswith(('.rsc', '.xrsc')):
+                    idx.setdefault(low, []).append(arch)
+        ref._bundle_index = idx
+    return idx
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -188,7 +228,7 @@ def level_files(ref, stem: str, ps2: bool) -> tuple:
     bundle = stem + ('.rsc' if ps2 else '.xrsc')
     zext = '.znes' if ps2 else '.xznes'
     short = stem[4:] if stem.startswith('lvl_') else stem
-    archives = sorted((p for p in ref.files() if p.endswith('.dat') and p.split('/')[0].startswith('lvls_')),
+    archives = sorted(bundle_index(ref).get(bundle, []),
                       key=lambda p: (os.path.splitext(p.rsplit('/', 1)[-1])[0] != short, p))
     for arch in archives:
         try:

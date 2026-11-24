@@ -583,6 +583,33 @@ def _strip_batches(strips: list, limit: int) -> list:
     return [b for b in batches if b]
 
 
+def fit_uvs(verts: list, tris: list) -> tuple:
+    """The PS2 keeps texture coordinates in 16 bits, -8 to 8 (UV_BIAS): a triangle reaching past them (a texture
+    repeated far, common in models from elsewhere) was clamped and smeared across it. Such a triangle gets its own
+    corners moved by whole repeats (the same picture: textures wrap) to sit round 0. -> (verts, tris)."""
+    lim = UV_BIAS - 1e-3
+    if all(-lim <= c <= lim for v in verts for c in v[2]):
+        return verts, tris
+    verts = list(verts)
+    made, out = {}, []
+    for t in tris:
+        uvs = [verts[i][2] for i in t]
+        if all(-lim <= c <= lim for uv in uvs for c in uv):
+            out.append(t)
+            continue
+        shift = tuple(float(round(sum(uv[a] for uv in uvs) / 3)) for a in range(2))
+        nt = []
+        for i in t:
+            key = (i, shift)
+            if key not in made:
+                v = verts[i]
+                made[key] = len(verts)
+                verts.append((v[0], v[1], (v[2][0] - shift[0], v[2][1] - shift[1])) + tuple(v[3:]))
+            nt.append(made[key])
+        out.append(tuple(nt))
+    return verts, out
+
+
 def mod0(materials: list, bones: int, level: bool = False, floats: bool = False, diffuse=None) -> bytes:
     """A PS2 MOD0. materials: [(TEX0 chunk number or 0, vertices, triangles)], vertices [(position (relative to its
     bone when bones), normal, uv, bone)], triangles [(i, j, k)] into them. bones: the skeleton's bone count (0: a
@@ -602,6 +629,7 @@ def mod0(materials: list, bones: int, level: bool = False, floats: bool = False,
     streams, counts = [], []
     for tex, verts, tris in materials:
         tris = [tuple(t) for t in tris if len(set(t)) == 3]  # a triangle on two corners draws nothing
+        verts, tris = fit_uvs(verts, tris)
         strips = [list(pr.indices) for pr in builder._strips(tris)]
         batches = _strip_batches(strips, limit)
         v = _Vif()

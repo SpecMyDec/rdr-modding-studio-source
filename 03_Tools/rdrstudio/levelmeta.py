@@ -109,9 +109,11 @@ def transitions(game, archive):
         if not txt:
             continue
         master = re.search(r"MasterNameDisplay\s+(\S+)", txt)
+        sub_index = -1
         for label, body in _blocks(txt):
             if label != "SubLevel":
                 continue
+            sub_index += 1
             def one(key):
                 m = re.search(key + r"\s+(\S+)", body)
                 return m.group(1) if m else None
@@ -128,7 +130,7 @@ def transitions(game, archive):
             lh = re.search(r"LeaveHeading\s+(-?[\d.]+)", body)
             lock = one("Lock")
             out.append(dict(
-                source=fn,
+                source=fn, index=sub_index,
                 level=one("LevelName"),
                 # The game's own player-facing name, underscores and all.
                 display=(one("DisplayName") or "").replace("_", " ").strip(),
@@ -161,6 +163,7 @@ def cameras(game, archive):
         txt = _text(game, archive, fn)
         if not txt:
             continue
+        cam_index = -1
         for line in txt.splitlines():
             line = line.strip()
             if not line or line.startswith(("Version", "NumCams")):
@@ -173,10 +176,11 @@ def cameras(game, archive):
             if len(vals) < 7:
                 continue
             eye, target, lens = vals[0:3], vals[3:6], vals[6]
+            cam_index += 1
             # PrincessCam and friends are parked at y=10000 rather than deleted.
             parked = abs(eye[1]) > 5000 or abs(target[1]) > 5000
             out.append(dict(
-                source=fn, name=name, eye=eye, target=target, lens=lens,
+                source=fn, index=cam_index, name=name, eye=eye, target=target, lens=lens,
                 cutscene=name.startswith("TGS_"),
                 duel=fn.lower().startswith("duelview"),
                 parked=parked,
@@ -193,9 +197,11 @@ def glows(game, archive):
         txt = _text(game, archive, fn)
         if not txt:
             continue
+        glow_index = -1
         for label, body in _blocks(txt):
             if label != "Glow":
                 continue
+            glow_index += 1
             def one(key, cast=str):
                 m = re.search(key + r"\s+(\S+)", body)
                 if not m:
@@ -206,7 +212,7 @@ def glows(game, archive):
                     return None
             p = re.search(r"Position\s+([-\d.\s]+)", body)
             out.append(dict(
-                source=fn,
+                source=fn, index=glow_index,
                 texture=one("TextureName"),
                 name=one("Name") or one("TextureName"),
                 pos=(_nums(p.group(1))[:3] if p else None),
@@ -297,7 +303,7 @@ def spawn_points(game, archive):
                         continue
                     if len(vals) < 4:
                         continue
-                    pts.append(dict(owner=owner, kind=kind,
+                    pts.append(dict(owner=owner, kind=kind, index=len(pts),
                                     pos=vals[:3], heading=vals[3]))
                 if pts:
                     out.append(dict(source=fn, group=group, points=pts))

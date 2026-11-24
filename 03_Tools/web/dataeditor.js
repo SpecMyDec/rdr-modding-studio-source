@@ -199,10 +199,10 @@ async function poll() {
       : j.state === 'cancelled' ? (j.label + ': cancelled, nothing written to the disc') : '');
   }
   if (j.state === 'cancelled') toast(j.label + ' cancelled: the working disc is as it was', 'good');
-  if (j.state === 'done' && /Build|Restore/.test(j.label || '')) {
-    toast(j.label + ' finished', 'good');
-    if (A && A.refreshLists) A.refreshLists();  // new levels and characters show in the other tabs
-  }
+  if (j.state === 'done' && /Build|Restore/.test(j.label || '')) toast(j.label + ' finished', 'good');
+  // after every job: a New .dat (a new level in the mods folder) has to show in the level editor's list at once --
+  // it waited for the next Build before
+  if (j.state === 'done' && A && A.refreshLists) A.refreshLists();
   if (j.state === 'error' || j.state === 'refused') {
     const why = lastJobLog.find((l) => /PCSX2|Stopped|refused|wait|not enough|cannot|could not/i.test(l)) || 'See the Log for what happened.';
     problem(j.label + (j.state === 'refused' ? ': refused' : ': stopped'), why.replace(/^Stopped: \w+: /, ''));
@@ -327,7 +327,55 @@ function statusText(f) {
   return { built: 'Built', changed: 'Changed', new: 'New' }[f.status] || f.status;
 }
 
+// "All files shown": the selected .dat's own files too (status Base), from the unedited disc's list
+let showAll = false;
+try { showAll = localStorage.getItem('rdr.deShowAll') === '1'; } catch { /* no storage */ }
+const baseNames = new Map();          // archive -> [names] (or 'loading')
+function wireShowAll() {
+  const cb = $('#deShowAll');
+  if (!cb || cb._wired) return;
+  cb._wired = true;
+  cb.checked = showAll;
+  cb.onchange = () => {
+    showAll = cb.checked;
+    try { localStorage.setItem('rdr.deShowAll', showAll ? '1' : '0'); } catch { /* no storage */ }
+    renderFiles();
+  };
+}
+function baseRows(tb, rows) {
+  if (!showAll || folder === 'master' || folderKind(folder) !== 'archive') return 0;
+  const got = baseNames.get(folder);
+  if (!got) {
+    baseNames.set(folder, 'loading');
+    get('de_archive_names?archive=' + encodeURIComponent(folder))
+      .then((r) => { baseNames.set(folder, r.names || []); renderFiles(); })
+      .catch(() => baseNames.delete(folder));
+    return 0;
+  }
+  if (got === 'loading') return 0;
+  const mine = new Set(rows.map((f) => f.name.toLowerCase()));
+  let n = 0;
+  for (const name of got) {
+    const base = name.split('/').pop();
+    if (mine.has(base.toLowerCase())) continue;
+    const tr = el('tr', 'muted');
+    tr.title = 'As the game has it. Double-click to copy it into the mods folder to edit';
+    tr.append(el('td', null, name), el('td', 'de-st base', 'Base'), el('td'), el('td'), el('td', 'muted', folder), el('td'));
+    tr.ondblclick = async () => {
+      try {
+        await post('de_from_game', { archive: folder, names: [name], to: null });
+        toast(base + ' copied into the mods folder (' + folder + ')', 'good');
+        await refresh();
+      } catch (e) { toast(e.message, 'bad'); }
+    };
+    tb.append(tr);
+    n++;
+  }
+  return n;
+}
+
 function renderFiles() {
+  wireShowAll();
   const tb = $('#deTable tbody');
   tb.innerHTML = '';
   const isMaster = folder === 'master';
@@ -391,7 +439,8 @@ function renderFiles() {
     tr.append(el('td', null, k), el('td', 'de-st removed', 'Removed'), el('td'), el('td'), el('td', null, 'the game\'s own comes back at the next Build'), el('td'));
     tb.append(tr);
   }
-  $('#deEmpty').style.display = rows.length || removed.length ? 'none' : '';
+  const nBase = baseRows(tb, rows);
+  $('#deEmpty').style.display = rows.length || removed.length || nBase ? 'none' : '';
   $('#deEmpty').textContent = folder === 'master'
     ? 'Drop files here for every level .dat, front.dat and swat.dat (each replaces the files of its name, or is added).'
     : 'Drop changed game files here: they go into ' + folder + ' at the next Build. Add from game copies its own files out to edit.';
@@ -902,19 +951,56 @@ async function newDatDialog() {
     kind.onchange = fill; fill();
     const title = el('input'); title.placeholder = 'The menu\'s name (Showdown)';
     const sub = el('input'); sub.value = 'custom map';
-    for (const [l, c] of [['Kind', kind], ['Name', name], ['Start from', tpl], ['Title', title], ['Subtitle', sub]]) {
+    // a blank template (no mesh, no collision, its spawns to start) or the whole map. "Leave out its geometry, zones
+    // and collision" was the blank template meant another way: taken out (2026-11-18, the user's)
+    const noGeo = el('select');
+    for (const [v, t] of [['blank', 'Blank template: no mesh, no collision, only its spawns to start'],
+                          ['whole', 'The whole map (to edit that map)']]) noGeo.append(new Option(t, v));
+    noGeo.value = 'blank';
+    const noGeoBox = { get checked() { return noGeo.value !== 'whole'; } };
+    noGeo.title = 'Blank template: the map it starts from without its mesh, zones and collision -- its spawns, lights, '
+      + 'sounds and shared files kept -- to build on in the level editor (and its Xbox bundle made beside it). The whole '
+      + 'map: copied as it is, to edit that map.';
+    for (const [l, c] of [['Kind', kind], ['Name', name], ['Start from', tpl], ['Title', title], ['Subtitle', sub],
+                          ['', noGeo]]) {
       grid.append(el('span', 'muted', l), c);
     }
     b.append(grid);
     b.append(el('p', 'muted', 'Makes the archives in the mods folder from the game\'s own files (a Showdown map also '
       + 'gets its menu row, unlock and thumbnail; a story level gets 4x4 spawns and High Noon duel spots). Build puts '
       + 'them on the working disc.'));
-    b._get = () => ({ kind: kind.value, name: name.value.trim(), template: tpl.value, title: title.value.trim(), subtitle: sub.value.trim() });
+    b._get = () => ({ kind: kind.value, name: name.value.trim(), template: tpl.value, title: title.value.trim(), subtitle: sub.value.trim(),
+                      no_geometry: noGeoBox.checked, blank: noGeo.value === 'blank' });
   }, [{ label: 'Cancel' }, { label: 'Make', cls: 'primary', run: (b) => {
     const v = b._get();
     if (!/^[a-z0-9_]{1,8}$/i.test(v.name)) { toast('Give a name: letters, digits and _ only', 'bad'); return true; }
     startJob('de_newdat', v, 'New .dat');
   } }]);
+}
+
+// Delete .dat (2026-11-18): the selected .dat folder out of the mods folder. A level made by New .dat goes whole --
+// both halves of a Showdown map, its menu row, thumbnail and unlock -- and comes off the working disc if it was built.
+async function deleteDatDialog() {
+  if (!folder || folderKind(folder) === 'master' || !/\.dat$/i.test(folder)) {
+    toast('Select a .dat folder first (the list on the left)', 'bad'); return;
+  }
+  let plan;
+  try { plan = await post('de_delete_dat', { archive: folder, dry: true }); } catch (e) { toast(e.message, 'bad'); return; }
+  if (!plan.removed.length && !plan.cleaned.length) { toast(folder + ' has nothing in the mods folder to delete', 'bad'); return; }
+  const what = plan.removed.map((f) => f + '  (the whole folder)').concat(plan.cleaned);
+  const note = (plan.new_level ? 'A new level: everything New .dat made for it goes. ' : 'A game archive: its mod files go; ')
+    + (plan.on_disc.length ? plan.on_disc.join(', ') + ' is on the working disc too: it is taken off it (Restore).'
+                          : plan.new_level ? 'It is not on the working disc.' : 'the files of the game come back at the next Build.');
+  const how = await askDelete('Delete ' + folder + '?', what, note);
+  if (!how) return;
+  try {
+    const r = await post('de_delete_dat', { archive: folder, permanent: how === 'permanent' });
+    toast('Deleted ' + (r.removed.join(', ') || folder) + (how === 'permanent' ? ' permanently' : ' (Recycle Bin)'), 'good');
+    if (r.on_disc.length) await startJob('de_restore', { archives: r.on_disc }, 'Restore');
+    folder = 'master';
+    refresh();
+    if (window.RDR && window.RDR.refreshLists) window.RDR.refreshLists();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 async function fromGameDialog() {
@@ -1415,6 +1501,9 @@ function xboxDialog(files) {
 // Xbox files among `list` converted (after the transparency window); an Xbox level's refused with its note.
 // -> the list as the PS2 game reads it, or null when cancelled.
 async function convertXbox(list) {
+  // nothing converted on the way in (2026-11-17): Xbox and PS2 files are kept exactly as dropped, each for its own
+  // game -- the PS2 build makes a PS2 copy of an Xbox file only where the mod has no PS2 file of its own
+  if (list) return list;
   if (!list.some((f) => XBOX_RE.test(f.name))) return list;
   const xb = list.filter((f) => XBOX_RE.test(f.name));
   const rest = list.filter((f) => !XBOX_RE.test(f.name));
@@ -1930,7 +2019,11 @@ async function loadModDialog() {
   let saveFirst;
   dialog('Load a saved Mod', (b) => {
     const list = el('select'); list.size = 12; list.style.width = '100%';
-    for (const m of box._mods) list.append(new Option(`${m.name}   (${m.files} mod file(s), ${m.workbench} on the Workbench, ${m.when})`, m.name));
+    // newest first, with the levels each holds (2026-11-18)
+    for (const m of box._mods) {
+      const lv = (m.levels || []).length ? '  levels: ' + m.levels.slice(0, 6).join(', ') + (m.levels.length > 6 ? ' +' + (m.levels.length - 6) : '') : '';
+      list.append(new Option(`${m.name}   (${m.when}, ${m.files} mod file(s)${lv})`, m.name));
+    }
     list.selectedIndex = 0;
     list.ondblclick = () => b.parentNode.querySelector('.de-load-ok')?.click();
     const l = el('label'); saveFirst = el('input'); saveFirst.type = 'checkbox'; saveFirst.checked = !!box._current;
@@ -1950,6 +2043,65 @@ async function loadModDialog() {
       selected.clear(); clearViewer(); wb.sel.clear();
       refresh(); loadWorkbench(); loadSaved();
     } catch (e) { toast(e.message, 'bad'); }
+  } }]);
+}
+
+// New Mod (2026-11-18, the user's): a fresh start under a name of your own -- the current files saved first (as
+// chosen, New .dat levels included), both games put back to the base game (the Xbox game files from their backup,
+// the PS2 working disc from the stock disc), the mods folder emptied, and an empty Saved Mod of that name made the
+// current one. The page reloads (as Reset to stock does) and the Studio's own files are built back in.
+async function newModDialog() {
+  const box = $('#deModBox');
+  await loadSaved();
+  let xs = null;
+  try { xs = await post('de_x_xbox_state', {}); } catch { /* no Xbox side */ }
+  const hasX = !!(xs && xs.backup_exists);
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()) + ' ' + pad(now.getHours()) + pad(now.getMinutes());
+  let nameIn, saveBox, saveName;
+  dialog('New Mod', (b) => {
+    const grid = el('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:150px 1fr;gap:8px;align-items:center';
+    nameIn = el('input'); nameIn.placeholder = 'My new mod'; nameIn.maxLength = 80;
+    grid.append(el('span', 'muted', 'New Mod name'), nameIn);
+    b.append(grid);
+    const l = el('label');
+    l.style.cssText = 'display:flex;gap:6px;align-items:center;margin:10px 0 4px;cursor:pointer';
+    saveBox = el('input'); saveBox.type = 'checkbox'; saveBox.checked = true;
+    l.append(saveBox, el('span', null, ' Save the current files first (New .dat levels included), as:'));
+    saveName = el('input'); saveName.style.cssText = 'width:100%'; saveName.maxLength = 80;
+    saveName.value = box._current || ('Before new mod ' + stamp);
+    saveBox.onchange = () => { saveName.disabled = !saveBox.checked; };
+    b.append(l, saveName);
+    b.append(el('p', 'muted', 'Then ' + (hasX ? 'both games go back to the base game: the PS2 working disc copied from the stock disc and the Xbox game files from their backup'
+      : 'the PS2 working disc goes back to the base game (copied from the stock disc; no Xbox backup is set, so the Xbox side is left as it is)')
+      + ', the mods folder and the Studio\'s edits are emptied, and the new Mod starts empty as the current Mod. Close PCSX2 and the Xbox game first.'));
+  }, [{ label: 'Cancel' }, { label: 'Make the new Mod', cls: 'danger', run: async () => {
+    const bad = /[<>:"\/\\|?*]/;
+    const name = nameIn.value.trim();
+    if (!name || bad.test(name)) { toast('Give the new Mod a name (no < > : " / \\ | ? *)', 'bad'); return true; }
+    if ((box._mods || []).some((m) => m.name.toLowerCase() === name.toLowerCase())) {
+      toast('A saved Mod is named ' + name + ' already: pick another name', 'bad'); return true;
+    }
+    const keep = saveBox.checked ? saveName.value.trim() : '';
+    if (saveBox.checked && (!keep || bad.test(keep))) { toast('Give the save of the current files a name', 'bad'); return true; }
+    if (keep && keep !== box._current && (box._mods || []).some((m) => m.name.toLowerCase() === keep.toLowerCase())
+        && !confirm(keep + ' exists: replace it with the current files?')) return true;
+    try {
+      if (keep) { await post('de_x_mod_save', { name: keep }); toast('Current files saved as ' + keep, 'good'); }
+      if (hasX) {
+        const okx = await startJob('de_x_xbox_reset', { clear_mods: true, save: false }, 'Reset to stock (Xbox)');
+        if (!okx) { toast('The Xbox reset stopped (see the Log): nothing else was changed', 'bad'); return; }
+      }
+      toast('Putting the PS2 working disc back to the base game (copying 2.2 GB)…');
+      await post('restore', { clear_mods: true, save: false });
+      await post('de_x_mod_save', { name });
+      try { localStorage.setItem('rdr.buildAfterReset', hasX ? 'both' : 'ps2'); } catch { /* no rebuild */ }
+      alert('New Mod "' + name + '" started from the base game' + (hasX ? ' (PS2 and Xbox).' : ' (PS2).')
+        + (keep ? '\n\nYour previous files are the Saved Mod "' + keep + '".' : ''));
+      location.reload();
+    } catch (e) { toast('New Mod stopped: ' + e.message, 'bad'); }
   } }]);
 }
 
@@ -2153,6 +2305,7 @@ function wire() {
     : startJob('de_build', {}, 'Build into the working disc'));
   $('#deRestore').onclick = restoreDialog;
   $('#deNewDat').onclick = newDatDialog;
+  if ($('#deDeleteDat')) $('#deDeleteDat').onclick = deleteDatDialog;
   $('#deFromGame').onclick = fromGameDialog;
   $('#deDelete').onclick = deleteSelected;
   $('#deDelNew').onclick = deleteNewFiles;
@@ -2179,6 +2332,7 @@ function wire() {
   $('#deModSave').onclick = () => saveMod(false);
   $('#deModSaveAs').onclick = () => saveMod(true);
   $('#deModLoad').onclick = loadModDialog;
+  if ($('#deModNew')) $('#deModNew').onclick = newModDialog;
   $('#deModDelete').onclick = deleteMod;
   $('#deModExport').onclick = exportMod;
   $('#deModImport').onclick = () => $('#deModImportInput').click();
@@ -3807,6 +3961,8 @@ async function pckPage(keepPane) {
 export function init(bridge) {
   A = bridge;
   window.rdrDEStartJob = startJob;                               // the header's Build
+  window.rdrNewDat = newDatDialog;                               // the level editor's "New level" button
+  window.rdrRefreshDE = () => refresh();                         // the Game picker: each game's own statuses
   const logBtn = document.querySelector('#deLogBtn');            // the bar is under every tab
   if (logBtn) logBtn.onclick = logDialog;
   const cancelBtn = document.querySelector('#deCancel');

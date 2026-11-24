@@ -85,6 +85,22 @@ def join_strips(strips: list) -> list:
     return out
 
 
+def strip_primitives(prims):
+    """A packet's primitives as strips (the Xbox mesh is all strips): a triangle list -- a model read from a PS2
+    bundle has them -- made into strips. Read as one strip it joined corners of different triangles: long spikes
+    across every PS2 level converted for the Xbox (2026-11-17)."""
+    out = []
+    for prim in prims:
+        if prim.type == modfmt.TRIANGLES:
+            from . import builder
+            tris = [tuple(t) for t in prim.triangles() if len(set(t)) == 3]
+            if tris:
+                out += builder._strips(tris)
+        else:
+            out.append(prim)
+    return out
+
+
 def mod0(m, texture_ref, level=False, keep_uv2=True) -> bytes:
     """A MOD0 from a model. texture_ref(name) gives a material's TEX0 chunk
     number (0 for none). Skinned when the model has more than one bone; weights come from its reskins (the second
@@ -169,7 +185,7 @@ def mod0(m, texture_ref, level=False, keep_uv2=True) -> bytes:
                 else:
                     vertices += struct.pack('<3f3f2f', *p, *n, *uv)
             joined = join_strips([([first_v + i for i in prim.indices], prim.type == modfmt.STRIP_FLIPPED)
-                                  for prim in pk.primitives])
+                                  for prim in strip_primitives(pk.primitives)])
             if fmt in (SKINNED, RIGID):  # plain and level packets have no bones: a null list, as shipped
                 bone_lists.append((len(out), pk.matrices))
             out += struct.pack('<HHHH4HI', 0, fmt, stride, STRIP, len(pk.adjuncts), len(joined), first_v, first_i, 0)

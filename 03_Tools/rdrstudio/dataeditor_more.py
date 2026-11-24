@@ -235,6 +235,8 @@ class More:
         pair: lvls_m2/<map>2.dat, lvls_m4/<map>4.dat -- the game loads Showdown maps from nowhere else); else
         lvls_sng (a story level)."""
         name = os.path.basename((name or '').replace('\\', '/').strip('/')).lower()
+        if name.startswith('lvl_'):
+            name = name[4:]                     # the Blender add-on's level folder: lvl_myarena2 is myarena2.dat
         if not name.endswith('.dat'):
             name += '.dat'
         index = self.de.index()[0]
@@ -257,8 +259,8 @@ class More:
     def import_dir(self, name, marker, files):
         """A picked folder (<name>.dat with its files) into the mods folder where it belongs (dat_home)."""
         key, why = self.dat_home(name, marker)
-        files, notes = self.xbox_payload(files)
-        added = self.upload('mods', key, files)
+        added = self.upload('mods', key, files)                 # as given: nothing converted on the way in
+        notes = self.adopt_level_exports() or self.complete_new_level(key)
         return {'folder': key, 'why': why, 'added': added, 'notes': notes}
 
     def import_zip(self, fname, data):
@@ -294,7 +296,7 @@ class More:
             n += 1
         if not marker:
             write_folder_file(dest, key)
-        notes = self.xbox_in_place('mods', [key])
+        notes = self.complete_new_level(key)                    # its files as given: nothing converted
         return {'folder': key, 'why': why, 'files': n, 'notes': notes}
 
     def export_zip(self, archive):
@@ -2146,6 +2148,44 @@ class More:
             shutil.rmtree(tmp, ignore_errors=True)
         return out, notes
 
+    def xbox_payload_keep(self, files, folder):
+        """Files dropped into the mods folder: every one kept as given -- an Xbox file (a level's .xrsc, its .xznes)
+        goes to the Xbox build as it is -- plus a PS2 copy of each Xbox file that has no PS2 file of its own, neither
+        in the drop nor in the folder (a copy the Studio made before is made again). Before, an Xbox file was
+        swapped for its PS2 copy: an Xbox level's .xrsc never reached the folder, and the Xbox build converted the
+        PS2 .rsc instead (2026-11-17). -> (files, notes, names of the PS2 copies made)."""
+        conv, notes = self.xbox_payload(files)
+        dest = self.path('mods', folder)
+        try:
+            from .xboxmode import xbox as _xbox
+            stamps = _xbox(self.de).made()
+        except Exception:                                       # noqa: BLE001
+            stamps = {}
+
+        def norm(n):
+            return '/'.join(x for x in (n or '').replace('\\', '/').split('/') if x not in ('', '.', '..'))
+        given = {norm(f.get('name')).lower() for f in files}
+        out = {norm(f.get('name')).lower(): f for f in files if norm(f.get('name'))}
+        made, kept = [], []
+        for f in conv:
+            n = norm(f.get('name'))
+            low = n.lower()
+            if not n or low in given:
+                continue                                        # given in the drop (its own PS2 file, or not Xbox)
+            target = os.path.join(dest, *n.split('/'))
+            if os.path.isfile(target):
+                rel = os.path.relpath(target, self.de.mods).replace(os.sep, '/').lower()
+                st = os.stat(target)
+                if stamps.get(rel) != [st.st_size, st.st_mtime_ns]:
+                    kept.append(n)                              # the mod's own PS2 file: stays
+                    continue
+            out[low] = f
+            made.append(n)
+        if kept:
+            notes.append('%d PS2 file(s) of the mod kept as they are (%s): the Xbox files go to the Xbox build, these '
+                         'to the PS2 build, neither made from the other' % (len(kept), ', '.join(kept[:6])))
+        return list(out.values()), notes, made
+
     def xbox_payload(self, files, alpha=None, resize=True):
         """[{name, data (base64)}] with any Xbox files made the PS2's -> (list, notes); names keep their folders."""
         if not any(os.path.splitext(f.get('name') or '')[1].lower() in self.XBOX_TO_PS2
@@ -2442,6 +2482,18 @@ class More:
                 if not xr:
                     continue
                 pr = names.get(stem + '.rsc')
+                if pr:
+                    # the mod's own PS2 bundle beside its Xbox one (the Blender add-on's export for both games): both
+                    # kept, neither made from the other -- only a PS2 copy the Studio made itself is made again
+                    try:
+                        from .xboxmode import xbox as _xbox
+                        made_keys = _xbox(self.de).made()
+                    except Exception:                           # noqa: BLE001
+                        made_keys = {}
+                    rel = os.path.relpath(os.path.join(folder, pr), self.de.mods).replace(os.sep, '/').lower()
+                    st_pr = os.stat(os.path.join(folder, pr))
+                    if made_keys.get(rel) != [st_pr.st_size, st_pr.st_mtime_ns]:
+                        continue                                # not (or no longer) the Studio's copy: the mod's own
                 if pr and os.path.getmtime(os.path.join(folder, pr)) >= os.path.getmtime(os.path.join(folder, xr)):
                     try:                                        # converted before -- by a writer that was right?
                         pdata = open(os.path.join(folder, pr), 'rb').read()
@@ -2603,8 +2655,199 @@ class More:
                 shutil.copyfile(src, out)
             done.append(os.path.relpath(out, self.base(dst_where)).replace(os.sep, '/'))
         if dst_where == 'mods':
-            self._xbox_notes = self.xbox_in_place('mods', done)
+            self._xbox_notes = self.adopt_level_exports()       # the files as given: nothing converted
+            for key in done:
+                if key.lower().endswith('.dat'):
+                    self._xbox_notes += self.complete_new_level(key)
         return done
+
+    # ------------------------------------------------------------ a new level imported: the rest of its .dat
+
+    def adopt_level_exports(self, log=None):
+        """A level exported from Blender put into a level .dat folder under another name -- its folder pasted in
+        (mantomb2.dat/lvl_manstomb2/...) or its files loose (lvl_myarena2.rsc in mantomb2.dat) -- made THAT .dat's
+        level: its files renamed to the .dat's level name (inside the text files too) at the folder's top, over the
+        base's (the game loads the level the .dat is named for: lvl_mantomb2 -- left as it was, the export was never
+        loaded and the map stayed Ranch, 2026-11-17), then the .dat completed (complete_new_level). -> notes."""
+        log = log or (lambda s: None)
+        notes = []
+        text_exts = ('.lvl', '.znes', '.xznes', '.bnds', '.lnes', '.bxes', '.spwn', '.aisp', '.lgt', '.shadows',
+                     '.fog', '.glows', '.sneak', '.fade', '.duel', '.flags', '.csv')
+        on_disc = {a.lower() for a in self.de.index()[0]['archives']}
+        for group in self._BASES:
+            top = os.path.join(self.de.mods, group)
+            if not os.path.isdir(top):
+                continue
+            for arch_dir in sorted(os.listdir(top)):
+                folder = os.path.join(top, arch_dir)
+                if not (os.path.isdir(folder) and arch_dir.lower().endswith('.dat')):
+                    continue
+                if '%s/%s' % (group, arch_dir.lower()) in on_disc:
+                    continue                    # one of the game's own (a story .dat can hold several levels)
+                stem = 'lvl_' + arch_dir[:-4].lower()
+                # the exports in it: a subfolder holding a level bundle, or a loose bundle of another level's name
+                found = []
+                side = ('_nav.rsc', '_view.rsc', '_nav.xrsc', '_view.xrsc')
+                # a folder holding a level bundle at any depth, whatever it is called (renamed lvl_mantomb2 with
+                # lvl_manstomb2's files in it; the Blender add-on's PS2 / Xbox folders of an export for both games):
+                # the level is the bundle's
+                for r, _ds, fs in os.walk(folder):
+                    if r == folder:
+                        continue
+                    bundles = [os.path.splitext(x.lower())[0] for x in fs
+                               if x.lower().startswith('lvl_') and x.lower().endswith(('.rsc', '.xrsc'))
+                               and not x.lower().endswith(side)]
+                    if bundles:
+                        found.append((sorted(bundles, key=len)[0], r, True))
+                for f in sorted(os.listdir(folder)):
+                    p = os.path.join(folder, f)
+                    low = f.lower()
+                    if os.path.isdir(p):
+                        continue
+                    elif low.startswith('lvl_') and low.endswith(('.rsc', '.xrsc')) and \
+                            not low.endswith(('_nav.rsc', '_view.rsc', '_nav.xrsc', '_view.xrsc')):
+                        other = os.path.splitext(low)[0]
+                        if other != stem:
+                            found.append((other, folder, False))
+                for other, src, is_dir in found:
+                    if other == stem and not is_dir:
+                        continue
+                    pat = re.compile(r'(?<![a-z0-9])' + re.escape(other) + r'(?=[_.]|$)', re.I)
+                    moved = 0
+                    for f in sorted(os.listdir(src)):
+                        p = os.path.join(src, f)
+                        if not os.path.isfile(p) or not pat.search(f):
+                            continue
+                        name = pat.sub(stem, f)
+                        data = open(p, 'rb').read()
+                        if f.lower().endswith(text_exts):
+                            data = pat.sub(stem, data.decode('latin-1')).encode('latin-1')
+                        with open(os.path.join(folder, name), 'wb') as fh:
+                            fh.write(data)
+                        if p != os.path.join(folder, name):
+                            os.remove(p)
+                        moved += 1
+                    if is_dir:
+                        rest = os.listdir(src)
+                        for f in rest:                          # anything else it held: to the .dat's top as it is
+                            q = os.path.join(src, f)
+                            if os.path.isfile(q) and not os.path.exists(os.path.join(folder, f)):
+                                shutil.move(q, os.path.join(folder, f))
+                        shutil.rmtree(src, ignore_errors=True)
+                        up = os.path.dirname(src)               # its parent folders, emptied (an export's PS2 / Xbox)
+                        while up != folder and os.path.isdir(up) and not os.listdir(up):
+                            os.rmdir(up)
+                            up = os.path.dirname(up)
+                    key = '%s/%s' % (group, arch_dir.lower())
+                    msg = ('%s: the exported level %s (%s) is now this .dat\'s level %s: %d file(s) renamed in'
+                           % (key, other, 'its folder' if is_dir else 'loose files', stem, moved))
+                    log(msg)
+                    notes.append(msg)
+                    notes += self.complete_new_level(key)
+        return notes
+
+
+    # the base files a new level's .dat does not take from its base: its geometry, zones and collision (the level
+    # brought its own)
+    _LEVEL_OWN_SKIP = ('.znes', '.xznes', '.bnds')
+
+    def complete_new_level(self, key):
+        """A new level imported into the mods folder (a .dat folder the stock disc has not, holding the level's
+        lvl_<name>.rsc -- the Blender add-on's export) given everything else a playable .dat of its kind has:
+            Showdown (lvls_m2 / lvls_m4)  the files every stock Showdown map of that player count shares, Ranch's
+                                          other files (its effects and sounds) and the level files Ranch has that the
+                                          export did not make (not its geometry, zones or collision), renamed; with
+                                          both halves in, the Showdown menu's row, the unlock and the thumbnail
+                                          (as New .dat makes them)
+            single player (lvls_sng)      every file saloon.dat has (the unused, bare level), renamed, but its
+                                          geometry, zones and collision
+        The level's own files are never replaced. The finished .dat folder is copied to the Workbench (Levels) to
+        share. -> notes."""
+        import ps2build as PB
+        key = key.replace('\\', '/').lower()
+        group, _, arch = key.rpartition('/')
+        if group not in self._BASES or not arch.endswith('.dat'):
+            return []
+        index, dats, _h = self.de.index()
+        if key in {a.lower() for a in index['archives']}:
+            return []                               # one of the game's own levels: nothing to add
+        folder = self.de.folder_path(key)
+        stem = 'lvl_' + arch[:-4]
+        if not os.path.isdir(folder):
+            return []
+        have = {f.lower() for f in os.listdir(folder)}
+        if stem + '.rsc' not in have:
+            return []                               # an Xbox-only level: converted (and given its base) by the build
+        bp, bstem = self._BASES[group]
+        # what the level's own .lvl names (an older export listing the base's boxes and lines): those still come
+        lvl_path = os.path.join(folder, stem + '.lvl')
+        try:
+            listed = {ln.strip().lower() for ln in open(lvl_path, encoding='latin-1').read().splitlines() if ln.strip()}
+        except OSError:
+            listed = set()
+        iso = PB.Iso(self.de.s.vanilla_path)
+        try:
+            clean = self.de._clean_for_pb(None, iso, dats, bp)
+            base_files = sorted(os.listdir(clean))
+            if group == 'lvls_sng':
+                take = base_files                   # saloon.dat, every file
+                what = 'every file of %s' % bp
+            else:
+                pc = group[-1]
+                group_archives = [a for a in index['archives'] if a.lower().startswith(group + '/')]
+                sets = [set(os.listdir(self.de._clean_for_pb(None, iso, dats, a))) for a in group_archives]
+                shared = set.intersection(*sets) if sets else set()
+                take = sorted(set(base_files) | shared)
+                what = 'the %d files every Showdown map (%s-player) shares and %s\'s other files' % (len(shared), pc, bp)
+        finally:
+            iso.close()
+        # the base level's name wherever a file name has it (lvl_ranch2_barn.bnds, its sound setup
+        # snd_cfg_lvl_ranch2.csv, which the game finds as snd_cfg_<level>.csv)
+        pat = re.compile(r'(?<![a-z0-9])' + re.escape(bstem) + r'(?=[_.]|$)', re.I)
+        added = 0
+        for f in take:
+            low = f.lower()
+            own = bool(pat.search(low))
+            if own and low.startswith(bstem) and (low == bstem + '.rsc' or low.endswith(self._LEVEL_OWN_SKIP)):
+                continue                            # the base's geometry, zones and collision: the level has its own
+            name = pat.sub(stem, f) if own else f
+            if name.lower() in have:
+                continue                            # the level's own file (or one given before): kept
+            src = os.path.join(clean, f)
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(folder, name)
+            data = open(src, 'rb').read()
+            if own and low.endswith(('.lvl', '.lnes', '.bxes', '.spwn', '.aisp', '.lgt', '.shadows', '.fog',
+                                     '.glows', '.sneak', '.fade', '.duel', '.flags', '.enm', '.csv')):
+                data = pat.sub(stem, data.decode('latin-1')).encode('latin-1')
+            with open(dst, 'wb') as fh:
+                fh.write(data)
+            have.add(name.lower())
+            added += 1
+        notes = []
+        if added:
+            notes.append('%s: a new level -- %d file(s) added from %s (renamed for %s; the level\'s own kept)'
+                         % (key, added, what, stem))
+        if group != 'lvls_sng':
+            other = 'lvls_m%s/%s%s.dat' % ('4' if group.endswith('2') else '2', arch[:-5], '4' if group.endswith('2') else '2')
+            if os.path.isdir(self.de.folder_path(other)):
+                try:
+                    self.de.new_level('showdown', arch[:-5])     # both halves in: the menu row, unlock, thumbnail
+                    notes.append('%s: in the Showdown menu (its row, unlocked from the start, a thumbnail)' % arch[:-5])
+                except Exception as ex:                          # noqa: BLE001
+                    notes.append('%s: the Showdown menu row could not be added (%s)' % (arch[:-5], ex))
+            else:
+                notes.append('%s: import its other half (%s) too -- a Showdown map is the pair' % (key, other))
+        # a copy in the Workbench, to share (its folder file says where it goes)
+        try:
+            wb = os.path.join(self.de.workbench, 'Levels', arch)
+            shutil.copytree(folder, wb, dirs_exist_ok=True)
+            write_folder_file(wb, key)
+            notes.append('%s: a copy is in the Workbench (Levels/%s) to share' % (key, arch))
+        except OSError as ex:
+            notes.append('%s: no Workbench copy (%s)' % (key, ex))
+        return notes
 
     def delete_new(self, folder, permanent=False):
         """A .dat folder's files the archive has no file of the name of (they would be ADDED): to the Recycle Bin."""
@@ -2651,15 +2894,23 @@ class More:
             fh.write(name or '')
 
     def saved_mods(self):
+        """The Saved Mods, newest first, each with the level folders it holds (an oldest-first list of 58 "Before
+        reset" saves had the oldest loaded by mistake, and nothing said which held the levels -- 2026-11-18)."""
         out = []
-        for n in sorted(os.listdir(self.saved), key=str.lower):
+        for n in os.listdir(self.saved):
             d = os.path.join(self.saved, n)
             if not os.path.isdir(d):
                 continue
             files = sum(len(fs) for _r, _d, fs in os.walk(os.path.join(d, 'RDRMods')))
             wb = sum(len(fs) for _r, _d, fs in os.walk(os.path.join(d, 'Workbench')))
-            out.append({'name': n, 'files': files, 'workbench': wb,
+            levels = []
+            for grp in ('lvls_m2', 'lvls_m4', 'lvls_sng'):
+                g = os.path.join(d, 'RDRMods', grp)
+                if os.path.isdir(g):
+                    levels += sorted(f for f in os.listdir(g) if f.lower().endswith('.dat'))
+            out.append({'name': n, 'files': files, 'workbench': wb, 'levels': levels, 'mtime': os.path.getmtime(d),
                         'when': time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(d)))})
+        out.sort(key=lambda m: -m['mtime'])
         return {'mods': out, 'current': self.current()}
 
     @staticmethod
@@ -2690,9 +2941,11 @@ class More:
         self._set_current(name)
         return name
 
-    def clear_for_reset(self):
-        """Reset to stock, with the Data Editor's own mod files too: they are kept as a Saved Mod ("Before reset
-        <time>") and the mods folder emptied, so the next Build does not put them back. -> (saved name, files)."""
+    def clear_for_reset(self, save=True, name=None, include_new=True):
+        """Reset to stock, with the Data Editor's own mod files too: kept as a Saved Mod first (save; named `name`,
+        else "Before reset <time>"; include_new: with the new .dat files -- levels made by New .dat -- else without
+        them), then the mods folder emptied, so the next Build does not put them back. save False: emptied, not kept
+        (the user's choice, 2026-11-18). -> (saved name or None, files)."""
         files = [os.path.join(r, f) for r, _d, fs in os.walk(self.de.mods) for f in fs
                  if f.lower() != PB.MODES_FILE.lower()]
         # the editors' working copies in the Workbench (Flash screens, HUD text): made from the disc when first
@@ -2702,7 +2955,26 @@ class More:
         n_copies = sum(len(fs) for c in copies for _r, _d, fs in os.walk(c))
         if not files and not n_copies:
             return None, 0
-        name = self.save_mod('Before reset %s' % time.strftime('%Y-%m-%d %H%M'))
+        saved = None
+        if save:
+            want = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', (name or '').strip()).strip(' .')
+            want = want or 'Before reset %s' % time.strftime('%Y-%m-%d %H%M')
+            k, base = 2, want
+            while os.path.isdir(os.path.join(self.saved, want)):      # never over an earlier save of that name
+                want = '%s (%d)' % (base, k)
+                k += 1
+            saved = self.save_mod(want)
+            if not include_new:
+                # the new .dat files (archives the stock disc has not: New .dat levels) left out of the save
+                try:
+                    index, _dats, _h = self.de.index()
+                    for arc in PB.new_archives(self.de.mods, index['archives']):
+                        d = os.path.join(self.saved, saved, 'RDRMods', *arc.split('/'))
+                        if os.path.isdir(d):
+                            shutil.rmtree(d, ignore_errors=True)
+                except Exception:                                   # noqa: BLE001
+                    pass
+        name = saved
         self._empty(self.de.mods)
         os.makedirs(os.path.join(self.de.mods, 'Master'), exist_ok=True)
         if copies:
@@ -3637,7 +3909,18 @@ def handle_post(h, route, body):
             return X.state()
         if route == 'de_x_xbox_set':
             try:
-                return X.set(g('platform'), g('exe'), g('assets'), g('backup_asked'))
+                r = X.set(g('platform'), g('exe'), g('assets'), g('backup_asked'), g('backup'))
+                # the 3D level editor shows a new level's bundle of the game picked (its .xrsc on the Xbox side):
+                # the levels it has open are read again
+                studio = getattr(de, 's', None)
+                lock = getattr(studio, 'lock', None)
+                if studio is not None and hasattr(studio, '_levels'):
+                    if lock is not None:
+                        with lock:
+                            studio._levels = {}
+                    else:
+                        studio._levels = {}
+                return r
             except ValueError as ex:
                 return dict(X.state(), ok=False, error_text=str(ex))
         if route == 'de_x_xbox_play':
@@ -3654,7 +3937,9 @@ def handle_post(h, route, body):
         if route == 'de_x_xbox_reset':
             from .dataeditor import Busy
             try:
-                return dict(started=de.start('Reset to stock (Xbox)', X.reset, g('clear_mods') is not False))
+                return dict(started=de.start('Reset to stock (Xbox)', X.reset, g('clear_mods') is not False,
+                                             g('save') is not False, g('save_name') or None,
+                                             g('include_new') is not False))
             except Busy as ex:
                 return dict(ok=False, error_text=str(ex))
         if route == 'de_x_xbox_build':
@@ -3672,8 +3957,18 @@ def handle_post(h, route, body):
     if route == 'de_x_remove':
         return dict(ok=True, count=m.remove(g('where', 'workbench'), g('paths') or [], bool(g('permanent'))))
     if route == 'de_x_upload':
-        files, notes = (m.xbox_payload(g('files') or []) if g('where', 'workbench') == 'mods' else (g('files') or [], []))
-        return dict(ok=True, added=m.upload(g('where', 'workbench'), g('folder', ''), files), notes=notes)
+        # every file as it is given, Xbox and PS2 alike: nothing converted on the way in (the PS2 build makes a PS2
+        # copy of an Xbox file the mod has no PS2 file for; the Xbox build uses the Xbox files as they are)
+        files, notes, made = g('files') or [], [], []
+        added = m.upload(g('where', 'workbench'), g('folder', ''), files)
+        if made:                                                # PS2 copies the Studio made: not the mod's own
+            try:
+                from .xboxmode import xbox as _xbox
+                dest = m.path('mods', g('folder', ''))
+                _xbox(m.de).stamp([os.path.join(dest, *n.replace('\\', '/').split('/')) for n in made])
+            except Exception:                                   # noqa: BLE001
+                pass
+        return dict(ok=True, added=added, notes=notes)
     if route == 'de_x_paste_text':
         return dict(ok=True, path=m.paste_text(g('folder', ''), g('text', '')))
     if route == 'de_x_transfer':

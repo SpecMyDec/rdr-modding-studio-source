@@ -9,6 +9,7 @@ from .bnd import MAGIC
 LEAF_FACES = 15  # a node with more faces is split ...
 MIN_SPLIT = 0.5  # ... while wider than this (metres), as the shipped bounds are
 MAX_DEPTH = 12
+LIGHT_LEAF = (32, 1.0)  # leaf_faces, min_split for big new collision: half the bytes of the default (a level's)
 BOX_PAD = 0.0001
 MARGIN = 0.001  # faces this near a node count as in it (float rounding must not drop one)
 
@@ -48,7 +49,23 @@ def faces_from_polygons(vertices: list, polygons: list, material: int = 0, tol: 
         n = _cross(_sub(p[1], p[0]), _sub(p[2], p[0]))
         ln = sum(x * x for x in n) ** 0.5
         flat = ln > 1e-12 and all(abs(sum(n[k] * (q[k] - p[0][k]) for k in range(3))) / ln < tol for q in p[3:])
-        if len(poly) <= 4 and flat:
+        convex = True
+        if len(poly) == 4 and flat:
+            # a quad turning the same way at every corner (a concave one is a bad plane to collide with: two
+            # triangles instead)
+            turns = [sum(n[k] * t for k, t in enumerate(_cross(_sub(p[(j + 1) % 4], p[j]),
+                                                                _sub(p[(j + 2) % 4], p[(j + 1) % 4]))))
+                     for j in range(4)]
+            convex = min(turns) > -1e-12 or max(turns) < 1e-12
+            if not convex:
+                # two triangles from the corner that turns the other way (a fan from any other cuts outside it)
+                odd = turns.index(min(turns)) if sum(1 for t in turns if t < 0) == 1 else turns.index(max(turns))
+                r = (odd + 1) % 4
+                q = poly[r:] + poly[:r]
+                out.append(([q[0], q[1], q[2]], material))
+                out.append(([q[0], q[2], q[3]], material))
+                continue
+        if len(poly) <= 4 and flat and convex:
             out.append((list(poly), material))
         else:
             for k in range(1, len(poly) - 1):
@@ -56,15 +73,16 @@ def faces_from_polygons(vertices: list, polygons: list, material: int = 0, tol: 
     good = []
     for cs, m in out:
         p = [vertices[i] for i in cs]
-        if sum(x * x for x in _cross(_sub(p[1], p[0]), _sub(p[2], p[0]))) > 1e-14:
+        if sum(x * x for x in _cross(_sub(p[1], p[0]), _sub(p[2], p[0]))) > 4e-8:  # 1 cm2: less has no direction
             good.append((cs, m))
     return good
 
 
-def write(vertices: list, faces: list, materials=(1,)) -> bytes:
+def write(vertices: list, faces: list, materials=(1,), leaf_faces: int = LEAF_FACES, min_split: float = MIN_SPLIT) -> bytes:
     """A BND0 from vertices [(x, y, z) game space, world] and faces [(corner indices: 3 or 4, flat and convex,
     the normal by the first three's right-hand rule; material index into materials)]. materials: PMT0 chunk
-    numbers (1: default)."""
+    numbers (1: default). leaf_faces / min_split: a node is split while it holds more faces and is wider (bigger
+    leaves: a smaller bound -- LIGHT_LEAF -- the shipped ones hold up to 193 faces a leaf)."""
     nv, nf, nm = len(vertices), len(faces), len(materials)
     if not nv or not nf:
         raise ValueError('a bound needs vertices and faces')
@@ -94,7 +112,7 @@ def write(vertices: list, faces: list, materials=(1,)) -> bytes:
         (bytes, block offset, leaf offset)."""
         if not inside:
             return b'', 0, 0
-        if len(inside) > LEAF_FACES and nhi[0] - nlo[0] > MIN_SPLIT and depth < MAX_DEPTH:
+        if len(inside) > leaf_faces and nhi[0] - nlo[0] > min_split and depth < MAX_DEPTH:
             mid = [(nlo[a] + nhi[a]) / 2 for a in range(3)]
             boxes = []
             for k in range(8):  # x fastest, then y, then z
@@ -140,7 +158,16 @@ def write(vertices: list, faces: list, materials=(1,)) -> bytes:
         area = sum(sum(x * x for x in _cross(_sub(p[k], p[0]), _sub(p[k + 1], p[0]))) ** 0.5
                    for k in range(1, len(p) - 1)) / 2
         abits = (struct.unpack('<I', struct.pack('<f', area))[0] & ~0xFF) | (m & 0xFF)
-        slots = list(cs)[:8] + [0xFFFF] * (8 - min(8, len(cs)))
+        # four corners always, as the shipped faces: a triangle repeats corner 0 in the fourth slot ([a, b, c, 0]);
+        # a quad that ends on point 0 is turned round (same face) so it is not read as a triangle. Written
+        # [a, b, c, 0xFFFF] the game read a fourth corner at point 65535 -- past the end -- and flung the player
+        # (2026-11-18)
+        cs = list(cs)[:4]
+        if len(cs) == 4 and cs[3] == 0:
+            cs = cs[3:] + cs[:3]
+        if len(cs) == 3:
+            cs = cs + [0]
+        slots = cs + [0xFFFF] * (8 - len(cs))
         body += struct.pack('<3fI8H', *(x / ln for x in n), abits, *slots)
     body += struct.pack(f'<{nm}I', *materials)
     body += tree + bytes(4 * ((nf + 31) // 32))

@@ -67,6 +67,30 @@ import struct
 SAVE_PATH = "BASLUS-20500RDR/BASLUS-20500RDR"
 SAVE_LEN = 18432
 
+# THE XBOX FILE (2026-11-24). The Xbox game keeps the same save as `swat.sav` in its save folder
+# (E:\UDATA\5454001a\<save>\swat.sav -- the recomp's hdd folder beside RDR.exe), 17,160 bytes: the PS2 file's
+# first 17,160 bytes, offset for offset -- the 184-byte prefix (money at +0x68), the 80-byte header and the six
+# 2,840-byte slots from 264 (each slot's `?none` at +1891 on both, the slots at the same 2,840 stride) -- with slot
+# 5's last 144 bytes (its scratch tail) and the PS2's 1,128-byte trailer not written. Every field named here ends
+# by +1,844 of its slot, inside what the Xbox file holds. Read and written at its own length.
+XBOX_SAVE_NAME = "swat.sav"
+XBOX_SAVE_LEN = 17160
+
+# THE XBOX SIGNATURE (2026-11-24). The last 20 bytes of swat.sav are an HMAC-SHA1 of the 17,140 before them, and
+# the game shows "no saves" when they do not match: an edit written without them made the game skip the save. In
+# the recomp the key is 16 zero bytes -- its kernel's signature keys are left zero, so the game's XCalcSignature
+# ends up keyed with zeros (found by trying the keys on a save the game wrote: only that one reproduces its
+# signature). Every Xbox save written here is signed again.
+XBOX_SIG_OFF = XBOX_SAVE_LEN - 20
+XBOX_SIG_KEY = bytes(16)
+
+
+def xbox_signature(data, key=XBOX_SIG_KEY):
+    """The 20-byte signature of an Xbox swat.sav (its first 17,140 bytes)."""
+    import hashlib
+    import hmac
+    return hmac.new(key, bytes(data[:XBOX_SIG_OFF]), hashlib.sha1).digest()
+
 PREFIX_LEN = 184
 STRUCT_OFF = 184
 STRUCT_LEN = 17120
@@ -122,9 +146,12 @@ SLOT_FIELDS = [
     (0x0e4, "f32", "f0e4", "float +0xe4", CANDIDATE, "0.85 used, 0.0 empty"),
     (0x0f8, "f32", "f0f8", "float +0xf8", CANDIDATE, "0.9056 used, 0.0 empty"),
     (0x120, "f32", "f120", "float +0x120", CANDIDATE, "1.0 used, 0.0 empty"),
-    (0x194, "str8", "level", "Level", DECODED,
+    (0x194, "str8", "level", "Last level (a record)", DECODED,
      "holds `lvl_hng`, which is one of the 82 `lvl_*` identifiers in the "
-     "game's own string table. The field is a level id."),
+     "game's own string table, so the field is a level id -- but it does not "
+     "choose the level that loads: an Xbox save set to `lvl_hng` loaded "
+     "lvl_sher70 (2026-11-24). It reads as the last level played; the level "
+     "the game continues on comes from somewhere else (its story progress)."),
     (0x19c, "str8", "s19c", "string +0x19c", CANDIDATE, "holds `new`"),
     (0x1e8, "u32", "u1e8", "u32 +0x1e8", CANDIDATE,
      "7 on the played profile. The ONE numeric field profile creation sets: "
@@ -217,9 +244,13 @@ class Save(object):
     """The 18,432-byte save blob."""
 
     def __init__(self, blob):
-        if len(blob) != SAVE_LEN:
-            raise SaveError("save is %d bytes, expected %d" % (len(blob), SAVE_LEN))
+        if len(blob) not in (SAVE_LEN, XBOX_SAVE_LEN):
+            raise SaveError("save is %d bytes, expected %d (PS2) or %d (Xbox swat.sav)"
+                            % (len(blob), SAVE_LEN, XBOX_SAVE_LEN))
+        self.platform = "xbox" if len(blob) == XBOX_SAVE_LEN else "ps2"
         self.blob = bytearray(blob)
+        # an Xbox save: was it signed as the recomp's game signs (None on PS2)?
+        self.signed = (bytes(self.blob[XBOX_SIG_OFF:]) == xbox_signature(self.blob)) if self.platform == "xbox" else None
         self.slots = [Slot(i, bytes(self.slot_bytes(i))) for i in range(SLOT_COUNT)]
         self.fields = self._read_file_fields()
 
@@ -287,6 +318,9 @@ class Save(object):
         self.slots[index] = Slot(index, bytes(self.slot_bytes(index)))
 
     def to_bytes(self):
+        if self.platform == "xbox":
+            # signed again over what it holds now: the game skips a save whose signature does not match
+            self.blob[XBOX_SIG_OFF:] = xbox_signature(self.blob)
         return bytes(self.blob)
 
     def report(self):

@@ -45,12 +45,21 @@ function banner() {
   host.appendChild(b);
 }
 
-function pcsx2Line(state) {
+function pcsx2Line(state, kind) {
   const host = $('#savePcsx2');
   if (!host) return;
   host.innerHTML = '';
   const d = el('div');
   d.style.fontSize = '12px';
+  if (kind === 'xbox') {
+    // an Xbox save (swat.sav in the recomp's hdd folder): the Xbox game must be closed instead (2026-11-24)
+    d.style.color = state === false ? 'var(--grn)' : 'var(--warn)';
+    d.textContent = state === false ? 'Xbox save: the Xbox game (RDR.exe) is not running — writing is allowed.'
+      : state === true ? 'Xbox save: the Xbox game (RDR.exe) is running. Quit it before writing.'
+      : 'Xbox save: cannot tell whether the Xbox game is running, so writing is refused.';
+    host.appendChild(d);
+    return;
+  }
   if (state === false) {
     d.style.color = 'var(--grn)';
     d.textContent = 'PCSX2 is not running — writing is allowed.';
@@ -189,7 +198,13 @@ async function openCard(path) {
   const r = await call('save/open?path=' + encodeURIComponent(path));
   if (r.error) { say(r.error, 'var(--warn)'); return; }
   openPath = path; save = r; slotIx = 0;
-  pcsx2Line(r.pcsx2);
+  pcsx2Line(r.pcsx2, r.kind);
+  if (r.kind === 'xbox' && r.signed === false) {
+    // a save the game would skip (an edit written unsigned): writing it here signs it again
+    const w = el('div', '', 'This Xbox save is not signed as the game expects, so the game shows no save. Write any change here and it is signed again.');
+    w.style.cssText = 'font-size:12px;color:var(--warn);margin-top:4px';
+    $('#savePcsx2').appendChild(w);
+  }
   renderCards(); renderSlots(); renderFields();
   say('opened ' + path);
 }
@@ -204,7 +219,7 @@ async function write() {
   if (!confirm('Write ' + names + ' to\n' + openPath
                + '\n\n(slot fields go to slot ' + slotIx + '; money and the '
                + 'rest of "This save" are not per-profile)'
-               + '\n\nA full copy of the card goes to 06_Backups/saves/ first.'))
+               + '\n\nA full copy of the ' + (save && save.kind === 'xbox' ? 'Xbox save' : 'card') + ' goes to 06_Backups/saves/ first.'))
     return;
   say('writing…');
   const r = await call('save/write', 'POST',

@@ -47,6 +47,9 @@ def default_exe():
     return ''
 
 
+XRSC_LIMIT = 4_200_000  # bytes: the largest shipped Xbox level bundle is 4.06 MB (lvl_shernite)
+
+
 class Xbox:
     def __init__(self, de):
         from .dataeditor_more import more
@@ -68,16 +71,20 @@ class Xbox:
         exe = s.get('exe') or default_exe()
         ref = self.mx.xbox_ref_folders()
         assets = self.assets_dir(s, exe)
+        # the backup of the unedited game files: one set (a backup the user has already, 2026-11-24), else
+        # "unedited assets" beside the game files
+        backup = s.get('backup') or self.backup_dir(assets)
         return {'platform': s.get('platform') if s.get('platform') in ('ps2', 'xbox') else 'ps2',
                 'exe': exe, 'exe_ok': bool(exe and os.path.isfile(exe)),
                 'out': self.out_dir(exe) if exe else '',
                 'reference': ref[0] if ref else '',
                 'assets': assets, 'assets_ok': bool(assets and os.path.isdir(assets)),
-                'backup': self.backup_dir(assets), 'backup_exists': bool(assets and os.path.isdir(self.backup_dir(assets))),
+                'backup': backup, 'backup_exists': bool(backup and os.path.isdir(backup)),
+                'backup_set': bool(s.get('backup')),
                 'backup_asked': bool(s.get('backup_asked')),
                 'running': self.running()}
 
-    def reset(self, clear_mods=True):
+    def reset(self, clear_mods=True, save=True, save_name=None, include_new=True):
         """Reset to stock on the Xbox side: the recomp's game files put back as "unedited assets" has them (a file
         that differs copied back, one the backup has not to the Recycle Bin) and the Studio's own folder in the
         recomp's mods folder taken out; with clear_mods the Data Editor's mod files go too, kept as a Saved Mod (as
@@ -115,7 +122,12 @@ class Xbox:
             log("  the Studio's files taken out of the recomp's mods folder")
         saved, cleared = None, 0
         if clear_mods:
-            saved, cleared = self.mx.clear_for_reset()
+            saved, cleared = self.mx.clear_for_reset(save, save_name, include_new)
+        for rec in (self._record_path(), self._assets_record()):     # nothing of the mod is built in it now
+            try:
+                os.remove(rec)
+            except OSError:
+                pass
         log('Done: the Xbox game is as the backup has it (%d file(s) put back).' % copied)
         return {'saved': saved, 'cleared': cleared, 'copied': copied, 'removed': len(extra)}
 
@@ -171,6 +183,13 @@ class Xbox:
         st = self.state()
         self.shipped_levels = set()                    # the ones the unedited Xbox game has (the reference)
         refs = self.mx.xbox_ref_folders()
+        # the new level archives the Studio's own Xbox build wrote are the mods folder's levels, built: not listed
+        # again from the recomp's files (left there after a PS2 reset, they showed as custom levels still)
+        try:
+            built = {a.upper() for a, r in json.load(open(self._assets_record(), encoding='utf-8')).items()
+                     if r.get('new')}
+        except (OSError, ValueError):
+            built = set()
         for root in refs + [st['assets']]:
             if not root or not os.path.isdir(root):
                 continue
@@ -181,6 +200,8 @@ class Xbox:
                     for f in os.listdir(d):
                         if f.lower().endswith('.dat') and os.path.isfile(os.path.join(d, f)):
                             arc = ('%s/%s' % (group, f)).upper()
+                            if arc in built and root not in refs:
+                                continue
                             out.setdefault(arc, os.path.join(d, f))
                             if root in refs:
                                 self.shipped_levels.add(arc)
@@ -214,6 +235,33 @@ class Xbox:
         with open(stamp, 'w', encoding='utf-8') as f:
             f.write(key)
         return folder
+
+    def converted_folder_level(self, arc, folder):
+        """A new level in the mods folder that has only its Xbox bundle (lvl_<name>.xrsc, no .rsc): its files copied
+        into the cache and the level made the PS2's there, to look at in the 3D level editor -- the mods folder itself
+        is left as it is (nothing converted on the way in). Made again when a file of the folder changes. -> the
+        cache folder."""
+        import modconvert as MC
+        group, fname = arc.lower().split('/', 1)
+        out = os.path.join(self.de.cache, 'xbox_levels', 'mods_' + group, fname)
+        names = sorted(f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f)))
+        key = '|'.join('%s:%d:%d' % (f, os.path.getsize(os.path.join(folder, f)),
+                                     int(os.path.getmtime(os.path.join(folder, f)))) for f in names)
+        stamp = os.path.join(out, '.from')
+        try:
+            if open(stamp, encoding='utf-8').read() == key:
+                return out
+        except OSError:
+            pass
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out, exist_ok=True)
+        for f in names:
+            shutil.copyfile(os.path.join(folder, f), os.path.join(out, f))
+        stem = 'lvl_' + fname[:-4]
+        MC.place_foreign_level(arc.lower(), out, None, stem, [], dst=out)
+        with open(stamp, 'w', encoding='utf-8') as f:
+            f.write(key)
+        return out
 
     def level_files(self, arc, ps2_files, xbox):
         """A level's own files for Export whole level as level files: ps2_files {name: bytes} (the archive's files of
@@ -262,7 +310,16 @@ class Xbox:
             out['conversion notes.txt'] = '\r\n'.join(notes).encode('utf-8')
         return out
 
-    def set(self, platform=None, exe=None, assets=None, backup_asked=None):
+    @staticmethod
+    def looks_like_game(folder):
+        """Is it the Xbox game's files (default.xbe, or its level folders)?"""
+        try:
+            have = {f.lower() for f in os.listdir(folder)}
+        except OSError:
+            return False
+        return 'default.xbe' in have or ('lvls_m2' in have and 'swat.dat' in have)
+
+    def set(self, platform=None, exe=None, assets=None, backup_asked=None, backup=None):
         s = self._read()
         if platform in ('ps2', 'xbox'):
             s['platform'] = platform
@@ -280,6 +337,23 @@ class Xbox:
             s['assets'] = assets
         if backup_asked is not None:
             s['backup_asked'] = bool(backup_asked)
+        if backup is not None:
+            # a backup of the unedited game files the user has already: Reset to stock (Xbox) puts the game back from
+            # it ('' goes back to "unedited assets" beside the game files)
+            backup = str(backup).strip().strip('"')
+            if backup:
+                if not os.path.isdir(backup):
+                    raise ValueError('There is no folder %s' % backup)
+                if not self.looks_like_game(backup):
+                    raise ValueError('%s does not look like the Xbox game files (no default.xbe, no lvls_m2 and '
+                                     'swat.dat): pick the folder that holds them' % backup)
+                if os.path.normcase(os.path.abspath(backup)) == os.path.normcase(os.path.abspath(self.assets_dir(s, s.get('exe') or default_exe()) or '?')):
+                    raise ValueError('That is the game files folder itself (the one the Studio builds into): a backup '
+                                     'has to be a separate copy')
+                s['backup'] = backup
+                s['backup_asked'] = True
+            else:
+                s.pop('backup', None)
         os.makedirs(self.de.home, exist_ok=True)
         with open(self._path(), 'w', encoding='utf-8') as f:
             json.dump(s, f, indent=1)
@@ -331,8 +405,15 @@ class Xbox:
 
     def changed_since_made(self, ps2_path, xbox_path, made):
         st = os.stat(ps2_path)
+        if st.st_mtime <= os.stat(xbox_path).st_mtime + 1:
+            return False        # the Xbox file is the newer (or both written together: the Blender add-on's pair)
         rec = made.get(os.path.relpath(ps2_path, self.de.mods).replace(os.sep, '/').lower())
         if rec:
+            if rec[1] < os.stat(xbox_path).st_mtime_ns:
+                # the stamp is older than this Xbox file: it was a copy of an EARLIER Xbox file, and the PS2 file there
+                # now is the mod's own (dropped in after the Xbox one) -- both kept, the Xbox one for the Xbox. A stale
+                # stamp had the mod's PS2 level converted over its own .xrsc (2026-11-17)
+                return False
             return [st.st_size, st.st_mtime_ns] != rec
         # made before the stamps: a copy written within half an hour of its Xbox file counts as made from it
         return st.st_mtime - os.stat(xbox_path).st_mtime > 1800
@@ -370,6 +451,10 @@ class Xbox:
             log('Putting %d .dat file(s) with queued Studio edits on the working disc first: %s'
                 % (len(queued), ', '.join(queued)))
             self.de.s.rebuild_pending()
+        try:                                                    # a level export under another name: its .dat's
+            self.mx.adopt_level_exports(log)
+        except Exception as ex:                                 # noqa: BLE001
+            log('  (the level exports in the mods folder could not be checked: %s)' % ex)
         log('Reading the two games (the first time indexes them)...')
         src = MC.Game(ps2_iso, os.path.join(self.de.cache, 'xbox_build_ps2'), False)
         tgt = MC.Game(xroot, os.path.join(self.de.cache, 'xbox_build_xbox'), True)
@@ -395,6 +480,15 @@ class Xbox:
                 sib = MC.target_name(low, False)
                 if sib != low and sib in byname and self.changed_since_made(byname[sib], path, made):
                     continue                                    # its PS2 copy was edited: that is the mod now
+                if ext == '.xznes' and sib in byname and os.path.getmtime(byname[sib]) > os.path.getmtime(path) + 2:
+                    log('  %s: older than its .znes (the editor\'s edits are there) -- made again from it' % inner)
+                    continue
+                if ext == '.xrsc' and low.rsplit('/', 1)[-1].startswith('lvl_') and sib in byname and \
+                        self._level_pair_stale(open(byname[sib], 'rb').read(), open(path, 'rb').read()):
+                    # a level bundle pair the editor keeps together that has come apart: the PS2 one is converted
+                    log('  %s: its .xrsc no longer matches its .rsc chunk for chunk -- the .rsc converted instead'
+                        % inner)
+                    continue
                 out.setdefault(arch, {})[inner] = open(path, 'rb').read()
                 used.add(sib)
                 kept_x += 1
@@ -443,11 +537,45 @@ class Xbox:
         #   3. converted now, archive by archive, and kept there for next time
         from .convcache import ConvCache
         cache = ConvCache(self.de.workbench, 'To Xbox')
+        # the files the mod gives for the Xbox itself: never replaced by a conversion
+        given_x = {(a.lower(), i.lower().rsplit('/', 1)[-1]) for a, files in out.items() for i in files}
+        # a NEW level archive whose own level bundle the mod gives for the Xbox (lvl_<name>.xrsc, the Blender add-on's
+        # export for both games): its files are not converted -- the text ones (the same on both games) go as they
+        # are, the PS2's binary ones are left out, and the Xbox game's own base fills in the rest
+        own_levels = set()
+        for a, files in out.items():
+            name = a.rsplit('/', 1)[-1]
+            if a and a not in tgt.archives and name.endswith('.dat') and \
+                    any(i.lower().rsplit('/', 1)[-1] == 'lvl_%s.xrsc' % name[:-4] for i in files):
+                own_levels.add(a)
         groups = {}                                         # archive ('' = by name) -> [(inner, bytes)]
         for arch, inner, data in disc_rows:
             groups.setdefault(arch, []).append((inner, data))
         for arch, inner, path in convert:
             groups.setdefault(arch, []).append((inner, open(path, 'rb').read()))
+        for a in list(groups):
+            if a in own_levels:
+                kept_text = 0
+                for inner, data in groups.pop(a):
+                    low_n = inner.lower().rsplit('/', 1)[-1]
+                    if low_n.endswith('.znes') and MC.is_text(data):
+                        # the editor's zone file carries both games' numbers (resourceIndex the PS2 bundle's,
+                        # resourceIndexXbox the .xrsc's): the Xbox reads its .xznes, made here with the Xbox numbers
+                        # unless the mod gives its own (the Blender add-on's) -- 2026-11-18
+                        xn = low_n[:-5] + '.xznes'
+                        if (a, xn) not in given_x:
+                            def _x(m):
+                                n = int(m[6]) if int(m[6]) > 0 else int(m[4])
+                                return '%s0%s%d' % (m[1], m[5], n)
+                            out.setdefault(a, {})[inner[:-5] + '.xznes'] = MC.ZONE_RE.sub(
+                                _x, data.decode('latin-1')).encode('latin-1')
+                            kept_text += 1
+                        continue
+                    if MC.is_text(data) and (a, low_n) not in given_x:
+                        out.setdefault(a, {})[inner] = data
+                        kept_text += 1
+                log('  %s: the mod\'s own Xbox level -- used as it is, nothing converted (%d text file(s) as they are)'
+                    % (a, kept_text))
         own_n, converted_n = 0, 0
         for arch, items in sorted(groups.items()):
             self.de._stop_point('before converting')
@@ -471,7 +599,8 @@ class Xbox:
                 hit = cache.get(cache.key(inner, data, ctx))
                 if hit is not None:
                     for oname, obytes in hit.items():
-                        out.setdefault(arch, {})[oname] = obytes
+                        if (arch.lower(), oname.lower().rsplit('/', 1)[-1]) not in given_x:
+                            out.setdefault(arch, {})[oname] = obytes
                     continue
                 todo.append((inner, data, ctx))
             if not todo:
@@ -503,8 +632,10 @@ class Xbox:
                         continue
                     a2, inner = self._split(rel, tgt, src)
                     b = open(os.path.join(root, f), 'rb').read()
-                    out.setdefault(a2, {})[inner] = b
                     made[inner.lower()] = (inner, b)
+                    if (a2.lower(), inner.lower().rsplit('/', 1)[-1]) in given_x:
+                        continue                                # the mod's own Xbox file stays
+                    out.setdefault(a2, {})[inner] = b
             # each input's outputs kept: its name made the Xbox's (.rsc -> .xrsc), its names file with a bundle
             for inner, data, ctx in todo:
                 low = inner.lower()
@@ -539,7 +670,8 @@ class Xbox:
         leftover = {}
         for arch, files in out.items():
             if arch:
-                per.setdefault(arch, {}).update({k.lower(): v for k, v in files.items()})
+                # at the archive's top, as the PS2 build puts a .dat folder's subfolders' files
+                per.setdefault(arch, {}).update({k.lower().rsplit('/', 1)[-1]: v for k, v in files.items()})
         for inner, b in out.get('', {}).items():
             name = inner.rsplit('/', 1)[-1].lower()
             holders = [a for a in tgt.holders.get(name, ()) if a in tgt.archives]
@@ -548,6 +680,14 @@ class Xbox:
                 continue
             for a in holders:
                 per.setdefault(a, {}).setdefault(name, b)
+        self._complete_new_levels(per, tgt, log)
+        self._bnds_for_xbox(per, log)
+        for arch, files in per.items():                         # view records vs AI rooms (crash on load)
+            try:
+                for n in PB.fit_level_counts(files):
+                    log('  ' + n)
+            except Exception as ex:                             # noqa: BLE001
+                log('  %s: AI rooms not checked against its view data (%s)' % (arch, ex))
         built = self._write_assets(per, tgt, st, log)
         # the mods folder keeps only the Script Hooks switches and files no archive has (the game's files are in
         # assets now: an old loose copy there would hide them)
@@ -566,6 +706,174 @@ class Xbox:
             % (time.time() - t0, len(built['written']), st['assets'], built['same'], len(built['restored']),
                (', %d loose file(s) in %s' % (len(leftover), dest)) if leftover else ''))
         return {'archives': built['written'], 'restored': built['restored'], 'out': st['assets']}
+
+    # a new level archive's base on the Xbox: the Xbox game's own files, as New .dat (and complete_new_level) give
+    # the PS2 one -- a Showdown half: the files every Xbox Showdown map of its player count shares and Ranch's other
+    # ones; a single player level: the saloon's. Their geometry, zones and collision are the level's own.
+    _XBOX_BASES = {'lvls_m2': ('lvls_m2/ranch2.dat', 'lvl_ranch2'), 'lvls_m4': ('lvls_m4/ranch4.dat', 'lvl_ranch4'),
+                   'lvls_sng': ('lvls_sng/saloon.dat', 'lvl_saloon')}
+
+    def make_level_xrsc(self, folder, stem, group, log=print):
+        """lvl_<x>.xrsc beside a new level's lvl_<x>.rsc (New .dat without its template's geometry): the PS2 bundle
+        made the Xbox's chunk by chunk, every chunk at its number (modconvert.convert_level_ps2only, as the Xbox build
+        converts a new level), the physics materials the Xbox game's own base level's. From then on the editor writes
+        both (a model, collision, a move), the PS2 build packs the .rsc and the Xbox build the .xrsc (2026-11-18).
+        -> the path, or None."""
+        import modconvert as MC
+        from rdrformats import rsc as _rsc
+        src = os.path.join(folder, stem + '.rsc')
+        if not os.path.isfile(src):
+            return None
+        pmt = None
+        st = self.state()
+        xroot = st['reference'] or st['assets']
+        if xroot and os.path.isdir(xroot) and group in self._XBOX_BASES:
+            bp, bstem = self._XBOX_BASES[group]
+            try:
+                tgt = MC.Game(xroot, os.path.join(self.de.cache, 'xbox_build_xbox'), True)
+                raw = tgt.get(bp, bstem + '.xrsc')
+                if raw:
+                    pmt = [(c.tag, c.data) for c in _rsc.read_chunks(raw) if c.tag == 'PMT0']
+            except Exception as ex:                             # noqa: BLE001
+                log('  (the Xbox game\'s physics materials could not be read: %s -- the PS2 ones padded)' % ex)
+        notes = []
+        data = MC.convert_level_ps2only(open(src, 'rb').read(), notes, stem, pmt)
+        out = os.path.join(folder, stem + '.xrsc')
+        with open(out, 'wb') as f:
+            f.write(data)
+        os.utime(out, None)
+        log('  %s.xrsc made beside %s.rsc (the Xbox game\'s level bundle, every chunk at the PS2 one\'s number)'
+            % (stem, stem))
+        return out
+
+    @staticmethod
+    def _level_pair_stale(ps2_data, xbox_data):
+        """Does a level's .xrsc no longer follow its .rsc (an edit that reached only one)? The two hold the same
+        chunks in the same order (the editor writes both); textures and meshes are each game's encoding."""
+        from rdrformats import rsc as _rsc
+        try:
+            a = [c.tag for c in _rsc.read_chunks(ps2_data)]
+            b = [c.tag for c in _rsc.read_chunks(xbox_data)]
+        except Exception:                                       # noqa: BLE001
+            return True
+        return a != b
+
+    @staticmethod
+    def _bnds_for_xbox(per, log):
+        """A bound file (.bnds) carries both games' chunk numbers -- resourceIndex the PS2 bundle's, resourceIndexXbox
+        the Xbox one's (the Blender add-on's export for both games) -- but the Xbox game reads resourceIndex too (the
+        shipped levels have both the same): packed for the Xbox with its own numbers in resourceIndex. With the PS2's
+        there it loaded the wrong chunk ("datResourceHeader::Translate - Expected BND0", 2026-11-17)."""
+        node = re.compile(r'(node\s+\S+\s*\{.*?)(resourceIndex\s+)(-?\d+)(.*?resourceIndexXbox\s+)(-?\d+)', re.S)
+        from rdrformats import rsc as _rsc
+        fixed = 0
+        for arch, files in per.items():
+            # the chunk tags of the level bundles going into this archive: each bound's number is the one that
+            # names a BND0 there (the mod's own .xrsc has its Xbox numbers; one converted from the PS2 bundle keeps
+            # the PS2's -- the game read past the end of a converted one and crashed, "Expected BND0")
+            tags = []
+            for name, data in files.items():
+                if name.lower().endswith('.xrsc') and name.lower().startswith('lvl_'):
+                    try:
+                        tags.append([c.tag for c in _rsc.read_chunks(data)])
+                    except Exception:                       # noqa: BLE001
+                        pass
+
+            def is_bound(num):
+                return any(0 < num <= len(t) and t[num - 1] == 'BND0' for t in tags)
+
+            def pick(m):
+                ps2_n, x_n = int(m.group(3)), int(m.group(5))
+                n = x_n if is_bound(x_n) or not tags else ps2_n if is_bound(ps2_n) else x_n
+                return m.group(1) + m.group(2) + str(n) + m.group(4) + str(n)
+            for name in list(files):
+                if not name.lower().endswith('.bnds'):
+                    continue
+                text = files[name].decode('latin-1')
+                new = node.sub(pick, text)
+                if new != text:
+                    files[name] = new.encode('latin-1')
+                    fixed += 1
+        if fixed:
+            log('  %d bound file(s) given the chunk numbers of the level bundle that goes with them' % fixed)
+
+    def _complete_new_levels(self, per, tgt, log):
+        import ps2build as PB
+        from . import dave as D
+        cache = {}
+
+        def names_of(arch):
+            if arch not in cache:
+                data = tgt.data(arch)
+                cache[arch] = (data, [e.name for e in D.Dave(_Bytes(data), arch).entries if not e.name.endswith('/')])
+            return cache[arch]
+        for arch, files in per.items():
+            group, _, name = arch.rpartition('/')
+            if arch in tgt.archives or group not in self._XBOX_BASES or not name.endswith('.dat'):
+                continue
+            stem = 'lvl_' + name[:-4]
+            if not any(k == stem + '.xrsc' for k in files):
+                continue
+            bp, bstem = self._XBOX_BASES[group]
+            if bp not in tgt.archives:
+                continue
+            data, base_names = names_of(bp)
+            take = set(n.lower() for n in base_names)
+            if group != 'lvls_sng':
+                sets = [set(n.lower() for n in names_of(a)[1]) for a in tgt.archives
+                        if a.startswith(group + '/') and a != arch]
+                if sets:
+                    take |= set.intersection(*sets)
+            pat = re.compile(r'(?<![a-z0-9])' + re.escape(bstem) + r'(?=[_.]|$)', re.I)
+            by_low = {n.lower(): n for n in base_names}
+            lvl_b = next((v for k, v in files.items() if k.lower() == stem + '.lvl'), b'')
+            listed = {ln.strip().lower() for ln in lvl_b.decode('latin-1').splitlines() if ln.strip()}
+            added = 0
+            for low in sorted(take):
+                own = bool(pat.search(low))
+                if own and low.startswith(bstem) and (low == bstem + '.xrsc' or
+                                                      low.endswith(('.znes', '.xznes', '.bnds'))):
+                    continue                            # the base's geometry, zones and collision
+                out_name = pat.sub(stem, low) if own else low
+                if out_name in files:
+                    continue                            # the level's own
+                if low in by_low:
+                    b = PB.read_entry(data, by_low[low])[1]
+                else:                                   # shared, not in the base map: any Showdown map's copy
+                    src_arch = next((a for a in tgt.archives if a.startswith(group + '/') and a != arch
+                                     and low in set(n.lower() for n in names_of(a)[1])), None)
+                    if not src_arch:
+                        continue
+                    sd, sn = names_of(src_arch)
+                    b = PB.read_entry(sd, next(n for n in sn if n.lower() == low))[1]
+                if own and low.endswith(('.lvl', '.lnes', '.bxes', '.spwn', '.aisp', '.lgt', '.shadows', '.fog',
+                                         '.glows', '.sneak', '.fade', '.duel', '.flags', '.csv')):
+                    b = pat.sub(stem, b.decode('latin-1')).encode('latin-1')
+                files[out_name] = b
+                added += 1
+            if added:
+                log('  %s: a new level -- %d of the Xbox game\'s own files added (%s\'s base, renamed for %s)'
+                    % (arch, added, bp, stem))
+            # a .lvl listing no lines or no boxes (every level of the game lists some; the Xbox crashed loading one
+            # with none, 2026-11-17): the base's lists, renamed (their files were added above)
+            lk = next((k for k in files if k.lower() == stem + '.lvl'), None)
+            bl = by_low.get(bstem + '.lvl')
+            if lk and bl:
+                text = files[lk].decode('latin-1')
+                btext = pat.sub(stem, PB.read_entry(data, bl)[1].decode('latin-1'))
+                filled = []
+                for section in ('Lines', 'Boxes'):
+                    m = re.search(r'(?is)(^\s*' + section + r'\s*\{)(.*?)(\})', text, re.M)
+                    bm = re.search(r'(?is)^\s*' + section + r'\s*\{(.*?)\}', btext, re.M)
+                    if m and not m.group(2).split() and bm and bm.group(1).split():
+                        names = [n for n in bm.group(1).split() if n.lower() in {k.lower() for k in files}]
+                        if names:
+                            text = text[:m.start(2)] + '\r\n' + ''.join(n + ' \r\n' for n in names) + text[m.end(2):]
+                            filled.append('%s (%d)' % (section, len(names)))
+                if filled:
+                    files[lk] = text.encode('latin-1')
+                    log('  %s: its .lvl listed no %s: %s\'s given (every level has them)'
+                        % (arch, ' / '.join(s.split(' ')[0] for s in filled), bp))
 
     def _assets_record(self):
         return os.path.join(self.de.cache, 'xbox_assets_built.json')
@@ -601,7 +909,7 @@ class Xbox:
         for arch in sorted(per):
             self.de._stop_point('before writing the Xbox game files')
             files = per[arch]
-            sig = hashlib.sha1(b'layout 2')                     # 2: laid out as the game's (game_layout)
+            sig = hashlib.sha1(b'layout 6')     # 2: game_layout; 3: PS2 strips; 4: .lvl lists; 5/6: .bnds numbers
             for k in sorted(files):
                 sig.update(k.encode('utf-8') + b'\0' + hashlib.sha1(files[k]).digest())
             sig = sig.hexdigest()

@@ -749,12 +749,20 @@ class Studio:
                 self.note(self._locked_reason())
             self.vanilla = Game(self.vanilla_path, writable=False)
             self._levels = {}
-            keep = self.journal.entries if self.journal else None
+            old = self.journal
+            keep = old.entries if old else None
             session = os.path.join(cfg.MODS, "_session.rdrmod.json")
             self.journal = Journal(self.vanilla, session)
             if keep:
                 self.journal.entries = keep
                 self.journal._seq = len(keep)
+                # and what else only memory holds: a mods-folder file's bytes before its first edit (undo's only
+                # copy of it -- lost here, Ctrl+Z on a box delete said "no earlier copy"), the redo steps, and the
+                # group counter (restarted at g1, a new action shared a group with an old one and undid with it)
+                # -- 2026-11-18
+                self.journal.bases = dict(getattr(old, "bases", {}) or {})
+                self.journal.redo_stack = list(getattr(old, "redo_stack", []) or [])
+                self.journal._group_seq = getattr(old, "_group_seq", 0)
             else:
                 # First open of this process: pick up the previous session's
                 # autosave so undo history survives a Studio restart. Without
@@ -856,8 +864,150 @@ class Studio:
         msg, fix = self.locked_problem()
         return (msg + " " + fix).strip()
 
-    def write(self, archive, filename, data, label="", group=None, grow=False):
+    # ------------------------------------------------- levels only the mods folder has
+    #
+    # A new level (lvl_mantomb2: the add-on's export, in mods/lvls_m2/mantomb2.dat/) is shown from that folder, or
+    # from a PS2 copy of it in the cache when the folder holds only the Xbox files. Its edits used to go to the
+    # working disc like every other -- which does not have it ("not on disc"), so nothing in such a level could be
+    # deleted, moved or added (2026-11-18). They go into the folder now, which is what a Build puts in the game.
+
+    def node_template(self, kind, token=""):
+        """(Level, node) of a level of the working disc with a node of this kind whose name holds token -- a
+        template for node_add. Searched once per (kind, token), the levels in the disc's order."""
+        cache = self.__dict__.setdefault("_node_templates", {})
+        key = (kind, token)
+        if key in cache:
+            return cache[key]
+        found = None
+        try:
+            src = self.game or self.vanilla
+            arcs = sorted(a for a in src.archives() if a.upper().startswith(("LVLS_SNG/", "LVLS_M2/", "LVLS_M4/")))
+        except Exception:                                   # noqa: BLE001
+            arcs = []
+        for a in arcs:
+            try:
+                lv = self.level(a)
+            except Exception:                               # noqa: BLE001
+                continue
+            for n in lv.nodes:
+                if n.kind == kind and not getattr(n, "readonly", False) and (not token or token in n.name.lower()):
+                    found = (lv, n)
+                    break
+            if found:
+                break
+        cache[key] = found
+        return found
+
+    def _mods_folder_of(self, archive):
+        """The mods folder of a level the working disc has not, or None."""
+        try:
+            src = self.game or self.vanilla
+            if archive.upper() in {a.upper() for a in src.archives()}:
+                return None
+        except Exception:                                   # noqa: BLE001
+            return None
+        from . import collcreate as _cc
+        return _cc.mods_folder(_data_editor_for(self), archive)
+
+    def _mods_only_view(self, archive, filename):
+        """A file of a mods folder level as the editor shows it (the cache's PS2 copy for an Xbox-only one)."""
+        shown = self._mods_level_folders().get(archive.upper())
+        name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if shown:
+            for f in os.listdir(shown):
+                if f.lower() == name.lower():
+                    with open(os.path.join(shown, f), "rb") as fh:
+                        return fh.read()
+        return None
+
+    def _mods_only_write(self, folder, filename, data):
+        """A file into a mods folder level. A zone file of a level whose folder holds the Xbox ones goes into the
+        .xznes (the editor's .znes is it with each node's resourceIndex and resourceIndexXbox swapped); its models
+        (.rsc: the folder holds the Xbox bundle) are not edited here."""
+        import re as _re
+        name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        have = {f.lower(): f for f in os.listdir(folder)}
+        low = name.lower()
+        target, out = name, data
+        if low in have:
+            target = have[low]
+        elif low.endswith(".znes") and low[:-5] + ".xznes" in have:
+            target = have[low[:-5] + ".xznes"]
+            text = data.decode("latin-1")
+            text = _re.sub(r"resourceIndex(\s+)(-?\d+)(\s+)resourceIndexXbox(\s+)(-?\d+)",
+                           lambda m: "resourceIndex%s%s%sresourceIndexXbox%s%s" % (
+                               m.group(1), m.group(5), m.group(3), m.group(4), m.group(2)), text)
+            out = text.encode("latin-1")
+        elif low.endswith((".rsc", ".rnt")) and _re.sub(r"\.(rsc|rnt)$", r".x\1", low) in have:
+            raise ValueError("%s: this level's models are its Xbox files (.xrsc) -- reshape them in Blender and "
+                             "export again (collision: the Collision creator)" % name)
+        p = os.path.join(folder, target)
+        if not out:
+            # nothing: a file that was not there before the edit made it (undone)
+            if os.path.exists(p):
+                os.remove(p)
+            return
+        tmp = p + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(out)
+        os.replace(tmp, p)
+
+    # "Edit both Multiplayer level variants": a Showdown map is two levels, lvl_<name>2 (LVLS_M2) and lvl_<name>4
+    # (LVLS_M4); with this on, an edit of a file of one that the other has exactly the same (its level name aside)
+    # is made in the other too, in the same undo step.
+    sync_mp = False
+
+    def _mp_partner(self, archive, filename):
+        """(partner archive, partner file name, renamer) of a Showdown level file, or None."""
+        import re as _re
+        m = _re.fullmatch(r"(LVLS_M)([24])/(.+)([24])\.DAT", archive.upper())
+        if not m or m.group(2) != m.group(4):
+            return None
+        a, b = m.group(2), "4" if m.group(2) == "2" else "2"
+        stem = m.group(3).lower()
+        other = "%s%s/%s%s.DAT" % (m.group(1), b, m.group(3), b)
+        mine, theirs = ("lvl_%s%s" % (stem, a)).encode(), ("lvl_%s%s" % (stem, b)).encode()
+        name = filename.replace("lvl_%s%s" % (stem, a), "lvl_%s%s" % (stem, b))
+
+        def rename(data):
+            return data.replace(mine, theirs)
+        return other, name, rename
+
+    def _read_level_file(self, archive, filename):
+        """A level file's bytes as the editor has them now (the mods folder's, or the working disc's), or None."""
+        if self._mods_folder_of(archive):
+            return self._mods_only_view(archive, filename)
+        try:
+            return self.game.archive(archive).read(filename)
+        except Exception:                                   # noqa: BLE001
+            return None
+
+    def write(self, archive, filename, data, label="", group=None, grow=False, _mirror_mp=True):
         """The one place bytes reach the ISO. Everything else routes here."""
+        if self.sync_mp and _mirror_mp:
+            pm = self._mp_partner(archive, filename)
+            if pm is not None:
+                other, oname, rename = pm
+                mine = self._read_level_file(archive, filename)
+                theirs = self._read_level_file(other, oname)
+                if mine is not None and theirs is not None and rename(mine) == theirs:
+                    group = group or self.journal.new_group()
+                    self.write(other, oname, rename(data), label, group, grow, _mirror_mp=False)
+                    self._drop_level(other)
+        folder = self._mods_folder_of(archive)
+        if folder:
+            with self.lock:
+                key = (archive, filename)
+                if not hasattr(self.journal, "bases"):
+                    self.journal.bases = {}
+                if key not in self.journal.bases and not any(e.key == key for e in self.journal.entries):
+                    before = self._mods_only_view(archive, filename)
+                    # a file the edit makes (a model import's new zone file): b"" -- undone, it goes again
+                    self.journal.bases[key] = before if before is not None else b""
+                self._mods_only_write(folder, filename, data)
+                self.journal.record(archive, filename, data, label, group)
+                self._drop_level(archive)
+                return len(data), len(data)
         with self.lock:
             # An edit says "I want the disc" outright, so it overrides the
             # handover grace period -- but not the emulator actually holding
@@ -931,9 +1081,22 @@ class Studio:
             return self.write(archive, filename, data, label, group, grow=grow)
         return w
 
+    def _undo_read(self, archive, filename):
+        """A mods-folder level file as it is now, for undo's check (None: not checked -- a disc file, or a level
+        shown from a cache copy)."""
+        folder = self._mods_folder_of(archive)
+        if not folder or self._mods_level_folders().get(archive.upper()) != folder:
+            return None
+        name = filename.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        for f in os.listdir(folder):
+            if f.lower() == name:
+                with open(os.path.join(folder, f), "rb") as fh:
+                    return fh.read()
+        return None
+
     def undo(self):
         with self.lock:
-            r = self.journal.undo(self._raw_write)
+            r = self.journal.undo(self._raw_write, self._undo_read)
             if r:
                 self._levels = {}
                 self.note("undo: %s (%d file(s))" % (r["label"] or "edit", r["count"]))
@@ -949,6 +1112,11 @@ class Studio:
 
     def _raw_write(self, archive, filename, data):
         """Undo/redo path -- must NOT append to the journal."""
+        folder = self._mods_folder_of(archive)
+        if folder:
+            self._mods_only_write(folder, filename, data)
+            self._drop_level(archive)
+            return
         try:
             self.game.archive(archive).patch(filename, data)
         except SlotOverflow:
@@ -1546,9 +1714,33 @@ class Studio:
             for f in os.listdir(top):
                 folder = os.path.join(top, f)
                 stem = "lvl_" + f[:-4].lower()
-                if f.lower().endswith(".dat") and os.path.isdir(folder) and \
-                        any(n.lower() == stem + ".rsc" for n in os.listdir(folder)):
+                if not (f.lower().endswith(".dat") and os.path.isdir(folder)):
+                    continue
+                have = {n.lower() for n in os.listdir(folder)}
+                try:
+                    xbox_game = X is not None and X.platform() == "xbox"
+                except Exception:                           # noqa: BLE001
+                    xbox_game = False
+                # the PS2 bundle and the Xbox one side by side: shown from a PS2 copy of the Xbox files only when
+                # those are the newer (a Blender pair). A pair the editor keeps (New .dat makes the .xrsc; its zone
+                # edits go to the .znes) is shown from the folder itself: shown from the .xznes, a deleted model came
+                # back and the next delete removed the wrong one (2026-11-18)
+                def _newest(ext):
+                    ts = [os.path.getmtime(os.path.join(folder, n)) for n in os.listdir(folder)
+                          if n.lower().startswith(stem) and n.lower().endswith(ext)]
+                    return max(ts) if ts else None
+                xz, pz = _newest(".xznes"), _newest(".znes")
+                xbox_view = xbox_game and stem + ".xrsc" in have and xz is not None and (pz is None or xz >= pz - 2)
+                if stem + ".rsc" in have and not xbox_view:
                     out[("%s/%s" % (group, f)).upper()] = folder
+                elif stem + ".xrsc" in have and X is not None:
+                    # a new level imported for the Xbox only: shown from a PS2 copy made in the cache (the mods
+                    # folder itself is left as it is)
+                    try:
+                        out[("%s/%s" % (group, f)).upper()] = X.converted_folder_level(
+                            ("%s/%s" % (group, f)).upper(), folder)
+                    except Exception:                       # noqa: BLE001
+                        pass
         self._mods_only = set(out)
         for arc, path in sorted(xlevels.items()):
             if arc in out or arc in disc:
@@ -1660,7 +1852,7 @@ class Studio:
             for key in [k for k in self._levels if k[0] == archive]:
                 self._levels.pop(key, None)
 
-    def restore(self, clear_mods=False):
+    def restore(self, clear_mods=False, save=True, save_name=None, include_new=True):
         """Copy the pristine disc over the working one. With clear_mods the Data Editor's own mod files go too
         (kept as a Saved Mod first): else they count as waiting and the next Build puts them back on the disc.
         -> (saved Mod name or None, files cleared)."""
@@ -1680,7 +1872,7 @@ class Studio:
             if clear_mods:
                 try:
                     from . import dataeditor_more as _more
-                    out = _more.more(_data_editor(self)).clear_for_reset()
+                    out = _more.more(_data_editor(self)).clear_for_reset(save, save_name, include_new)
                 except Exception as ex:                         # noqa: BLE001
                     self.note("reset: the Data Editor's mod files stayed (%s)" % ex)
             self.open()
@@ -4809,7 +5001,10 @@ class Handler(BaseHTTPRequestHandler):
             from . import levelmeta
             arc = one("archive")
             lvl = s.level(arc, area=one("area") or None)
-            return self._send(200, levelmeta.everything(s.disc, arc, lvl))
+            # a level only the mods folder has is read from its own files (the disc does not have it: it showed no
+            # doors, cameras, glows or AI spawn points at all)
+            src = _LevelFiles(lvl) if s._mods_folder_of(arc) else s.disc
+            return self._send(200, levelmeta.everything(src, arc, lvl))
 
         if route == "level_props":
             # The environment files belonging to one level area, grouped so
@@ -4995,11 +5190,10 @@ class Handler(BaseHTTPRequestHandler):
                                         "this computer, not over the network."))
         try:
             if route == "de_add":
-                # Xbox files (.xtex, .xmod, .xrsc + .xrnt) made the PS2's on the way in; an Xbox level's refused
-                from .dataeditor_more import more as _more
-                files, notes = _more(de).xbox_payload(body.get("files") or [], body.get("alpha") or None,
-                                                      body.get("resize", True) is not False)
-                return self._send(200, dict(added=de.add_files(body.get("folder", ""), files), notes=notes))
+                # every file as it is given, Xbox ones too: nothing converted on the way in (the PS2 build makes a
+                # PS2 copy of an Xbox file the mod has no PS2 file for; the Xbox build uses the Xbox files)
+                return self._send(200, dict(added=de.add_files(body.get("folder", ""), body.get("files") or []),
+                                            notes=[]))
             if route == "de_dat_place":
                 return self._send(200, de.dat_place(body.get("name", ""), body.get("into", "")))
             if route == "de_import":
@@ -5007,6 +5201,13 @@ class Handler(BaseHTTPRequestHandler):
                                            bool(body.get("replace")))
                          for f in body.get("files") or []]
                 return self._send(200, dict(results=notes))
+            if route == "de_delete_dat":
+                # Data Editor: Delete .dat (a new level: both halves, its menu row, thumbnail and unlock) -- 2026-11-18
+                try:
+                    return self._send(200, de.delete_dat(body.get("archive", ""), bool(body.get("permanent")),
+                                                         bool(body.get("dry"))))
+                except ValueError as ex:
+                    return self._send(400, {"error": str(ex)})
             if route == "de_delete":
                 return self._send(200, dict(deleted=de.delete_files(body.get("keys") or [],
                                                                     bool(body.get("permanent")))))
@@ -5034,7 +5235,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, dict(started=de.start(
                     "New .dat", de.new_level, "sng" if body.get("kind") == "sng" else "showdown",
                     body.get("name", ""), body.get("template") or None, body.get("title") or None,
-                    body.get("subtitle") or None, bool(body.get("replace")))))
+                    body.get("subtitle") or None, bool(body.get("replace")), bool(body.get("no_geometry")),
+                    bool(body.get("blank")))))
             if route == "de_manual_extract":
                 return self._send(200, dict(started=de.start(
                     "Extract an archive", de.manual_extract, body.get("archive", ""), body.get("to", ""))))
@@ -5475,7 +5677,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = assets_mod.place(
                     s, s.asset_index(), body["archive"], body["name"],
                     body.get("pos"), area=body.get("area"),
-                    dry=bool(body.get("dry")))
+                    dry=bool(body.get("dry")), source=body.get("source"))
             except ValueError as ex:
                 return self._send(400, dict(error=str(ex)))
             if result.get("applied"):
@@ -5525,6 +5727,33 @@ class Handler(BaseHTTPRequestHandler):
             if not alone:
                 body["changes"] = lvl.with_collision(body["changes"])
             group = s.journal.new_group()
+            # A level in the mods folder: a model's own collision shell follows by its points (boundmove, on every
+            # bundle the level has), not by its node's matrix -- the shipped levels' bound matrices are all identity,
+            # and the editor draws a shell from its points, so a matrix move left it drawn behind (2026-11-18)
+            shell_moves = []
+            if not alone and not body.get("dry") and s._mods_folder_of(body["archive"]):
+                keep = []
+                for c in body["changes"]:
+                    if "via" in c and "pos" in c:
+                        bn = lvl.by_uid(int(c["uid"]))
+                        if bn.kind == "bound":
+                            shell_moves.append((bn.name, [a - b for a, b in zip(c["pos"], bn.xyz())]))
+                            continue
+                    keep.append(c)
+                body["changes"] = keep
+                # a model's other collision pieces (bound_x_01p2 ...) move with it too (2026-11-18)
+                from . import modeladd as _MA
+                bnames = [n.name for n in lvl.nodes if n.kind == "bound"]
+                for c in keep:
+                    if "pos" not in c:
+                        continue
+                    zn = lvl.by_uid(int(c["uid"]))
+                    if zn.kind != "zone":
+                        continue
+                    d = [a - b for a, b in zip(c["pos"], zn.xyz())]
+                    for pn in _MA.pieces_of(bnames, zn.name):
+                        if not any(pn == m for m, _d in shell_moves):
+                            shell_moves.append((pn, d))
             edits = lvl.merge(*[
                 lvl.move(int(c["uid"]), c["pos"], allow_grow=grow)
                 for c in body["changes"] if "pos" in c
@@ -5540,10 +5769,37 @@ class Handler(BaseHTTPRequestHandler):
                                writer=s.writer_for(body["archive"], label,
                                                    group=group, grow=grow),
                                allow_grow=grow)
+            if shell_moves and result.get("applied"):
+                from . import boundmove as _bm, collcreate as _cc
+                st = _cc.folder_store(_data_editor_for(s), body["archive"])
+                if st is not None:
+                    st.writer = lambda n, d: s.write(body["archive"], n, d, label, group)
+                    try:
+                        for nname, d in shell_moves:
+                            _f, text, span = _cc._locate(st, nname)
+                            p_num, x_num = _cc._node_numbers(text, span)
+                            for fname, xbox, num in ((st.ps2, False, p_num), (st.xbox, True, x_num)):
+                                if not fname or num <= 0:
+                                    continue
+                                data = st.read(fname)
+                                ch = _cc._lib()[2].read_chunks(data)
+                                body_b = _bm.translate(ch[num - 1].data, d[0], d[1], d[2])
+                                data, _i = _cc._set_chunk(data, num - 1, body_b, xbox)
+                                st.write(fname, data)
+                        result["shells_moved"] = [n for n, _d in shell_moves]
+                        result["reload"] = True     # the bundle was rewritten: the kept Level would be stale
+                    except Exception as ex:                 # noqa: BLE001
+                        result["collision_note"] = "Its collision was not moved with it: %s" % ex
             if sets:
                 result["set"] = [dict(uid=a, count=len(m)) for a, m, _ in sets
                                  if len(m) > 1]
-            if result.get("applied") and sets and not body.get("dry"):
+            # the merged shells' follow measures from the unedited disc's level: a level it has not (a new one, in
+            # the mods folder) has no merged shells of the game's to follow -- its models' own shells moved above
+            try:
+                on_vanilla = body["archive"].upper() in {a.upper() for a in s.vanilla.archives()}
+            except Exception:                               # noqa: BLE001
+                on_vanilla = False
+            if result.get("applied") and sets and not body.get("dry") and on_vanilla:
                 # The collision welded into the merged shells follows, in the
                 # same undo step. Deltas are measured from STOCK (no drift).
                 try:
@@ -5693,6 +5949,94 @@ class Handler(BaseHTTPRequestHandler):
                 s.note("%s: deleted %s" % (body["archive"], name))
             return self._send(200, result)
 
+        if route == "delete_many":
+            # A box selection deleted as ONE action (2026-11-18). The browser used to send one delete per object,
+            # finding the next by NAME after each (names repeat: player1_spawn_1 went twice) and stopping at the
+            # first refusal, so a box select left most of what it held behind. Here: every target named up front,
+            # deleted from the highest uid down -- uids are positions in the node list, so the ones below a deleted
+            # node keep theirs -- one journal group, one Ctrl+Z; a refusal is reported and the rest still go.
+            # links: a model's own collision shell (bound_X of zone_X) goes with it.
+            lvl = s.level(body["archive"], manifest=body.get("manifest"), area=body.get("area"))
+            uids = {int(u) for u in body.get("uids") or []}
+            if body.get("links", True):
+                lk = lvl.links()
+                from . import modeladd as _MA0
+                bnodes = {n.name: n.uid for n in lvl.nodes if n.kind == "bound"}
+                for u in list(uids):
+                    try:
+                        zn = lvl.by_uid(u)
+                        if zn.kind == "zone" and lk.get(u) is not None:
+                            uids.add(lk[u])
+                        if zn.kind == "zone":
+                            uids |= {bnodes[pn] for pn in _MA0.pieces_of(list(bnodes), zn.name)}
+                    except KeyError:
+                        pass
+            want = {}
+            for u in uids:
+                try:
+                    want[u] = lvl.by_uid(u).name
+                except KeyError:
+                    pass
+            label = body.get("label") or ("delete %d object(s)" % len(want) if len(want) != 1
+                                           else "delete %s" % next(iter(want.values())))
+            group = s.journal.new_group()
+            deleted, failed = [], []
+            # a level only the mods folder has: the chunks of the models and shells deleted are emptied too (below),
+            # their numbers read now, before the nodes go
+            chunks_of = {}
+            mstore = None
+            if s._mods_folder_of(body["archive"]):
+                from . import collcreate as _CC, modeladd as _MA
+                mstore = _CC.folder_store(_data_editor_for(s), body["archive"])
+                if mstore is not None:
+                    for u, nm in want.items():
+                        try:
+                            k = lvl.by_uid(u).kind
+                            if k == "zone":
+                                chunks_of[nm] = ("zone", _MA._zone_nums(mstore, nm))
+                            elif k == "bound":
+                                chunks_of[nm] = ("bound", _MA._bound_nums(mstore, nm))
+                        except Exception:                   # noqa: BLE001
+                            pass
+            for u in sorted(want, reverse=True):
+                try:
+                    n = lvl.by_uid(u)
+                    if n.name != want[u]:
+                        raise ValueError("the level changed under it (uid %d is now %s)" % (u, n.name))
+                    res = lvl.apply(lvl.delete(u), writer=s.writer_for(body["archive"], label, group=group))
+                    if not res.get("applied"):
+                        raise ValueError(res.get("error") or "the file would not take it")
+                    deleted.append(want[u])
+                except Exception as ex:                     # noqa: BLE001
+                    failed.append(dict(name=want[u], error="%s" % ex))
+            if mstore is not None and deleted and chunks_of:
+                # emptied only where no node draws that chunk any more (a placed copy can share its source's)
+                try:
+                    mstore.writer = lambda n, d: s.write(body["archive"], n, d, label, group)
+                    users = _MA.chunk_users(mstore)
+                    zones_e, bounds_e = [], []
+                    for nm in deleted:
+                        kind, nums = chunks_of.get(nm, (None, {}))
+                        free = {p: n for p, n in nums.items() if not users.get((kind, p, n))}
+                        if not free:
+                            continue
+                        if kind == "zone":
+                            zones_e.append(free)
+                        elif kind == "bound":
+                            bounds_e.append((free.get("ps2", 0), free.get("xbox", 0)))
+                    if zones_e:
+                        _MA.empty_model_chunks(mstore, zones_e)
+                    if bounds_e:
+                        _CC._empty_chunks(mstore, bounds_e)
+                    s._drop_level(body["archive"])
+                except Exception as ex:                     # noqa: BLE001
+                    s.note("%s: the deleted models' chunks were not emptied (%s)" % (body["archive"], ex))
+            if deleted:
+                s.note("%s: deleted %d object(s): %s" % (body["archive"], len(deleted), ", ".join(deleted[:40])))
+            for f in failed:
+                s.note("%s: could not delete %s: %s" % (body["archive"], f["name"], f["error"]))
+            return self._send(200, dict(applied=bool(deleted), deleted=deleted, failed=failed))
+
         if route == "env_preset":
             # A whole look, applied across the level's lighting and fog files
             # as ONE undo step. Dry-run everything before writing anything --
@@ -5789,6 +6133,15 @@ class Handler(BaseHTTPRequestHandler):
             # transform below now moves the spheres through the same maths.
             lvl = s.level(body["archive"], area=body.get("area"))
             chunk = int(body["chunk"])
+            if s._mods_folder_of(body["archive"]):
+                # a level only the mods folder has: no unedited copy -- the total since this session first
+                # reshaped it (modeladd.reshape keeps that), 2026-11-18
+                from . import modeladd as MA
+                node = MA.node_for_chunk(lvl, chunk)
+                if node is None:
+                    return self._send(200, {"shape": None, "why": "no model or collision draws chunk %d" % chunk})
+                return self._send(200, {"shape": MA.shape_now(s, body["archive"], lvl, node), "residual": 0.0,
+                                        "exact": True, "why": None})
             stock = Level(s.vanilla, body["archive"], area=body.get("area"))
             vr, cr = stock._load_rsc(), lvl._load_rsc()
             if vr is None or cr is None or chunk >= len(vr.chunks):
@@ -5855,6 +6208,27 @@ class Handler(BaseHTTPRequestHandler):
             # transform below now moves the spheres through the same maths.
             lvl = s.level(body["archive"], area=body.get("area"))
             chunk = int(body["chunk"])
+            if s._mods_folder_of(body["archive"]):
+                # A level only the mods folder has (a new level, a model placed from another level): the unedited
+                # disc has none of it ("not on disc"). Rebuilt from its own bundles, PS2 and Xbox, with its
+                # collision shell taking the same move/turn/scale -- one Ctrl+Z (modeladd.reshape, 2026-11-18).
+                from . import modeladd as MA, collcreate as CC
+                node = MA.node_for_chunk(lvl, chunk)
+                if node is None:
+                    return self._send(404, {"error": "no model or collision draws chunk %d" % chunk})
+                pivot = None
+                if body.get("about"):
+                    off = list(node.xyz()) if node.kind == "zone" else [0.0, 0.0, 0.0]
+                    pivot = [float(body["about"][k]) + off[k] for k in range(3)]
+                try:
+                    r = MA.reshape(s, body["archive"], lvl, [node], body.get("ops") or [],
+                                   body.get("label") or "reshape %s" % node.name, pivot=pivot,
+                                   collision=not body.get("alone"))
+                except (MA.ModelError, CC.CollError, KeyError, IndexError, ValueError) as ex:
+                    return self._send(400, {"error": "%s could not be reshaped: %s" % (node.name, ex)})
+                if r["changed"]:
+                    s.note("%s :: reshaped %s" % (body["archive"], ", ".join(r["moved"])))
+                return self._send(200, r)
             stock = Level(s.vanilla, body["archive"], area=body.get("area"))
             vr = stock._load_rsc()
             if vr is None or chunk >= len(vr.chunks):
@@ -6056,6 +6430,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {
                     "error": "mass_edit is for a selection of 2 or more; use "
                              "geom_edit for a single chunk"})
+            if s._mods_folder_of(body["archive"]):
+                # a level only the mods folder has: every model (and its collision) about one pivot, on every
+                # bundle, one Ctrl+Z (modeladd.reshape; the values are a change from now) -- 2026-11-18
+                from . import modeladd as MA, collcreate as CC
+                nodes = [MA.node_for_chunk(lvl, c) for c in chunks]
+                nodes = [n for n in nodes if n is not None]
+                try:
+                    pivot = [float(v) for v in body["about"]] if body.get("about") else \
+                        MA.selection_centre(s, body["archive"], lvl, nodes)
+                    sc = [o for o in body.get("ops") or [] if o.get("op") == "scale"]
+                    report = dict(models=len(nodes), pivot=pivot,
+                                  proportional=all(float(o.get("y", o.get("x", 1))) == float(o.get("x", 1)) ==
+                                                   float(o.get("z", o.get("x", 1))) for o in sc),
+                                  collision_untouched=[], collision_note=None)
+                    if body.get("dry"):
+                        return self._send(200, dict(report, dry=True))
+                    r = MA.reshape(s, body["archive"], lvl, nodes, body.get("ops") or [],
+                                   body.get("label") or "move %d models" % len(nodes), pivot=pivot, total=False,
+                                   collision=not body.get("alone"))
+                except (MA.ModelError, CC.CollError, KeyError, IndexError, ValueError) as ex:
+                    return self._send(400, {"error": str(ex)})
+                return self._send(200, dict(report, ok=True, changed=r["changed"],
+                                            collision_note=r["collision_note"]))
             stock = Level(s.vanilla, body["archive"], area=body.get("area"))
             vr = stock._load_rsc()
             if vr is None:
@@ -6475,6 +6872,296 @@ class Handler(BaseHTTPRequestHandler):
                            rep.get("collision_note") or "Collision is unchanged."),
                 next="Next: press Boot test in the top bar (or run RDR_MODDED.iso "
                      "in PCSX2) to see it. Ctrl+Z undoes this."))
+
+        if route == "model_add":
+            # A custom model into the level where the user clicked (modeladd.py): an .obj / .glb read by the page
+            # into a plain mesh, or a game model (.rsc .xrsc .mod .xmod) read here; on every bundle the level has.
+            import base64 as _b64
+            from . import collcreate as CC, modeladd as MA
+            arc = body["archive"]
+            try:
+                if body.get("mesh"):
+                    tris, mats, texs = MA.from_mesh(body["mesh"])
+                else:
+                    nat = body.get("native") or {}
+                    tris, mats, texs = MA.from_native(nat.get("filename") or "", _b64.b64decode(nat.get("data") or ""))
+                tris = MA.place(tris, [float(v) for v in body.get("pos") or (0, 0, 0)], float(body.get("turn") or 0),
+                                float(body.get("scale") or 1), bool(body.get("keep_place")))
+                r = MA.add_to_level(s, arc, tris, mats, texs, body.get("name") or "custom",
+                                    bool(body.get("collision", True)), body.get("manifest"), body.get("area"))
+            except (MA.ModelError, CC.CollError, KeyError, ValueError, TypeError) as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            s.note("%s: model %s added (%d triangles)" % (arc, r["name"], r["triangles"]))
+            return self._send(200, dict(ok=True, **r))
+
+        if route == "coll_autogen":
+            # Collision generated from the level's models (collauto.py), as new shells bound_auto_NN: a start to edit.
+            # replace: the earlier generated ones (bound_auto_*) taken out first. One undo step on a mods folder level
+            # only it has, or a disc level.
+            import re as _re
+            from . import collauto as CA, collcreate as CC
+            arc = body["archive"]
+            lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+            try:
+                cell = max(0.05, min(5.0, float(body.get("cell") or 0.3)))
+                tile = max(10.0, min(200.0, float(body.get("tile") or 40.0)))
+            except (TypeError, ValueError):
+                cell, tile = 0.3, 40.0
+            replace_auto = body.get("replace", True)
+            tris = CA.level_triangles(lvl, skip_existing=body.get("skip_existing", True),
+                                      # a level of the mods folder draws only what its zone nodes name: a chunk none
+                                      # names is a deleted model's (the stock levels draw some surfaces no node names)
+                                      unclaimed=not s._mods_folder_of(arc),
+                                      ignore=(lambda nm: bool(_re.match(r"bound_auto_\d+$", nm))) if replace_auto
+                                      else (lambda nm: False))
+            skipped = getattr(lvl, "_autogen_skipped", 0)
+            if not tris:
+                return self._send(200, dict(ok=False, error_text=(
+                    "Every model here has collision already (%d skipped): nothing to generate" % skipped) if skipped
+                    else "This level has no models to make collision from"))
+            verts, faces = CA.simplify(tris, cell)
+            parts = CA.shells(verts, faces, tile)
+            store = CC.folder_store(_data_editor_for(s), arc)
+            grp = s.journal.new_group()
+            if store is not None and s._mods_folder_of(arc):
+                store.writer = lambda n, d: s.write(arc, n, d, "auto collision", grp)
+            if store is None:
+                lvl._load_rsc()
+                if not lvl.rsc_name:
+                    return self._send(200, dict(ok=False, error_text="This part of the level has no model bundle"))
+                store = CC.DiscStore(s, arc, lvl, "auto collision")
+                store.group = grp
+            removed = 0
+            try:
+                if body.get("replace", True):
+                    old = set()
+                    for f in store.bnds:
+                        old |= set(_re.findall(r"node\s+(bound_auto_\d+)\s*\{", store.read(f).decode("latin-1")))
+                    removed = CC.remove_many(store, sorted(old))
+                names = CC.add_many(store, parts, "auto", True)
+            except CC.CollError as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            if store.kind == "folder" and store.writer is None:
+                CC.remember(store)
+            s._drop_level(arc)
+            s.note("%s: auto collision, %d shells (%d faces from %d model triangles)" % (arc, len(names), len(faces),
+                                                                                        len(tris)))
+            return self._send(200, dict(ok=True, shells=len(names), faces=len(faces), source=len(tris), removed=removed,
+                                        where="journal" if (store.kind == "disc" or store.writer) else "folder"))
+
+        if route == "navpath_generate":
+            # AI nav paths over the level's walkable ground (navgen.py), into its path .lnes: the nav paths there
+            # replaced (replace) or added beside them. One undo step.
+            from . import navgen
+            import time as _time
+            arc = body["archive"]
+            lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+            g = lvl.geometry()
+            tris = []
+            for m in g.get("meshes", []):
+                P, I = m["positions"], m["indices"]
+                vs = [tuple(P[k:k + 3]) for k in range(0, len(P), 3)]
+                tris += [(vs[I[k]], vs[I[k + 1]], vs[I[k + 2]]) for k in range(0, len(I), 3)]
+            if not tris:
+                return self._send(200, dict(ok=False, error_text="This level has no collision to find its ground from"))
+            lnes = sorted({n.source for n in lvl.nodes if n.kind == "line"})
+            target = next((f for f in lnes if any(n.source == f and "navpath" in n.name.lower()
+                                                  for n in lvl.nodes)), None)
+            target = target or next((f for f in (e.name for e in lvl.dave) if f.lower().endswith("_path.lnes")), None)
+            if not target:
+                return self._send(200, dict(ok=False, error_text="This level has no path file (lvl_<name>_path.lnes) "
+                                                                 "to write nav paths into"))
+            t0 = _time.time()
+            try:
+                spacing = max(1.0, min(20.0, float(body.get("spacing") or 10.0)))
+            except (TypeError, ValueError):
+                spacing = 10.0
+            lines = navgen.generate(tris, spacing=spacing)
+            if not lines:
+                return self._send(200, dict(ok=False, error_text="No walkable ground found in the collision"))
+            text = lvl._read(target).decode("latin-1")
+            new, removed, added = navgen.rewrite_paths(text, lines, replace=bool(body.get("replace", True)))
+            grp = s.journal.new_group()
+            s.write(arc, target, new.encode("latin-1"), "generate AI nav paths", grp)
+            # the AI's graph (lvl_<x>_nav.rsc, NTG0) is the path file compiled: made again with it, the Xbox copy too
+            # when the level has one. A graph kept from the template froze the game as the AI started (2026-11-18)
+            nav_name = re.sub(r"_path\.lnes$", "_nav.rsc", target, flags=re.I)
+            try:
+                nav = navgen.build_nav(new)
+                have = {e.name.lower() for e in lvl.dave}
+                folder = s._mods_folder_of(arc)
+                if folder:
+                    have |= {f.lower() for f in os.listdir(folder)}
+                if nav_name.lower() in have:
+                    s.write(arc, nav_name, nav, "generate AI nav paths", grp)
+                xname = nav_name[:-4] + ".xrsc"
+                if folder and xname.lower() in have:
+                    s.write(arc, xname, navgen.xbox_nav(nav), "generate AI nav paths", grp)
+            except Exception as ex:                         # noqa: BLE001
+                s.note("%s: the AI nav graph was not made again (%s); the build makes it" % (arc, ex))
+            pts = sum(len(x) for x in lines)
+            s.note("%s: %d AI nav paths generated (%d points) in %s" % (arc, added, pts, target))
+            return self._send(200, dict(ok=True, file=target, added=added, removed=removed, points=pts,
+                                        spacing=round(getattr(navgen.generate, "spacing_used", spacing), 1),
+                                        seconds=round(_time.time() - t0, 1)))
+
+        if route == "mp_sync":
+            # the "Edit both Multiplayer level variants" box (web: Collision editor panel)
+            if "on" in body:
+                s.sync_mp = bool(body["on"])
+            arc = body.get("archive") or ""
+            pm = s._mp_partner(arc, "x") if arc else None
+            return self._send(200, dict(ok=True, on=s.sync_mp, partner=pm[0] if pm else None))
+
+        if route == "event_edit":
+            # A light glow, camera shot, AI spawn point or door added or removed (eventedit.py): a text edit of
+            # its own file, through Studio.write (Ctrl+Z; a mods folder level's own folder).
+            from . import eventedit as EE
+            arc = body["archive"]
+            lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+            kind, op = body.get("kind"), body.get("op")
+            src = body.get("source")
+            if not src:
+                ext = EE.KIND_EXT.get(kind, "")
+                have = [e.name for e in lvl.dave if e.name.lower().endswith(ext)] if ext else []
+                if not have:
+                    return self._send(200, dict(ok=False, error_text="This level has no %s file to add a %s to"
+                                                % (ext or "?", kind)))
+                src = have[0]
+            try:
+                text = lvl._read(src).decode("latin-1")
+                new, name = EE.edit(text, kind, op, index=body.get("index"), pos=body.get("pos"),
+                                    group=body.get("group"), heading=float(body.get("heading") or 0.0))
+                s.write(arc, src, new.encode("latin-1"), "%s %s" % ("add" if op == "add" else "delete", kind),
+                        s.journal.new_group())
+            except (EE.EventError, KeyError, ValueError, TypeError) as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            s.note("%s: %s %s in %s" % (arc, op, kind, src))
+            return self._send(200, dict(ok=True, source=src, name=name))
+
+        if route == "node_add":
+            # A new volume, spline, player spawn or enemy where the user clicked: a copy of one of this level's
+            # own of that kind (and type), else of one from a level of the disc, moved there.
+            arc = body["archive"]
+            lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+            kind, token = body.get("kind"), (body.get("token") or "").lower()
+            pos = [float(v) for v in body["pos"]]
+            players = body.get("players")
+
+            def _pos(n):
+                return [float(c.value if hasattr(c, "value") else c) for c in n.pos]
+
+            def fits(n):
+                if n.kind != kind or getattr(n, "readonly", False):
+                    return False
+                if kind == "spawn":
+                    return players is None or int(n.props.get("players", 0)) == int(players)
+                return not token or token in n.name.lower()
+            try:
+                tpl = next((n for n in lvl.nodes if fits(n)), None)
+                if tpl is not None:
+                    tp = _pos(tpl)
+                    edits, new_name = lvl.duplicate(tpl.uid, [pos[i] - tp[i] for i in range(3)])
+                else:
+                    if kind == "spawn":
+                        return self._send(200, dict(applied=False, error="This level has no %s-player spawn "
+                                                    "section to add to" % players))
+                    ext = {"box": ".bxes", "line": ".lnes", "enemy": ".enm"}.get(kind)
+                    dest = lvl.roomiest(ext) if ext else None
+                    if not dest:
+                        return self._send(200, dict(applied=False, error="This level has no %s file for a new %s"
+                                                    % (ext, kind)))
+                    found = s.node_template(kind, token)
+                    if not found:
+                        return self._send(200, dict(applied=False, error="No %s%s on the disc to copy"
+                                                    % (kind, " of type " + token if token else "")))
+                    slvl, sn = found
+                    from . import scene as _scene
+                    sdata = slvl._read(sn.source)
+                    ddata = lvl._read(dest)
+                    sp = _pos(sn)
+                    e1, new_name = _scene.transplant_block(sdata, sn, ddata, [pos[i] - sp[i] for i in range(3)])
+                    edits = {dest: e1 + _scene.bump_count(ddata, dest, +1)}
+            except (KeyError, IndexError, ValueError) as ex:
+                return self._send(200, dict(applied=False, error=str(ex)))
+            result = lvl.apply(edits, writer=s.writer_for(arc, "create %s" % new_name))
+            result["new_name"] = new_name
+            if result.get("applied"):
+                s.note("%s: added %s" % (arc, new_name))
+            return self._send(200, result)
+
+        if route == "vertex_move":
+            # A spline's points moved (the level editor: select a spline, T, drag its points, Save points).
+            # Level.set_vertex per point, one undo step.
+            lvl = s.level(body["archive"], manifest=body.get("manifest"), area=body.get("area"))
+            try:
+                uid = int(body["uid"])
+                edits = []
+                for c in body["changes"]:
+                    one = lvl.set_vertex(uid, int(c["index"]), [float(v) for v in c["xyz"]])
+                    for _f, e in one.items():
+                        edits += e
+                n = lvl.by_uid(uid)
+            except (KeyError, IndexError, TypeError, ValueError) as ex:
+                return self._send(200, dict(applied=False, error=str(ex)))
+            result = lvl.apply({n.source: edits}, writer=s.writer_for(body["archive"], "reshape %s" % n.name))
+            if result.get("applied"):
+                s.note("%s: %s reshaped (%d point(s))" % (body["archive"], n.name, len(body["changes"])))
+            return self._send(200, result)
+
+        if route == "coll_edit":
+            # The collision creator (web: Collision creator panel): a new shell from game-space triangles, a
+            # shell's triangles replaced (faces deleted, corners dragged, moved), a shell removed, or the last of
+            # these undone -- on every bundle the level has, the mods folder's when it has one (collcreate.py).
+            from . import collcreate as CC
+            arc = body.get("archive") or ""
+            op = body.get("op")
+            try:
+                if op == "undo":
+                    if body.get("where") == "folder":
+                        if CC.undo_folder() is None:
+                            return self._send(200, dict(ok=False, error_text="Nothing to undo"))
+                    else:
+                        r = s.undo()
+                        if not r:
+                            return self._send(200, dict(ok=False, error_text="Nothing to undo"))
+                    s._drop_level(arc)
+                    return self._send(200, dict(ok=True, undone=True))
+                store = CC.folder_store(_data_editor_for(s), arc)
+                where = store.kind if store is not None else "disc"
+                if store is not None and s._mods_folder_of(arc):
+                    # a level only the mods folder has: through Studio.write, which writes it there and keeps it in
+                    # the journal -- Ctrl+Z takes a collision edit back like any other
+                    grp = s.journal.new_group()
+                    store.writer = lambda n, d, _g=grp: s.write(arc, n, d, "collision %s" % op, _g)
+                    where = "journal"
+                if store is None:
+                    lvl = s.level(arc, manifest=body.get("manifest"), area=body.get("area"))
+                    lvl._load_rsc()
+                    if not lvl.rsc_name:
+                        return self._send(200, dict(ok=False, error_text="This part of the level has no model "
+                                                    "bundle (.rsc) to hold collision: pick an area that draws "
+                                                    "geometry"))
+                    store = CC.DiscStore(s, arc, lvl, "collision %s" % op)
+                if op == "add":
+                    r = CC.add(store, body["verts"], body["faces"], body.get("name") or "custom",
+                               bool(body.get("solid", True)))
+                elif op == "replace":
+                    r = CC.replace(store, body.get("node"), body["verts"], body["faces"], body.get("chunk"))
+                elif op == "remove":
+                    r = CC.remove(store, body["node"])
+                else:
+                    return self._send(400, {"error": "op must be add, replace, remove or undo"})
+            except CC.CollError as ex:
+                return self._send(200, dict(ok=False, error_text=str(ex)))
+            except (KeyError, TypeError, ValueError) as ex:
+                return self._send(200, dict(ok=False, error_text="The collision could not be written: %s" % ex))
+            if where == "folder":
+                CC.remember(store)
+            s._drop_level(arc)
+            s.note("%s: collision %s %s (%s)" % (arc, op, r.get("name"), where))
+            return self._send(200, dict(ok=True, where=where,
+                                        platforms=[p for p in ("ps2", "xbox") if getattr(store, p, None)], **r))
 
         if route == "collision_add":
             # LEVEL: a NEW collision box anywhere (world AABB lo..hi), not tied
@@ -7731,7 +8418,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, dict(ok=True, launched=True))
 
         if route == "restore":
-            saved, n = s.restore(bool(body.get("clear_mods")))
+            saved, n = s.restore(bool(body.get("clear_mods")), body.get("save", True) is not False,
+                                 body.get("save_name") or None, body.get("include_new", True) is not False)
             return self._send(200, dict(ok=True, saved_mod=saved, cleared=n))
 
         if route == "boot":
@@ -7785,6 +8473,19 @@ def serve(studio, port=8731, open_browser=True, host="127.0.0.1"):
     finally:
         httpd.server_close()
         studio.close()
+
+
+class _LevelFiles:
+    """levelmeta's game interface (read, toc) over one Level's own archive -- a mods folder level's files."""
+
+    def __init__(self, lvl):
+        self.lvl = lvl
+
+    def read(self, archive, name):
+        return self.lvl._read(name)
+
+    def toc(self, archive):
+        return list(self.lvl.dave)
 
 
 class _FolderLevelGame:

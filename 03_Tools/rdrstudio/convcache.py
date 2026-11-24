@@ -23,6 +23,9 @@ def sha1(data):
     return hashlib.sha1(data).hexdigest()
 
 
+CONVERTER = 2  # 2: PS2 meshes made into Xbox strips (triangle lists were read as one strip: spikes), 2026-11-17
+
+
 class ConvCache:
     def __init__(self, workbench, direction):
         self.root = os.path.join(workbench, FOLDER)
@@ -39,7 +42,8 @@ class ConvCache:
 
     @staticmethod
     def key(name, data, context=''):
-        return '%s|%s|%s' % (name.lower(), sha1(data), context)
+        # CONVERTER: raised when a converter's output changes, so no earlier (wrong) conversion is reused
+        return '%s|%s|%s|c%d' % (name.lower(), sha1(data), context, CONVERTER)
 
     def get(self, key):
         """{output name: bytes} of an earlier conversion of this input, or None."""

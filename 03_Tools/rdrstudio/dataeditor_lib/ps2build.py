@@ -901,6 +901,116 @@ def strip_walkrun(folder, stem):
     return taken
 
 
+def blank_slate(folder, stem, pmt_chunks):
+    """New .dat "Blank slate": after strip_geometry, a level with nothing of the template's but its spawns (and its
+    lights, fog, sounds and shared files): a level bundle of the template's physics materials (PMT0) and one bound that
+    stops nothing, far under the level, in lvl_<x>_custom.bnds -- somewhere for the Studio's Collision editor and model
+    importer to add to -- and one box and one line kept of each box / line file (every level of the game lists some:
+    the Xbox crashed loading a level with none). -> notes."""
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in _sys.path:
+        _sys.path.insert(0, here)
+    from rdrformats import bnd_write, rscwrite
+    v = [(0.0, -1000.0, 0.0), (0.001, -1000.0, 0.0), (0.0, -1000.0, 0.001)]
+    pmt_num = 1
+    chunks = list(pmt_chunks)
+    if chunks:
+        names = [d[8:40].split(b'\0')[0].lower() for _t, d in chunks]
+        pmt_num = 1 + (names.index(b'default') if b'default' in names else 0)
+    chunks.append(('BND0', bnd_write.write(v, [([0, 2, 1], 0)], (pmt_num,))))
+    with open(os.path.join(folder, stem + '.rsc'), 'wb') as f:
+        f.write(rscwrite.write_bundle(chunks, 16))
+    flags = (('BoundFlagMover', 1), ('BoundFlagCamera', 1), ('BoundFlagTarget', 1), ('BoundFlagShoot', 1),
+             ('BoundFlagSneak', 1), ('BoundFlagEnemy', 1), ('BoundFlagHorse', 1), ('BoundFlagPlayer', 0),
+             ('BoundFlagDoor', 0), ('BoundFlagCamClip', 0), ('BoundFlagWater', 0), ('BoundFlagPlummet', 0))
+    n = len(chunks)
+    bnds = ['NumInstNodes 1 ', '', 'node bound_bound_grp_tttttttfffff_custom_01 {', '\tresourceIndex %d ' % n,
+            '\tresourceIndexXbox %d ' % n, '\tmatrix', '\t{', '\t\t1.000000 \t0.000000 \t0.000000 ',
+            '\t\t0.000000 \t1.000000 \t0.000000 ', '\t\t0.000000 \t0.000000 \t1.000000 ',
+            '\t\t0.000000 \t0.000000 \t0.000000 ', '\t}', '\tattributes 12 {']
+    bnds += ['\t\tBOOL\t%s\t%s' % (k, 'true' if on else 'false') for k, on in flags]
+    bnds += ['\t}', '}', '']
+    with open(os.path.join(folder, stem + '_custom.bnds'), 'w', newline='\r\n') as f:
+        f.write('\n'.join(bnds))
+    lvl = os.path.join(folder, stem + '.lvl')
+    if os.path.isfile(lvl):
+        text = open(lvl, 'rb').read().decode('latin-1')
+        text = re.sub(r'(?is)(^\s*Bounds\s*\{)(.*?)(\})', lambda m: m.group(1) + '\r\n%s_custom.bnds  \r\n' % stem
+                      + m.group(3), text, count=1, flags=re.M)
+        open(lvl, 'wb').write(text.encode('latin-1'))
+    kept = 0
+    for f in os.listdir(folder):
+        low = f.lower()
+        if not (low.startswith(stem + '_') or low.startswith(stem + '.')) or not low.endswith(('.bxes', '.lnes')):
+            continue
+        p = os.path.join(folder, f)
+        text = open(p, 'rb').read().decode('latin-1')
+        m = re.search(r'(?m)^[ 	]*(?:node|Box|Line)\s+\S+\s*\{', text)
+        if not m:
+            continue
+        depth, k = 0, m.end() - 1
+        while k < len(text):
+            if text[k] == '{':
+                depth += 1
+            elif text[k] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        key = 'NumBoxes' if low.endswith('.bxes') else 'NumLineNodes'
+        head = re.search(key + r'[ \t]+\d+[^\r\n]*', text)
+        out = (key + ' 1 ') + '\r\n\r\n' + text[m.start():k + 1] + '\r\n'
+        if head is None:
+            out = text[m.start():k + 1] + '\r\n'
+        open(p, 'wb').write(out.encode('latin-1'))
+        kept += 1
+    return ['blank slate: an empty level bundle and collision file, one box / line kept in %d file(s)' % kept]
+
+
+def strip_geometry(folder, stem, blank=False):
+    """A New .dat level without its template's place (New .dat: "Leave out its geometry, zones and collision", on by
+    default): its level bundle (lvl_<x>.rsc / .xrsc), zone files (.znes / .xznes), bound files (.bnds), boxes
+    (.bxes), lines (.lnes) and shadows taken out and the .lvl's Zones, Bounds, Lines and Boxes lists emptied, so a
+    level of your own (the Blender add-on's export) goes in their place with nothing of the template's left standing
+    in it. The spawns, AI spawn spots, duels, lights, fog, sounds and shared files stay. -> files taken out."""
+    gone = 0
+    pmt = []
+    if blank:
+        # the template's physics materials, for the blank bundle (its surfaces: default, wood, dirt ...)
+        import sys as _sys
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in _sys.path:
+            _sys.path.insert(0, here)
+        from rdrformats import rsc as _R
+        src = os.path.join(folder, stem + '.rsc')
+        if os.path.isfile(src):
+            pmt = [(c.tag, c.data) for c in _R.read_chunks(open(src, 'rb').read()) if c.tag == 'PMT0']
+    for f in os.listdir(folder):
+        low = f.lower()
+        if not re.match(re.escape(stem) + r'[_.]', low):
+            continue
+        # its geometry, zones and collision -- and the files shaped to the template's place: boxes (AI avoid / rooms,
+        # camera, shadow boxes), lines (paths, fire lines) and its shadows. Its spawns, AI spawn spots, duels, lights,
+        # fog, sounds, navigation and view bundles stay
+        if low in (stem + '.rsc', stem + '.xrsc') or low.endswith(('.znes', '.xznes', '.bnds')):
+            os.remove(os.path.join(folder, f))
+            gone += 1
+    lvl = os.path.join(folder, stem + '.lvl')
+    if os.path.isfile(lvl):
+        text = open(lvl, 'rb').read().decode('latin-1')
+        # its Lines and Boxes stay: every level of the game lists some (99 of 99, at least 2 and 3) and the Xbox
+        # crashed loading a level with none (2026-11-17) -- they are no collision
+        for section in ('Zones', 'Bounds'):
+            text = re.sub(r'(?is)(^\s*' + section + r'\s*\{)(.*?)(\})', lambda m: m.group(1) + '\r\n' + m.group(3),
+                          text, count=1, flags=re.M)
+        open(lvl, 'wb').write(text.encode('latin-1'))
+    if blank:
+        for n in blank_slate(folder, stem, pmt):
+            print('  ' + n)
+    return gone
+
+
 def new_level(a, iso, index, dats):
     """A new level as new archives in the mods folder, from the game's own:
         sng       lvls_sng/<name>.dat: the unused saloon.dat (or --template), its level lvl_saloon renamed lvl_<name>
@@ -937,6 +1047,9 @@ def new_level(a, iso, index, dats):
         files = os.listdir(src)
         n = _copy_renamed(src, dst, files, f'lvl_{tpl}', f'lvl_{name}')
         print(f'Made {target}: {len(files)} files from {tp}, {n} of them lvl_{tpl}\'s, now lvl_{name}\'s')
+        if getattr(a, 'no_geometry', False):
+            g = strip_geometry(dst, f'lvl_{name}', getattr(a, 'blank', False))
+            print(f'   its geometry, zones, collision, boxes and lines left out ({g} files): its spawns and the rest kept for your level')
         made.append(target)
     else:
         tpl = (a.template or 'ranch').lower().removeprefix('lvl_')
@@ -978,6 +1091,9 @@ def new_level(a, iso, index, dats):
             n = _copy_renamed(src, dst, own, f'lvl_{tpl}{pc}', f'lvl_{name}{pc}')
             print(f'Made {target}: {len(shared)} files every Showdown map shares, {n} level files from '
                   f'lvl_{tpl}{pc} renamed lvl_{name}{pc}, {len(extra)} more of {tpl}{pc}\'s (its effects and sounds)')
+            if getattr(a, 'no_geometry', False) and not story:
+                g = strip_geometry(dst, f'lvl_{name}{pc}', getattr(a, 'blank', False))
+                print(f'   its geometry, zones, collision, boxes and lines left out ({g} files): its spawns and the rest kept for your level')
             if story:
                 # the story level's place in place of the base map's: geometry, collision, paths, spawns, lights
                 stem = f'lvl_{name}{pc}'
@@ -1000,6 +1116,9 @@ def new_level(a, iso, index, dats):
                 print(f'   the place is lvl_{story}\'s ({k} files): spawns filled to 4 sets of 4'
                       + (f', {w} walk/run room(s) taken out' if w else '')
                       + (', High Noon duel spots added (round its own duel spot)' if duel else ''))
+                if getattr(a, 'no_geometry', False):
+                    g = strip_geometry(dst, stem, getattr(a, 'blank', False))
+                    print(f'   its geometry, zones, collision, boxes and lines left out ({g} files): its spawns and the rest kept for your level')
             made.append(target)
         # the Showdown menu, the unlock, the thumbnail
         title = (a.title or name.title()).replace(',', ' ')
@@ -1440,6 +1559,108 @@ def check_view_rooms(folder):
                             f'(box_AIROOM_...): the game crashes loading this level. Was an AI room box deleted in '
                             f'Blender? Put it back (Add from game: the level\'s .bxes).')
     return warnings
+
+
+def fit_sneak(files):
+    """An archive's files {name (lower case): bytes} with each level's .sneak counting the sneak boxes its .lvl's box
+    files have (box_AISNEAK_...): one value per box, "NumOfSneakBoxes 0" with none (Core's). Every shipped Showdown
+    level has the two equal; a New .dat level kept its template's 7 with its boxes deleted and the Xbox game crashed
+    (a null write, "write 1000000F6") right after reading it (2026-11-18). -> notes."""
+    notes = []
+    for low in list(files):
+        if not (low.startswith('lvl_') and low.endswith('.lvl')):
+            continue
+        stem = low[:-4]
+        sn = files.get(stem + '.sneak')
+        if sn is None:
+            continue
+        text = sn.decode('latin-1')
+        m = re.search(r'NumOfSneakBoxes\s+(\d+)', text)
+        if not m:
+            continue
+        have = int(m.group(1))
+        boxes = 0
+        for b in re.findall(r'(\S+\.bxes)', files[low].decode('latin-1')):
+            data = files.get(b.lower())
+            if data is not None:
+                boxes += len(re.findall(r'(?m)^Box\s+\S*AISNEAK', data.decode('latin-1')))
+        if boxes == have:
+            continue
+        vals = text[m.end():].split()
+        vals = (vals + ['1'] * boxes)[:boxes]
+        out = text[:m.start()] + 'NumOfSneakBoxes\t%d \n' % boxes + (' '.join(vals) + ' ' if vals else '')
+        files[stem + '.sneak'] = out.encode('latin-1')
+        notes.append('%s: its .sneak counted %d sneak boxes, the level has %d: made %d (the game crashes loading a '
+                     'level whose .sneak counts boxes it has not)' % (stem, have, boxes, boxes))
+    return notes
+
+
+def fit_level_counts(files):
+    """The counts other files keep of a level's boxes and paths made right (fit_sneak, pad_view_rooms, and the AI nav
+    graph from the path file: rdrstudio.navgen.fit_nav). -> notes."""
+    notes = fit_sneak(files) + pad_view_rooms(files)
+    try:
+        from rdrstudio import navgen as _ng
+    except ImportError:
+        try:
+            import navgen as _ng
+        except ImportError:
+            _ng = None
+    if _ng is not None:
+        notes += _ng.fit_nav(files)
+    return notes
+
+
+def pad_view_rooms(files):
+    """An archive's files {name (lower case): bytes} with each level's AI rooms made at least as many as its view
+    data's records: placeholder rooms (box_AIROOM_Low_placeholder_NN, half a metre, 1000 m under the map) added to
+    the last box file its .lvl lists. The Xbox game pairs view record i with AI room i and crashed (a null read,
+    "read 100000080") loading a level with fewer -- a New .dat level keeps one box of its template's 22, and a box
+    select delete takes the rest (2026-11-18). -> notes."""
+    notes = []
+    for low in list(files):
+        if not (low.startswith('lvl_') and low.endswith('.lvl')):
+            continue
+        stem = low[:-4]
+        view = files.get(stem + '_view.xrsc') or files.get(stem + '_view.rsc')
+        if not view:
+            continue
+        try:
+            _n, hs = struct.unpack_from('<II', view, 4)
+            records = struct.unpack_from('<I', view, hs)[0]
+        except struct.error:
+            continue
+        lvl = files[low].decode('latin-1')
+        listed = re.findall(r'(\S+\.bxes)', lvl)
+        rooms = 0
+        for b in listed:
+            data = files.get(b.lower())
+            if data is not None:
+                rooms += len(re.findall(r'(?m)^Box\s+\S*AIROOM_', data.decode('latin-1')))
+        if rooms >= records or not listed:
+            continue
+        target = listed[-1].lower()
+        text = files.get(target, b'NumBoxes 0 \r\n').decode('latin-1')
+        nl = '\r\n' if '\r\n' in text or not text.strip() else '\n'
+        add = []
+        for k in range(records - rooms):
+            add.append(nl.join(['Box box_AIROOM_Low_placeholder_%02d {' % (k + 1), '\twidth 0.500000',
+                                '\theight 0.500000', '\tdepth 0.500000', '\tmatrix', '\t{',
+                                '\t\t1.000000\t0.000000\t0.000000', '\t\t0.000000\t1.000000\t0.000000',
+                                '\t\t0.000000\t0.000000\t1.000000', '\t\t0.000000\t-1000.000000\t0.000000',
+                                '\t}', '\tattributes 0 {', '\t}', '}']))
+        m = re.search(r'NumBoxes\s+(\d+)', text)
+        have = int(m.group(1)) if m else 0
+        body = text.rstrip('\r\n \t') + nl + nl + (nl + nl).join(add) + nl
+        if m:
+            body = body[:m.start(1)] + str(have + len(add)) + body[m.end(1):]
+        else:
+            body = 'NumBoxes %d %s%s' % (len(add), nl, body)
+        files[target] = body.encode('latin-1')
+        notes.append('%s: its view data has %d AI-room records, its boxes %d AI rooms: %d placeholder room(s) added '
+                     '(1000 m under the map) so the Xbox game does not crash loading it' % (stem, records, rooms,
+                                                                                          len(add)))
+    return notes
 
 
 def png_to_tex(a):

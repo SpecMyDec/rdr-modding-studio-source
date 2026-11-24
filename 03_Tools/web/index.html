@@ -799,6 +799,7 @@
   #tab-dataeditor #deTable tr.sel{background:var(--selbg)}
   #tab-dataeditor .de-st.new, #tab-dataeditor .de-st.changed{color:var(--rust)}
   #tab-dataeditor .de-st.built{color:var(--grn)}
+  #tab-dataeditor .de-st.base{color:var(--mut, #8a8a8a);font-style:italic}
   #tab-dataeditor .de-st.removed, #tab-dataeditor .de-st.not-a-game-file{color:var(--warn)}
   #tab-dataeditor.de-busy #deFilesZone{opacity:.7}
   /* the RDR Data Editor app's layout, in the Studio's style */
@@ -1253,6 +1254,10 @@ try {
         <div class="pad" id="layers"
              style="flex:1 1 auto; min-height:130px; max-height:40%;
                     overflow:auto"></div>
+        <h2>Add to level</h2>
+        <div class="pad" id="addPanel" style="padding-top:5px"></div>
+        <h2>Collision editor</h2>
+        <div class="pad" id="collCreator" style="padding-top:5px"></div>
         <h2>View settings</h2>
         <div class="pad" id="viewSettings" style="padding-top:5px"></div>
         <h2>Game lighting</h2>
@@ -1319,8 +1324,8 @@ try {
           <div class="lbody">
             <div><kbd>RMB</kbd> hold + <kbd>WASD</kbd> fly · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> fast</div>
             <div class="muted">Fly mode (View settings): WASD, no button held</div>
-            <div><kbd>LMB</kbd> select · <kbd>Shift</kbd>+click add · <kbd>RMB</kbd> pan · wheel zoom</div>
-            <div><kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> frame</div>
+            <div><kbd>LMB</kbd> select · <kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click add · <kbd>B</kbd> box select · <kbd>RMB</kbd> pan · wheel zoom</div>
+            <div><kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>Shift+S</kbd> scale · <kbd>T</kbd> edit points · <kbd>F</kbd> frame</div>
             <div><kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate · <kbd>Del</kbd> delete</div>
             <div><kbd>←→↑↓</kbd> nudge 0.1 m · <kbd>Shift</kbd> 1 m</div>
             <div><kbd>PgUp</kbd>/<kbd>PgDn</kbd> up / down</div>
@@ -1382,9 +1387,10 @@ try {
           <!-- Filled from ASSET_AXES so the dock and the Assets tab can never
                offer different categories. -->
           <select id="assetDockCat" style="width:100%;margin-top:5px"></select>
+          <select id="assetDockLevel" style="width:100%;margin-top:5px" title="Only the assets one level has"></select>
           <label style="display:block;margin-top:5px;font-size:11px;color:var(--dim-ink)">
-            <input type="checkbox" id="assetDockHere" checked>
-            only ones this area can take
+            <input type="checkbox" id="assetDockHere">
+            only ones already in this area (the rest are copied in from their level)
           </label>
           <div class="scroll" id="assetDock" style="max-height:180px"></div>
         </div>
@@ -2421,6 +2427,7 @@ try {
           <button id="deModSave" data-write="1" title="Save the mods folder and the Workbench as this Mod">Save</button>
           <button id="deModSaveAs" data-write="1" title="Save the mods folder and the Workbench as a new Mod">Save As…</button>
           <button id="deModLoad" data-write="1" title="Open one of your saved Mods (the current files go to the Recycle Bin; you are asked to save them first)">Load…</button>
+          <button id="deModNew" data-write="1" title="Start a new Mod from scratch: your current files saved first, both games (PS2 and Xbox) put back to the base game, and an empty Mod of the name you give made the current one">New Mod…</button>
           <button id="deModDelete" data-write="1" class="ghost" title="Delete the saved Mod (to the Recycle Bin)">Delete</button>
           <button id="deModExport" title="The whole Mod (Master, each .dat folder, the Master settings and the Workbench) as one .rdrmod file to share">Export Mod…</button>
           <button id="deModImport" data-write="1" title="A .rdrmod file: its .dat folders into the mods folder, its Workbench into a new folder on the Workbench">Import Mod…</button>
@@ -2455,11 +2462,14 @@ try {
             <button id="deExportDat" data-write="1" title="The selected .dat in full (every file of the game's, with your mods' files in place) copied to the Workbench, in a folder named after it">Export .dat to Workbench</button>
             <button id="deExportZip" title="The selected .dat folder (your files for it) saved as a .zip in your exports folder, with a file inside saying which disc folder it belongs in (lvls_sng, lvls_m2, lvls_m4): Import .dat puts it back there by itself">Export .dat folder (.zip)</button>
             <button id="deNewDat" data-write="1" title="A new level as new archives: a Showdown map (lvls_m2 + lvls_m4, with its menu row, unlock and thumbnail) or a single player level">New .dat…</button>
+            <button id="deDeleteDat" data-write="1" title="Delete the selected .dat folder from the mods folder: a level made by New .dat goes whole (both halves, its menu row, thumbnail and unlock) and comes off the working disc if it was built">Delete .dat…</button>
             <button id="deImportBtn" data-write="1" title="Add a custom .dat (a built .dat file, or a folder of its files) to your mods: it becomes its .dat folder">Import .dat… ▾</button>
             <input id="deImportInput" type="file" accept=".dat" multiple style="display:none">
             <input id="deImportDirInput" type="file" webkitdirectory multiple style="display:none">
             <input id="deImportZipInput" type="file" accept=".zip" multiple style="display:none">
             <span style="flex:1"></span>
+            <label class="muted" style="display:flex;gap:5px;align-items:center;white-space:nowrap;cursor:pointer"
+                   title="Every file of the selected .dat, the game's own too (Base: as the game has it). Double-click a Base file to copy it into the mods folder to edit"><input type="checkbox" id="deShowAll">All files shown</label>
             <span id="deSummary" class="muted"></span>
           </div>
           <div id="deUpper" style="flex:1;display:flex;min-height:120px">

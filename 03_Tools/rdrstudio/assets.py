@@ -747,7 +747,36 @@ def source_instance(level, name, resource_index=None):
     return None
 
 
-def place(studio, index, archive, name, position, area=None, dry=False):
+def place_from_elsewhere(studio, archive, name, places, position, area=None, dry=False):
+    """Place a model that only other levels have (see place)."""
+    from . import modeladd as MA
+    from . import collcreate as CC
+    last = None
+    for p in sorted(places, key=lambda q: (q.get("kind") != "zone", q["archive"])):
+        try:
+            data = studio.vanilla.archive(p["archive"]).read(p["area"])
+            tris, mats, texs = MA.from_bundle_chunk(data, int(p["resourceIndex"]), xbox=False)
+        except (MA.ModelError, KeyError, ValueError, OSError) as ex:
+            last = ex
+            continue
+        if dry:
+            return dict(applied=False, dry=True, asset=name, copied_from=p["archive"], triangles=len(tris))
+        tris = MA.place(tris, [float(v) for v in (position or (0.0, 0.0, 0.0))])
+        try:
+            r = MA.add_to_level(studio, archive, tris, mats, texs, name, True, area=area, label="place " + name)
+        except (MA.ModelError, CC.CollError) as ex:
+            raise ValueError("%r could not be added to this level: %s" % (name, ex))
+        fresh = studio.level(archive, reload=True, area=area)
+        placed = next((n for n in fresh.nodes if n.name == r["name"]), None)
+        return dict(applied=True, asset=name, new_name=r["name"], copied_from="%s %s" % (p["archive"], p["area"]),
+                    uid=getattr(placed, "uid", None), position=list(position) if position else None,
+                    triangles=r["triangles"], textures=r["textures"], collision=r["collision"], new_model=True,
+                    target_file=", ".join(r.get("zone_files") or []),
+                    note="copied in from %s with its textures (a new model in this level)" % p["archive"])
+    raise ValueError("%r could not be read from the levels that have it (%s)" % (name, last))
+
+
+def place(studio, index, archive, name, position, area=None, dry=False, source=None):
     """Instance an asset into a level at a world position.
 
     Works by copying an existing instance's block in its `.znes` file and
@@ -758,14 +787,22 @@ def place(studio, index, archive, name, position, area=None, dry=False):
     where = index.placements_for(name, archive, area)
     if not where["found"]:
         raise ValueError("no asset named %r on the disc" % name)
+    if source:
+        # a particular map's copy (the Library's map list: each map's model and textures can differ) -- 2026-11-18
+        rec = index.asset(name) or {}
+        pick = next((p for p in rec.get("places", []) if p["archive"] == source.get("archive")
+                     and (p["area"] or None) == (source.get("area") or None)
+                     and int(p["resourceIndex"]) == int(source.get("resourceIndex", -1))), None)
+        if pick is None:
+            raise ValueError("%r is not in %s any more" % (name, source.get("archive")))
+        if pick["archive"] != archive or (area and pick["area"] != area):
+            return place_from_elsewhere(studio, archive, name, [pick], position, area, dry)
+        where = dict(where, here=pick, placeable=True)
     if not where["placeable"]:
-        others = sorted({"%s [%s]" % (p["archive"].rsplit("/", 1)[-1],
-                                      p["area_name"] or "-")
-                         for p in where["elsewhere"]})
-        raise ValueError(
-            "%r is not in this area's own RSC bundle, and adding a model to a "
-            "bundle is not solved yet. Maps that can take it: %s"
-            % (name, ", ".join(others[:8]) or "none"))
+        # A model of another level: copied in from that level's bundle (the unedited disc's) with the textures it
+        # draws with, written into this level's bundles (modeladd: every bundle the level has, PS2 and Xbox) with a
+        # zone node and collision from its own triangles (2026-11-18; it used to stop here, "not solved yet").
+        return place_from_elsewhere(studio, archive, name, where["elsewhere"], position, area, dry)
 
     level = studio.level(archive, area=area)
     node = source_instance(level, name, where["here"]["resourceIndex"])

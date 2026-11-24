@@ -25,8 +25,9 @@ PAD = 0.30          # metres a collision piece may poke outside the model box
 def base_stem(name):
     """`zone_saloonWallsLow_2p_01` and `zone_saloonWallsLow_01` -> same key."""
     s = re.sub(r'^(zone|bound)_', '', str(name or ""), flags=re.I)
-    s = re.sub(r'(_\d+)+$', '', s)
-    s = re.sub(r'_2p$', '', s, flags=re.I)
+    # only the second-pass mark comes out: the copy number stays. With it dropped every copy of a placed model
+    # (zone_ground_01, zone_ground_02 ...) was "the same object" and moving one moved them all (2026-11-18)
+    s = re.sub(r'_2p(?=(_\d+)*$)', '', s, flags=re.I)
     return s.lower()
 
 

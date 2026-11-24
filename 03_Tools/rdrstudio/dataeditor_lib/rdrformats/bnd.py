@@ -48,6 +48,8 @@ def read(d: bytes) -> Bound:
         nx, ny, nz = struct.unpack_from('<3f', d, o)
         area_bits = struct.unpack_from('<I', d, o + 12)[0]
         corners = [c for c in struct.unpack_from('<8H', d, o + 16) if c != 0xFFFF]
+        if len(corners) == 4 and corners[3] == 0:
+            corners = corners[:3]               # a triangle: the shipped faces repeat corner 0 in the fourth slot
         b.faces.append((corners, area_bits & 0xFF))
         b.normals.append((nx, ny, nz))
         b.areas.append(struct.unpack('<f', struct.pack('<I', area_bits & ~0xFF))[0])

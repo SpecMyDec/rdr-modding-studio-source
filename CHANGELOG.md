@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.2.0 -- 2026-11-24
+
+### Level editor
+- **Collision editor**: add shapes (box, ramp, wall ... or draw your own outline: Shift+click points, Ctrl+click to join), edit a shell's corners (any number of points) or its faces (select, move, turn, scale, delete), remove a shell; box select (B) and Ctrl+click to edit several at once; G / R / Shift+S / T keys and a mode box; Ctrl+Z for every collision edit. Collision is written for both games (the PS2 .rsc and the Xbox .xrsc, each at its own chunk numbers).
+- **Auto-generate collision** from the level's models at any time -- it skips models that have collision already.
+- **Import models** into a level: .obj, .glb, .rsc, .xrsc, .mod, .xmod -- with their textures, and collision made from them.
+- **Library**: every asset listed before searching; a level filter; "N maps" lists every map an asset is in, each copy placed by its own button ("Place this") and previewed in the Inspector on hover (each map's model and textures can differ). Models from other levels are copied into the level with their textures.
+- **Placed models move, turn and scale with their collision**: the collision is rebuilt from the model as it now stands, as the Blender add-on builds level collision (corners welded, cut into pieces of at most 2,500 faces) -- checked in game. Copies of a model are separate objects (moving one moved them all).
+- **Delete** a selection in one step (one Ctrl+Z); a model with its own collision asks whether its collision goes too; a deleted model's chunk is emptied so it is not left drawn. The last spawn point of each player count is kept (the game needs one).
+- **AI nav paths generated** over the walkable ground (lines meeting at their ends, as the game's own), and the level's **AI nav graph** (lvl_<name>_nav.rsc) made again with them -- a level kept its template's graph and froze the moment the AI started. Every build also checks the graph against the paths.
+- Objects list: **Shift+click selects a range**, Ctrl+click adds or takes away one. **Number pad Del/.** frames the selection (it never deletes).
+- Flying: G / R / Shift+S / T do nothing while a mouse button is held, while you fly, or on key repeat; Shift+S on its own switches to Scale without moving the camera, and keys held when a button goes down start flying at once.
+- "Edit both Multiplayer level variants": an edit to one half of a Showdown map is made to the other when the two are the same.
+
+### New levels
+- **New .dat: Blank template** (no mesh, no collision, its spawns to start) or the whole map; the level gets its Xbox bundle (lvl_<name>.xrsc) beside the PS2 one, and the editor keeps both -- the PS2 build packs the .rsc, the Xbox build the .xrsc.
+- **"+ New level…"** above the level list; levels kept in the mods folder open and edit in the 3D editor like the game's own.
+- **Data Editor: Delete .dat…** -- a level made by New .dat goes whole (both halves, its menu row, thumbnail and unlock) and comes off the working disc if it was built.
+
+### Xbox
+- Crashes loading a new level on the Xbox fixed: zone numbers written as 0, AI-room records with no room (placeholder rooms added in the build), a sneak-box count with no boxes (made to match in the build), and the nav graph above.
+- **Xbox saves in the save editor**: the recomp's swat.sav (hdd\E\UDATA\5454001a\...) opened and edited like a PS2 card, and signed again on writing (the game skips a save whose signature does not match) -- checked in game.
+- Xbox set-up asks for a backup of the game files at once, and can use a backup you have already.
+
+### Data Editor and saving your work
+- **New Mod…**: start a mod from scratch under a name -- your current files saved first, both games put back to the base game, an empty Saved Mod made the current one.
+- **Reset to stock** asks what happens to your mod: kept and built again, or saved first under a name of your own (with or without the new .dat files), or not saved. Saved Mods are listed newest first, with the levels each holds.
+- Undo is all-or-nothing, refuses rather than put back a file changed outside the Studio, and survives the disc being reopened (the step counter and the files' earlier copies were lost there).
+
+### Also in 2.2.0 (worked on since 2.1.0)
+
+- The Xbox build gives a new level whose .lvl lists no lines or boxes its base map's (the Xbox crashed loading a level with none).
+- Collision written by the Studio stores triangles as the game does (four corners, the fourth repeating corner 0 -- an unused fourth slot was read as a corner past the end of the points) and concave four-corner faces as two triangles.
+- **New levels imported for the Xbox only show in the 3D level editor**: a .dat folder with lvl_<name>.xrsc and no .rsc is listed and shown from a PS2 copy made in the cache (the mods folder is left as it is). With Game: Xbox picked, a level that has both bundles is shown from its .xrsc (the full Xbox level); switching games reloads the open levels.
+- **Xbox: a level exported for both games is the mod's own on the Xbox** (it crashed loading, "datResourceHeader::Translate - Expected BND0"): an old "made by the Studio" stamp on the level's .rsc had the Xbox build convert the PS2 level over the mod's .xrsc; a stamp older than the Xbox file no longer counts. A bound file packed for the Xbox gets the chunk numbers that name collision in the level bundle that goes with it.
+- **Nothing is converted on the way in**: Xbox and PS2 files dropped into the Data Editor (files, folders, .zip, .dat, from the Workbench) are kept exactly as given, each for its own game, with no conversion window and no alert. The PS2 build makes a PS2 copy of an Xbox file only where the mod has no PS2 file of its own (the background conversion on every page refresh is gone).
+- **A level's .rsc and .xrsc dropped in are both kept**, each for its own game: dropping an Xbox level folder no longer swaps its .xrsc for a PS2 copy (it never reached the folder, and the Xbox build converted the PS2 .rsc instead). An Xbox file gets a PS2 copy only where the mod has no PS2 file of its own.
+- **PS2 levels converted for the Xbox no longer spike**: the meshes (triangle lists) were written as one strip, joining corners of different triangles. A brand-new level (no level of the game is its base) is converted chunk by chunk instead of as an edit of a stock level. Earlier conversions are not reused; the Xbox build rebuilds the modded archives once.
+- PS2 level meshes converted from the Xbox: a triangle whose texture repeats past the PS2's range (-8 to 8) is moved by whole repeats into it instead of being clamped (smeared textures). New level collision is written with bigger octree leaves (about half the bytes).
+- Data Editor: **All files shown** (beside the summary) lists every file of the selected .dat, the game's own too, with the status **Base**; double-click a Base file to copy it into the mods folder to edit.
+- The Xbox build used a stale "made by the Studio" stamp on a level's .rsc and converted it again over the mod's own .xrsc; a stamp now counts only while the file is the very one the Studio wrote, and an .xrsc as new as its .rsc is always used.
+- **A level's own .rsc and .xrsc are both kept** (the Blender add-on's export for both games): neither is made from the other -- the PS2 build uses the .rsc, the Xbox build the .xrsc. The Xbox build no longer converts a new level archive that brings its own .xrsc (it remade the level from Ranch's and wrote over the mod's bundle: broken geometry), and nothing it converts replaces a file the mod gives for the Xbox.
+- Build is greyed out when there is nothing new to build for the game picked (its own build record; for the Xbox also the working disc's edits since its last build).
+- Reset to stock: "Keep my mod and build it again into the reset game" (on by default) -- the game's own files come back and the mod is rebuilt into them; unticked, the mod files are kept as a Saved Mod and taken out, as before. The Xbox reset forgets its build record, so everything is built again.
+- A Blender level export inside a level .dat is found at any depth (an export for both games: its PS2 and Xbox folders).
+- The Data Editor's statuses (Built / changed / new) follow the Game picker at once: each game's own (switching to Xbox kept showing the PS2 build's "Built").
+- Reset to stock: **Both** (PS2 and Xbox, each rebuilt after). The levels list no longer shows the new level archives the Studio's own Xbox build wrote as custom Xbox levels (they stayed listed after a PS2 reset).
+- A level export in a folder of any name (renamed lvl_mantomb2 with lvl_manstomb2's files in it) is found too: the level is the bundle's inside.
+- **Build (Xbox) makes new level archives whole**: a .dat folder's subfolders' files go at the archive's top (as on the PS2), and a new level archive gets the Xbox game's own base files (a Showdown half: what every Xbox Showdown map of its player count shares and Ranch's others; a single player level: the saloon's), renamed, its own files kept. It had only the export's files, in their folder, and the game stopped: "lvl_<name>.lvl doesn't exist".
+- **A Blender level export put into a level .dat under another name is that .dat's level**: its folder pasted in (mantomb2.dat/lvl_manstomb2/...) or its files loose, the files are renamed to the .dat's level name (inside the text files too) over the base's, at import and before every Build. Pasted as it was, the export was never loaded and the map stayed Ranch.
+- **Reset to stock rebuilds by itself** (PS2 or Xbox), so the Studio's own changes (Script Hooks ...) are back in the reset game.
+- Fixed: Build (Xbox) stopped with 'lvls_m2/colseum2.dat' when the mod has files for an archive only the Xbox game has (Coliseum).
+- **Importing a new level completes its .dat** (a Blender add-on export, or any .dat folder the disc has not with its lvl_<name>.rsc): a Showdown half gets the files every stock Showdown map of its player count shares, Ranch's other files and any of Ranch's level files the export did not make (renamed, its geometry, zones and collision left out), and with both halves in the map's menu row, unlock and thumbnail; a single player level gets everything saloon.dat has (the unused, bare level), renamed. The level's own files are never replaced, the sound setup is renamed with it (snd_cfg_<level>.csv), and the finished .dat folder is copied to the Workbench (Levels) to share. A folder named lvl_<name> (the add-on's) imports as <name>.dat.
+
 ## 2.1.0 -- 2026-11-17
 
 - **Build (Xbox) builds into the Xbox game's own files**, as the PS2 build builds the working disc: each changed archive of the recomp's game files (assets) is rebuilt from its unedited copy ("unedited assets", backed up the first time) with the mod's files in it, laid out as the game's own (each file stored or compressed as the original's -- the Flash screens are read as stored, no file across a sector). An archive no longer edited goes back to its unedited copy; Reset to stock (Xbox) puts them all back.
